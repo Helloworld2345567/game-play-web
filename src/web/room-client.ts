@@ -6,6 +6,7 @@ import {
   type RoomSnapshot,
   type ServerError,
 } from "../shared/protocol";
+import { getGameAdapter } from "./games/registry";
 
 export type ConnectionPhase =
   | "connecting"
@@ -57,7 +58,10 @@ function parseServerMessage(value: unknown): RoomSnapshot | ServerError | null {
   return null;
 }
 
-function humanizeError(code: string): string {
+function humanizeError(
+  code: string,
+  snapshot: RoomSnapshot | null,
+): string {
   const messages: Record<string, string> = {
     "room.full": "房间已有两位玩家。",
     "room.expired": "房间不存在或已经过期。",
@@ -67,16 +71,18 @@ function humanizeError(code: string): string {
     "room.game_finished": "本局已经结束。",
     "room.game_in_progress": "对局结束后才能准备复赛。",
     "room.rule_mismatch": "客户端与房间规则版本不一致，请刷新页面。",
-    "gomoku.not_your_turn": "还没轮到你。",
-    "gomoku.occupied": "这个交叉点已经有棋子。",
-    "gomoku.out_of_bounds": "落点超出棋盘。",
-    "gomoku.game_finished": "本局已经结束。",
-    "gomoku.invalid_action": "无法识别这次落子。",
     "protocol.invalid_message": "消息格式无效，请刷新后重试。",
     "protocol.message_too_large": "消息过大。",
     "protocol.rate_limited": "操作太快，请稍后再试。",
   };
-  return messages[code] ?? "操作未完成，请重试。";
+  const platformMessage = messages[code];
+  if (platformMessage !== undefined) return platformMessage;
+  if (snapshot !== null) {
+    const adapter = getGameAdapter(snapshot.gameType, snapshot.ruleSetId);
+    const gameMessage = adapter?.getErrorMessage(code);
+    if (gameMessage) return gameMessage;
+  }
+  return "操作未完成，请重试。";
 }
 
 export async function ensureBrowserSession(): Promise<void> {
@@ -130,15 +136,6 @@ export function useRoom(roomId: string): RoomClientView {
     const applySnapshot = (next: RoomSnapshot) => {
       const current = snapshotRef.current;
       if (current !== null && next.revision < current.revision) return;
-      if (
-        next.gameType !== "gomoku" ||
-        next.ruleSetId !== "gomoku.freestyle15.v1"
-      ) {
-        terminal = true;
-        setFatalCode("protocol.version_mismatch");
-        setPhase("fatal");
-        return;
-      }
       snapshotRef.current = next;
       setSnapshot(next);
       if (
@@ -229,7 +226,12 @@ export function useRoom(roomId: string): RoomClientView {
         pendingRevisionRef.current = null;
         setPending(false);
         if (message.snapshot) applySnapshot(message.snapshot);
-        setNotice(humanizeError(message.code));
+        setNotice(
+          humanizeError(
+            message.code,
+            message.snapshot ?? snapshotRef.current,
+          ),
+        );
         if (fatalCodes.has(message.code)) {
           terminal = true;
           setFatalCode(message.code);
@@ -353,4 +355,3 @@ export function useRoom(roomId: string): RoomClientView {
     retryNow: () => retryRef.current(),
   };
 }
-

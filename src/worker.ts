@@ -7,6 +7,7 @@ export { GameRoom };
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
+const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
 const creationBuckets = new Map<
   string,
   { tokens: number; lastRefillAt: number }
@@ -24,8 +25,16 @@ function json(
   return Response.json(value, { ...init, headers });
 }
 
-function sameOrigin(request: Request): boolean {
-  return request.headers.get("Origin") === new URL(request.url).origin;
+function trustedOrigin(request: Request): boolean {
+  const requestUrl = new URL(request.url);
+  const origin = request.headers.get("Origin");
+  if (origin === null || origin !== requestUrl.origin) return false;
+  if (PRODUCTION_ORIGINS.has(origin)) return true;
+  return (
+    (requestUrl.hostname === "localhost" ||
+      requestUrl.hostname === "127.0.0.1") &&
+    (requestUrl.protocol === "http:" || requestUrl.protocol === "https:")
+  );
 }
 
 function randomRoomId(): string {
@@ -38,21 +47,41 @@ function randomRoomId(): string {
     .replace(/=+$/u, "");
 }
 
-function allowRoomCreation(guestId: string): boolean {
+function allowRoomCreation(request: Request, guestId: string): boolean {
   const now = Date.now();
-  const current = creationBuckets.get(guestId) ?? {
-    tokens: 5,
-    lastRefillAt: now,
-  };
-  const tokens = Math.min(
-    5,
-    current.tokens + ((now - current.lastRefillAt) / 60_000) * 5,
-  );
-  if (tokens < 1) {
-    creationBuckets.set(guestId, { tokens, lastRefillAt: now });
+  const connectingIp = request.headers.get("CF-Connecting-IP")?.trim();
+  const keys = [
+    `guest:${guestId}`,
+    ...(connectingIp && connectingIp.length <= 64 ? [`ip:${connectingIp}`] : []),
+  ];
+  const buckets = keys.map((key) => {
+    const current = creationBuckets.get(key) ?? {
+      tokens: 5,
+      lastRefillAt: now,
+    };
+    return {
+      key,
+      tokens: Math.min(
+        5,
+        current.tokens + ((now - current.lastRefillAt) / 60_000) * 5,
+      ),
+    };
+  });
+  if (buckets.some((bucket) => bucket.tokens < 1)) {
+    for (const bucket of buckets) {
+      creationBuckets.set(bucket.key, {
+        tokens: bucket.tokens,
+        lastRefillAt: now,
+      });
+    }
     return false;
   }
-  creationBuckets.set(guestId, { tokens: tokens - 1, lastRefillAt: now });
+  for (const bucket of buckets) {
+    creationBuckets.set(bucket.key, {
+      tokens: bucket.tokens - 1,
+      lastRefillAt: now,
+    });
+  }
   if (creationBuckets.size > 1_000) creationBuckets.clear();
   return true;
 }
@@ -74,7 +103,7 @@ async function createRoom(
   env: WorkerEnv,
   guestId: string,
 ): Promise<Response> {
-  if (!allowRoomCreation(guestId)) {
+  if (!allowRoomCreation(request, guestId)) {
     return json({ error: "room.rate_limited" }, { status: 429 });
   }
   const value = await readSmallJson(request);
@@ -145,7 +174,7 @@ export default {
     if (!url.pathname.startsWith("/api")) {
       return new Response("Not found", { status: 404 });
     }
-    if (!sameOrigin(request)) {
+    if (!trustedOrigin(request)) {
       return json({ error: "request.bad_origin" }, { status: 403 });
     }
     if (!env.SESSION_SECRET) {
@@ -176,4 +205,3 @@ export default {
     return json({ error: "request.not_found" }, { status: 404 });
   },
 } satisfies ExportedHandler<WorkerEnv>;
-

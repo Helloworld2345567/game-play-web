@@ -82,7 +82,21 @@ export function joinRoom(
   now: number,
 ): RoomDecision {
   if (seatForGuest(room, guestId) !== null) {
-    return { ok: true, room, changed: false };
+    const ttl =
+      room.position === null
+        ? WAITING_ROOM_TTL_MS
+        : room.position.outcome === null
+          ? ACTIVE_ROOM_TTL_MS
+          : FINISHED_ROOM_TTL_MS;
+    return {
+      ok: true,
+      room: {
+        ...room,
+        updatedAt: now,
+        expiresAt: now + ttl,
+      },
+      changed: true,
+    };
   }
   if (room.seats[SEAT_B] !== null) {
     return { ok: false, room, code: "room.full" };

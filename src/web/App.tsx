@@ -1,7 +1,11 @@
-import { useMemo, useState } from "preact/hooks";
-import { readGomokuPosition } from "../games/gomoku/rules";
+import { useState } from "preact/hooks";
 import type { RoomSnapshot } from "../shared/protocol";
-import { GameRenderer } from "./games/registry";
+import {
+  GameRenderer,
+  getGameAdapter,
+  UnsupportedGame,
+  unknownSeatPresentations,
+} from "./games/registry";
 import { ensureBrowserSession, useRoom, type ConnectionPhase } from "./room-client";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
@@ -112,6 +116,16 @@ function mainStatus(snapshot: RoomSnapshot | null, phase: ConnectionPhase): stri
 function RoomPage({ roomId }: { roomId: string }) {
   const client = useRoom(roomId);
   const snapshot = client.snapshot;
+  const adapter =
+    snapshot === null
+      ? null
+      : getGameAdapter(snapshot.gameType, snapshot.ruleSetId);
+  const unsupportedGame = snapshot !== null && adapter === null;
+  const seatPresentations =
+    adapter?.getSeatPresentations(snapshot?.position ?? null) ??
+    unknownSeatPresentations;
+  const gameName =
+    adapter?.displayName ?? (snapshot === null ? "自由五子棋" : "未知棋类");
   const [shareNotice, setShareNotice] = useState<string | null>(null);
   const bothOccupied =
     snapshot?.seats["seat-a"]?.occupied === true &&
@@ -120,6 +134,7 @@ function RoomPage({ roomId }: { roomId: string }) {
   const canPlace =
     client.phase === "online" &&
     !client.pending &&
+    adapter !== null &&
     bothOccupied &&
     snapshot?.position?.turn === snapshot.selfSeat &&
     outcome === null;
@@ -128,21 +143,10 @@ function RoomPage({ roomId }: { roomId: string }) {
     snapshot?.selfSeat !== undefined &&
     snapshot.seats[snapshot.selfSeat]?.rematchReady === true;
 
-  const sideLabels = useMemo(() => {
-    if (snapshot?.position === null || snapshot?.position === undefined) {
-      return { "seat-a": "黑方", "seat-b": "白方" };
-    }
-    const data = readGomokuPosition(snapshot.position);
-    return {
-      "seat-a": data.blackSeat === "seat-a" ? "黑方" : "白方",
-      "seat-b": data.blackSeat === "seat-b" ? "黑方" : "白方",
-    };
-  }, [snapshot?.position]);
-
   const share = async () => {
     const shareData = {
-      title: "来和我下一局五子棋",
-      text: "打开链接加入我的 ym0v0 五子棋房间",
+      title: `来和我下一局${gameName}`,
+      text: `打开链接加入我的 ym0v0 ${gameName}房间`,
       url: location.href,
     };
     try {
@@ -184,19 +188,27 @@ function RoomPage({ roomId }: { roomId: string }) {
 
       <section class="game-layout">
         <header class="game-heading">
-          <p class="eyebrow">第 {snapshot?.round ?? 1} 局 · 自由五子棋</p>
-          <h1>{mainStatus(snapshot, client.phase)}</h1>
+          <p class="eyebrow">第 {snapshot?.round ?? 1} 局 · {gameName}</p>
+          <h1>
+            {unsupportedGame
+              ? "暂不支持这个规则版本"
+              : mainStatus(snapshot, client.phase)}
+          </h1>
         </header>
 
         <div class="seat-strip">
           {(["seat-a", "seat-b"] as const).map((seatId) => {
             const seat = snapshot?.seats[seatId];
             const isSelf = snapshot?.selfSeat === seatId;
+            const presentation = seatPresentations[seatId];
             return (
               <div class={`seat-card ${isSelf ? "is-self" : ""}`}>
-                <span class={`stone-swatch ${sideLabels[seatId] === "黑方" ? "black" : "white"}`} />
+                <span
+                  class={`stone-swatch ${presentation.swatchClassName}`}
+                  aria-hidden="true"
+                />
                 <span>
-                  <strong>{sideLabels[seatId]}{isSelf ? " · 你" : ""}</strong>
+                  <strong>{presentation.label}{isSelf ? " · 你" : ""}</strong>
                   <small>
                     {!seat?.occupied ? "等待加入" : seat.online ? "在线" : "暂时离线"}
                     {seat?.rematchReady ? " · 已准备" : ""}
@@ -207,9 +219,15 @@ function RoomPage({ roomId }: { roomId: string }) {
           })}
         </div>
 
-        {snapshot?.position ? (
+        {unsupportedGame ? (
+          <UnsupportedGame
+            gameType={snapshot.gameType}
+            ruleSetId={snapshot.ruleSetId}
+          />
+        ) : snapshot?.position ? (
           <GameRenderer
             gameType={snapshot.gameType}
+            ruleSetId={snapshot.ruleSetId}
             position={snapshot.position}
             selfSeat={snapshot.selfSeat}
             disabled={!canPlace}
@@ -233,7 +251,7 @@ function RoomPage({ roomId }: { roomId: string }) {
           <button class="secondary-button" onClick={share}>
             {bothOccupied ? "分享房间" : "邀请好友"}
           </button>
-          {snapshot?.position && outcome === null && bothOccupied && (
+          {adapter && snapshot?.position && outcome === null && bothOccupied && (
             <button
               class="danger-button"
               disabled={client.pending || client.phase !== "online"}
@@ -244,7 +262,7 @@ function RoomPage({ roomId }: { roomId: string }) {
               认输
             </button>
           )}
-          {outcome && (
+          {adapter && outcome && (
             <button
               class="primary-button"
               disabled={client.pending || client.phase !== "online"}

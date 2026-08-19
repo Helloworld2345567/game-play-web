@@ -322,6 +322,11 @@ button:disabled {
   background: radial-gradient(circle at 35% 30%, #fff, #d8d1c4 72%);
 }
 
+.stone-swatch.neutral {
+  border: 1px solid #777064;
+  background: #514b43;
+}
+
 .board-shell,
 .board-placeholder {
   width: 100%;
@@ -346,6 +351,13 @@ button:disabled {
 
 .gomoku-board.is-interactive {
   cursor: crosshair;
+}
+
+.board-last-move {
+  margin: 10px 4px 0;
+  color: #a9a195;
+  font-size: 0.84rem;
+  line-height: 1.5;
 }
 
 .board-placeholder {
@@ -416,6 +428,35 @@ button:disabled {
   color: #f0a39c;
 }
 
+.unsupported-game {
+  padding: 24px;
+  border: 1px solid rgba(217, 102, 94, 0.42);
+  border-radius: 20px;
+  color: #f0a39c;
+  background: rgba(70, 35, 32, 0.45);
+}
+
+.unsupported-game strong,
+.unsupported-game span,
+.unsupported-game small {
+  display: block;
+}
+
+.unsupported-game span,
+.unsupported-game small {
+  margin-top: 8px;
+}
+
+.unsupported-game span {
+  overflow-wrap: anywhere;
+  color: #d6b0ab;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.unsupported-game small {
+  color: #a99c95;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -468,4 +509,3 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
-

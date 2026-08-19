@@ -162,7 +162,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 公开 DNS 已确认 `ym0v0.com` 使用 Cloudflare nameserver，`play.ym0v0.com` 当前未占用。
 
 1. 使用 `create-cloudflare` 生成 TypeScript Worker 项目，加入 Preact/Vite，配置 Static Assets。
-2. 在 `wrangler.jsonc` 中绑定一个 `ROOMS` Durable Object 类，并用 `new_sqlite_classes` 创建首个 migration。
+2. 在 `wrangler.jsonc` 中绑定一个 `ROOMS` Durable Object 类，并通过当前 Wrangler 的 declarative `exports.GameRoom.storage: "sqlite"` 声明 SQLite-backed DO；不混用旧 migration 配置。
 3. 通过 `wrangler secret put SESSION_SECRET` 写入随机会话签名密钥，不提交到 Git。
 4. 本地运行规则、DO 集成和双浏览器测试，再执行 `wrangler deploy`。
 5. 在 Wrangler 配置或 Cloudflare Dashboard 为 Worker 添加 Custom Domain `play.ym0v0.com`；Cloudflare 自动创建 DNS 记录和证书。

@@ -6,6 +6,7 @@ import {
   joinRoom,
   SEAT_A,
   SEAT_B,
+  type PlatformSeatId,
   type StoredRoom,
 } from "./core/room-state";
 import { getGameRules, isSupportedGame } from "./games/registry";
@@ -23,6 +24,7 @@ export interface WorkerEnv {
 
 interface SocketAttachment {
   guestId: string;
+  seat: PlatformSeatId;
   tokens: number;
   lastRefillAt: number;
 }
@@ -127,16 +129,25 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (this.room === null) {
       return this.rejectedSocket("room.expired");
     }
+    const now = Date.now();
+    if (now >= this.room.expiresAt) {
+      await this.expireRoom();
+      return this.rejectedSocket("room.expired");
+    }
     const rules = getGameRules(this.room.ruleSetId);
     if (rules === null) {
       return this.rejectedSocket("room.rule_mismatch");
     }
 
-    const joined = joinRoom(this.room, guestId, rules, Date.now());
+    const joined = joinRoom(this.room, guestId, rules, now);
     if (!joined.ok) {
       return this.rejectedSocket(joined.code);
     }
     if (joined.changed) await this.persist(joined.room);
+    const seat = getGuestSeat(joined.room, guestId);
+    if (seat === null) {
+      return this.rejectedSocket("room.not_a_seat");
+    }
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -144,6 +155,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({
       guestId,
+      seat,
       tokens: RATE_CAPACITY,
       lastRefillAt: Date.now(),
     } satisfies SocketAttachment);
@@ -204,6 +216,10 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       this.sendError(socket, "room.expired");
       return;
     }
+    if (getGuestSeat(this.room, attachment.guestId) !== attachment.seat) {
+      socket.close(1008, "Seat no longer matches");
+      return;
+    }
     const rules = getGameRules(this.room.ruleSetId);
     if (rules === null) {
       this.sendError(socket, "room.rule_mismatch");
@@ -233,6 +249,10 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       await this.ctx.storage.setAlarm(this.room.expiresAt);
       return;
     }
+    await this.expireRoom();
+  }
+
+  private async expireRoom(): Promise<void> {
     for (const socket of this.ctx.getWebSockets()) {
       socket.close(1001, "Room expired");
     }

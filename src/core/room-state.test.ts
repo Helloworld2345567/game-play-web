@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { gomokuRules, readGomokuPosition } from "../games/gomoku/rules";
 import {
+  ACTIVE_ROOM_TTL_MS,
   applyRoomCommand,
   createRoom,
   joinRoom,
@@ -146,10 +147,14 @@ describe("room state", () => {
       gomokuRules,
       3_000,
     );
-    expect(reconnect).toEqual({
-      ok: true,
-      room: joined.room,
-      changed: false,
+    expect(reconnect.ok).toBe(true);
+    if (!reconnect.ok) return;
+    expect(reconnect.changed).toBe(true);
+    expect(reconnect.room).toMatchObject({
+      revision: joined.room.revision,
+      updatedAt: 3_000,
+      expiresAt: 3_000 + ACTIVE_ROOM_TTL_MS,
+      seats: joined.room.seats,
     });
 
     const third = joinRoom(joined.room, "guest-third", gomokuRules, 3_000);

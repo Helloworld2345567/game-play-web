@@ -126,6 +126,53 @@ describe("gomoku rules", () => {
     expect(readGomokuPosition(position).winningLine).toHaveLength(5);
   });
 
+  it.each([
+    {
+      label: "top edge",
+      points: Array.from({ length: 5 }, (_, x) => ({ x, y: 0 })),
+    },
+    {
+      label: "top-left corner diagonal",
+      points: Array.from({ length: 5 }, (_, offset) => ({
+        x: offset,
+        y: offset,
+      })),
+    },
+  ])("recognizes a five touching the $label", ({ points }) => {
+    let position = gomokuRules.create(["seat-a", "seat-b"]);
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const point = points[index]!;
+      position = place(position, "seat-a", point.x, point.y);
+      position = place(position, "seat-b", 14, 10 - index);
+    }
+
+    const finalPoint = points.at(-1)!;
+    position = place(position, "seat-a", finalPoint.x, finalPoint.y);
+
+    expect(position.outcome).toEqual({
+      kind: "win",
+      winner: "seat-a",
+      reason: "five_in_row",
+    });
+  });
+
+  it("rejects every move after the Game has finished", () => {
+    let position = gomokuRules.create(["seat-a", "seat-b"]);
+    for (let offset = 0; offset < 4; offset += 1) {
+      position = place(position, "seat-a", offset, 0);
+      position = place(position, "seat-b", offset, 14);
+    }
+    position = place(position, "seat-a", 4, 0);
+
+    const result = gomokuRules.apply(position, {
+      seat: "seat-b",
+      payload: { type: "place", x: 4, y: 14 },
+    });
+
+    expect(result).toEqual({ ok: false, code: "gomoku.game_finished" });
+    expect(readGomokuPosition(position).moveCount).toBe(9);
+  });
+
   it("declares a draw when the last empty intersection does not make five", () => {
     const initial = gomokuRules.create(["seat-a", "seat-b"]);
     const initialData = readGomokuPosition(initial);

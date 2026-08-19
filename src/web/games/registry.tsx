@@ -1,6 +1,17 @@
 import type { FunctionComponent } from "preact";
 import type { JsonValue, RulePosition } from "../../core/game-rules";
-import { GomokuBoard } from "./gomoku/Board";
+import { gomokuAdapter } from "./gomoku/Board";
+
+export type PlatformSeatId = "seat-a" | "seat-b";
+
+export interface SeatPresentation {
+  label: string;
+  swatchClassName: string;
+}
+
+export type SeatPresentations = Readonly<
+  Record<PlatformSeatId, SeatPresentation>
+>;
 
 export interface GameRendererProps {
   position: RulePosition;
@@ -10,17 +21,58 @@ export interface GameRendererProps {
   onAction(payload: JsonValue): void;
 }
 
-const renderers: Record<string, FunctionComponent<GameRendererProps>> = {
-  gomoku: GomokuBoard,
-};
-
-export function GameRenderer(
-  props: GameRendererProps & { gameType: string },
-) {
-  const Renderer = renderers[props.gameType];
-  if (Renderer === undefined) {
-    return <p class="panel error-panel">此浏览器不支持该棋种。</p>;
-  }
-  return <Renderer {...props} />;
+export interface GameAdapter {
+  readonly gameType: string;
+  readonly ruleSetId: string;
+  readonly displayName: string;
+  readonly Renderer: FunctionComponent<GameRendererProps>;
+  getSeatPresentations(position: RulePosition | null): SeatPresentations;
+  getErrorMessage(code: string): string | null;
 }
 
+export const unknownSeatPresentations: SeatPresentations = {
+  "seat-a": { label: "席位 A", swatchClassName: "neutral" },
+  "seat-b": { label: "席位 B", swatchClassName: "neutral" },
+};
+
+const adaptersByRuleSetId = new Map<string, GameAdapter>([
+  [gomokuAdapter.ruleSetId, gomokuAdapter],
+]);
+
+export function getGameAdapter(
+  gameType: string,
+  ruleSetId: string,
+): GameAdapter | null {
+  const adapter = adaptersByRuleSetId.get(ruleSetId);
+  return adapter?.gameType === gameType ? adapter : null;
+}
+
+export function UnsupportedGame({
+  gameType,
+  ruleSetId,
+}: {
+  gameType: string;
+  ruleSetId: string;
+}) {
+  return (
+    <section class="unsupported-game" role="alert">
+      <strong>此浏览器暂不支持这个规则版本</strong>
+      <span>{gameType} · {ruleSetId}</span>
+      <small>请更新页面，或让房主创建当前版本支持的棋局。</small>
+    </section>
+  );
+}
+
+export function GameRenderer(
+  {
+    gameType,
+    ruleSetId,
+    ...rendererProps
+  }: GameRendererProps & { gameType: string; ruleSetId: string },
+) {
+  const adapter = getGameAdapter(gameType, ruleSetId);
+  if (adapter === null) {
+    return <UnsupportedGame gameType={gameType} ruleSetId={ruleSetId} />;
+  }
+  return <adapter.Renderer {...rendererProps} />;
+}

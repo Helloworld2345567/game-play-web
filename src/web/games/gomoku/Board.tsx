@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { PointerEvent as PreactPointerEvent } from "preact/compat";
 import { BOARD_SIZE, readGomokuPosition } from "../../../games/gomoku/rules";
-import type { GameRendererProps } from "../registry";
+import type { GameAdapter, GameRendererProps } from "../registry";
 import { findBoardPoint, type BoardPoint } from "./board-geometry";
 
 const STAR_POINTS = [
@@ -11,6 +11,14 @@ const STAR_POINTS = [
   [3, 11],
   [11, 11],
 ] as const;
+
+const GOMOKU_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  "gomoku.not_your_turn": "还没轮到你。",
+  "gomoku.occupied": "这个交叉点已经有棋子。",
+  "gomoku.out_of_bounds": "落点超出棋盘。",
+  "gomoku.game_finished": "本局已经结束。",
+  "gomoku.invalid_action": "无法识别这次落子。",
+};
 
 function drawStone(
   context: CanvasRenderingContext2D,
@@ -248,49 +256,81 @@ export function GomokuBoard({
   const currentCell = data.board[keyboardPoint.y * BOARD_SIZE + keyboardPoint.x];
   const cellDescription =
     currentCell === 0 ? "空位" : currentCell === 1 ? "黑子" : "白子";
+  const lastMoveText = data.lastMove
+    ? `最近一手：${data.lastMove.stone === 1 ? "黑方" : "白方"}落在第 ${data.lastMove.x + 1} 列、第 ${data.lastMove.y + 1} 行。`
+    : "最近一手：尚未落子。";
 
   return (
-    <div class="board-shell" ref={containerRef}>
-      <canvas
-        ref={canvasRef}
-        class={`gomoku-board ${canInteract ? "is-interactive" : ""}`}
-        style={{ width: `${size}px`, height: `${size}px` }}
-        tabIndex={0}
-        role="application"
-        aria-label={`五子棋棋盘。当前位置第 ${keyboardPoint.x + 1} 列第 ${keyboardPoint.y + 1} 行，${cellDescription}。`}
-        aria-describedby="board-instructions"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={() => setPreview(null)}
-        onKeyDown={(event) => {
-          const next = { ...keyboardPoint };
-          if (event.key === "ArrowLeft") next.x -= 1;
-          else if (event.key === "ArrowRight") next.x += 1;
-          else if (event.key === "ArrowUp") next.y -= 1;
-          else if (event.key === "ArrowDown") next.y += 1;
-          else if (event.key === "Enter" || event.key === " ") {
+    <>
+      <div class="board-shell" ref={containerRef}>
+        <canvas
+          ref={canvasRef}
+          class={`gomoku-board ${canInteract ? "is-interactive" : ""}`}
+          style={{ width: `${size}px`, height: `${size}px` }}
+          tabIndex={0}
+          role="application"
+          aria-label={`五子棋棋盘。当前位置第 ${keyboardPoint.x + 1} 列第 ${keyboardPoint.y + 1} 行，${cellDescription}。`}
+          aria-describedby="board-instructions gomoku-last-move"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={() => setPreview(null)}
+          onKeyDown={(event) => {
+            const next = { ...keyboardPoint };
+            if (event.key === "ArrowLeft") next.x -= 1;
+            else if (event.key === "ArrowRight") next.x += 1;
+            else if (event.key === "ArrowUp") next.y -= 1;
+            else if (event.key === "ArrowDown") next.y += 1;
+            else if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              if (canInteract && isEmpty(keyboardPoint)) {
+                onAction({
+                  type: "place",
+                  x: keyboardPoint.x,
+                  y: keyboardPoint.y,
+                });
+              }
+              return;
+            } else return;
             event.preventDefault();
-            if (canInteract && isEmpty(keyboardPoint)) {
-              onAction({
-                type: "place",
-                x: keyboardPoint.x,
-                y: keyboardPoint.y,
-              });
-            }
-            return;
-          } else return;
-          event.preventDefault();
-          setKeyboardPoint({
-            x: Math.max(0, Math.min(BOARD_SIZE - 1, next.x)),
-            y: Math.max(0, Math.min(BOARD_SIZE - 1, next.y)),
-          });
-        }}
-      />
-      <p id="board-instructions" class="sr-only">
-        方向键移动落点，回车或空格落子。
+            setKeyboardPoint({
+              x: Math.max(0, Math.min(BOARD_SIZE - 1, next.x)),
+              y: Math.max(0, Math.min(BOARD_SIZE - 1, next.y)),
+            });
+          }}
+        />
+        <p id="board-instructions" class="sr-only">
+          方向键移动落点，回车或空格落子。
+        </p>
+      </div>
+      <p id="gomoku-last-move" class="board-last-move" aria-live="polite">
+        {lastMoveText}
       </p>
-    </div>
+    </>
   );
 }
 
+export const gomokuAdapter = {
+  gameType: "gomoku",
+  ruleSetId: "gomoku.freestyle15.v1",
+  displayName: "自由五子棋",
+  Renderer: GomokuBoard,
+  getSeatPresentations(position) {
+    const blackSeat =
+      position === null ? "seat-a" : readGomokuPosition(position).blackSeat;
+    const seatABlack = blackSeat === "seat-a";
+    return {
+      "seat-a": {
+        label: seatABlack ? "黑方" : "白方",
+        swatchClassName: seatABlack ? "black" : "white",
+      },
+      "seat-b": {
+        label: seatABlack ? "白方" : "黑方",
+        swatchClassName: seatABlack ? "white" : "black",
+      },
+    };
+  },
+  getErrorMessage(code) {
+    return GOMOKU_ERROR_MESSAGES[code] ?? null;
+  },
+} satisfies GameAdapter;
