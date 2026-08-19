@@ -72,6 +72,11 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
     await creatorContext.setOffline(false);
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(creator.locator(".connection-pill")).toContainText("连接正常");
+    await creator.reload();
+    await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
+    await expect(creator.locator(".board-last-move")).toContainText(
+      "白方落在第 1 列、第 1 行",
+    );
 
     for (const [blackX, whiteX] of [
       [4, 2],
