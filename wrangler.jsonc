@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "game-play-web",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-15",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "GameRoom"
+      }
+    ]
+  },
+  "exports": {
+    "GameRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "routes": [
+    {
+      "pattern": "play.ym0v0.com",
+      "custom_domain": true
+    }
+  ],
+  "secrets": {
+    "required": ["SESSION_SECRET"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}
+
