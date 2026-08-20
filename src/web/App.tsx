@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
   availableGameAdapters,
@@ -128,7 +128,13 @@ function mainStatus(snapshot: RoomSnapshot | null, phase: ConnectionPhase): stri
   return snapshot.position.turn === snapshot.selfSeat ? "轮到你" : "等待对手落子";
 }
 
-function RoomPage({ roomId }: { roomId: string }) {
+function RoomPage({
+  roomId,
+  onExit,
+}: {
+  roomId: string;
+  onExit(): void;
+}) {
   const client = useRoom(roomId);
   const snapshot = client.snapshot;
   const adapter =
@@ -149,6 +155,7 @@ function RoomPage({ roomId }: { roomId: string }) {
   const canPlace =
     client.phase === "online" &&
     !client.pending &&
+    !client.leaving &&
     adapter !== null &&
     bothOccupied &&
     snapshot?.position?.turn === snapshot.selfSeat &&
@@ -175,6 +182,18 @@ function RoomPage({ roomId }: { roomId: string }) {
         setShareNotice("请复制浏览器地址发送给朋友");
       }
     }
+  };
+
+  const exitRoom = async () => {
+    if (
+      !confirm(
+        "确定退出房间吗？退出不会自动认输；所有人离开后，邀请链接将失效。",
+      )
+    ) {
+      return;
+    }
+    await client.leave();
+    onExit();
   };
 
   if (client.phase === "fatal") {
@@ -258,18 +277,33 @@ function RoomPage({ roomId }: { roomId: string }) {
         {client.phase !== "online" && snapshot && (
           <div class="network-banner" role="status">
             保留当前棋盘，连接恢复后自动同步。
-            <button onClick={client.retryNow}>立即重试</button>
+            <button disabled={client.leaving} onClick={client.retryNow}>
+              立即重试
+            </button>
           </div>
         )}
 
         <div class="room-actions">
-          <button class="secondary-button" onClick={share}>
+          <button
+            class="secondary-button"
+            disabled={client.leaving}
+            onClick={share}
+          >
             {bothOccupied ? "分享房间" : "邀请好友"}
+          </button>
+          <button
+            class="secondary-button"
+            disabled={client.leaving}
+            onClick={() => void exitRoom()}
+          >
+            {client.leaving ? "正在退出…" : "退出房间"}
           </button>
           {adapter && snapshot?.position && outcome === null && bothOccupied && (
             <button
               class="danger-button"
-              disabled={client.pending || client.phase !== "online"}
+              disabled={
+                client.leaving || client.pending || client.phase !== "online"
+              }
               onClick={() => {
                 if (confirm("确定认输并结束本局吗？")) client.resign();
               }}
@@ -280,7 +314,9 @@ function RoomPage({ roomId }: { roomId: string }) {
           {adapter && outcome && (
             <button
               class="primary-button"
-              disabled={client.pending || client.phase !== "online"}
+              disabled={
+                client.leaving || client.pending || client.phase !== "online"
+              }
               onClick={() => client.setRematchReady(!ownReady)}
             >
               {ownReady ? "取消准备" : "再来一局"}
@@ -289,7 +325,11 @@ function RoomPage({ roomId }: { roomId: string }) {
         </div>
 
         <div class="live-region" aria-live="polite">
-          {client.pending ? "正在等待房间确认…" : client.notice ?? shareNotice}
+          {client.leaving
+            ? "正在退出房间…"
+            : client.pending
+              ? "正在等待房间确认…"
+              : client.notice ?? shareNotice}
         </div>
       </section>
     </main>
@@ -310,10 +350,28 @@ function NotFoundPage() {
 }
 
 export function App() {
-  if (location.pathname === "/" || location.pathname === "") {
+  const [path, setPath] = useState(location.pathname);
+  useEffect(() => {
+    const updatePath = () => setPath(location.pathname);
+    window.addEventListener("popstate", updatePath);
+    return () => window.removeEventListener("popstate", updatePath);
+  }, []);
+
+  if (path === "/" || path === "") {
     return <LandingPage />;
   }
-  const match = location.pathname.match(ROOM_PATH);
-  if (match?.[1]) return <RoomPage roomId={match[1]} />;
+  const match = path.match(ROOM_PATH);
+  if (match?.[1]) {
+    return (
+      <RoomPage
+        roomId={match[1]}
+        onExit={() => {
+          history.replaceState(null, "", "/");
+          setPath("/");
+          window.scrollTo({ top: 0 });
+        }}
+      />
+    );
+  }
   return <NotFoundPage />;
 }

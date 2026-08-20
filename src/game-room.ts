@@ -13,6 +13,7 @@ import { getGameRules, isSupportedGame } from "./games/registry";
 import {
   parseClientCommand,
   PROTOCOL_VERSION,
+  type LeftMessage,
   type RoomSnapshot,
   type ServerError,
 } from "./shared/protocol";
@@ -27,6 +28,7 @@ interface SocketAttachment {
   seat: PlatformSeatId;
   tokens: number;
   lastRefillAt: number;
+  leaving?: boolean;
 }
 
 interface InitializePayload {
@@ -36,6 +38,8 @@ interface InitializePayload {
 }
 
 const ROOM_STORAGE_KEY = "room";
+const VACANT_SINCE_KEY = "vacantSince";
+const VACANT_ROOM_GRACE_MS = 60_000;
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const MAX_MESSAGE_BYTES = 4_096;
 const RATE_CAPACITY = 20;
@@ -64,6 +68,7 @@ function validGuestId(value: string | null): value is string {
 
 export class GameRoom extends DurableObject<WorkerEnv> {
   private room: StoredRoom | null = null;
+  private discarding = false;
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
@@ -116,6 +121,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       now: Date.now(),
     });
     await this.persist(room);
+    await this.markVacant(Date.now());
     return Response.json({ ok: true }, { status: 201 });
   }
 
@@ -126,12 +132,21 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
     }
-    if (this.room === null) {
+    if (this.room === null || this.discarding) {
       return this.rejectedSocket("room.expired");
     }
     const now = Date.now();
     if (now >= this.room.expiresAt) {
-      await this.expireRoom();
+      await this.discardRoom();
+      return this.rejectedSocket("room.expired");
+    }
+    const vacantSince = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
+    if (
+      vacantSince !== undefined &&
+      this.livePlayerSockets().length === 0 &&
+      now >= vacantSince + VACANT_ROOM_GRACE_MS
+    ) {
+      await this.discardRoom();
       return this.rejectedSocket("room.expired");
     }
     const rules = getGameRules(this.room.ruleSetId);
@@ -159,6 +174,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       tokens: RATE_CAPACITY,
       lastRefillAt: Date.now(),
     } satisfies SocketAttachment);
+    await this.markOccupied();
     server.send(JSON.stringify(this.snapshotFor(guestId)));
     this.broadcastSnapshots(server);
 
@@ -195,10 +211,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       socket.close(1008, "Missing connection state");
       return;
     }
-    if (!this.consumeRateToken(socket, attachment)) {
-      this.sendError(socket, "protocol.rate_limited");
-      return;
-    }
+    const hasRateToken = this.consumeRateToken(socket, attachment);
 
     let value: unknown;
     try {
@@ -212,12 +225,20 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       this.sendError(socket, "protocol.invalid_message");
       return;
     }
+    if (command.type !== "leave" && !hasRateToken) {
+      this.sendError(socket, "protocol.rate_limited");
+      return;
+    }
     if (this.room === null) {
       this.sendError(socket, "room.expired");
       return;
     }
     if (getGuestSeat(this.room, attachment.guestId) !== attachment.seat) {
       socket.close(1008, "Seat no longer matches");
+      return;
+    }
+    if (command.type === "leave") {
+      await this.leaveSocket(socket, attachment);
       return;
     }
     const rules = getGameRules(this.room.ruleSetId);
@@ -243,29 +264,94 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   }
 
   async alarm(): Promise<void> {
-    if (this.room === null) return;
+    if (this.room === null || this.discarding) return;
     const now = Date.now();
-    if (now < this.room.expiresAt) {
-      await this.ctx.storage.setAlarm(this.room.expiresAt);
+    if (now >= this.room.expiresAt) {
+      await this.discardRoom();
       return;
     }
-    await this.expireRoom();
-  }
-
-  private async expireRoom(): Promise<void> {
-    for (const socket of this.ctx.getWebSockets()) {
-      socket.close(1001, "Room expired");
+    if (this.livePlayerSockets().length > 0) {
+      await this.markOccupied();
+      return;
     }
-    await this.ctx.storage.deleteAll();
-    this.room = null;
+    const vacantSince = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
+    if (vacantSince === undefined) {
+      await this.markVacant(now);
+      return;
+    }
+    const discardAt = Math.min(
+      this.room.expiresAt,
+      vacantSince + VACANT_ROOM_GRACE_MS,
+    );
+    if (now < discardAt) {
+      await this.ctx.storage.setAlarm(discardAt);
+      return;
+    }
+    await this.discardRoom();
   }
 
-  async webSocketClose(): Promise<void> {
-    if (this.room !== null) this.broadcastSnapshots();
+  private async discardRoom(): Promise<void> {
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      for (const socket of this.ctx.getWebSockets()) {
+        if (socket.readyState < WebSocket.CLOSING) {
+          socket.close(1001, "Room expired");
+        }
+      }
+      await this.ctx.storage.deleteAll();
+      this.room = null;
+    } catch (error) {
+      this.discarding = false;
+      await this.markVacant(Date.now());
+      throw error;
+    } finally {
+      this.discarding = false;
+    }
   }
 
-  async webSocketError(): Promise<void> {
-    if (this.room !== null) this.broadcastSnapshots();
+  async webSocketClose(socket: WebSocket): Promise<void> {
+    await this.handleSocketGone(socket);
+  }
+
+  async webSocketError(socket: WebSocket): Promise<void> {
+    if (socket.readyState < WebSocket.CLOSING) {
+      socket.close(1011, "Connection error");
+    }
+    await this.handleSocketGone(socket);
+  }
+
+  private async leaveSocket(
+    socket: WebSocket,
+    attachment: SocketAttachment,
+  ): Promise<void> {
+    socket.serializeAttachment({
+      ...attachment,
+      leaving: true,
+    } satisfies SocketAttachment);
+    const acknowledgement: LeftMessage = {
+      v: PROTOCOL_VERSION,
+      type: "left",
+    };
+    socket.send(JSON.stringify(acknowledgement));
+    const hasOtherPlayers = this.livePlayerSockets(socket).length > 0;
+    socket.close(1000, "left");
+    if (!hasOtherPlayers) {
+      await this.discardRoom();
+      return;
+    }
+    await this.markOccupied();
+    this.broadcastSnapshots();
+  }
+
+  private async handleSocketGone(socket: WebSocket): Promise<void> {
+    if (this.room === null || this.discarding) return;
+    this.broadcastSnapshots();
+    if (this.livePlayerSockets(socket).length === 0) {
+      await this.markVacant(Date.now());
+      return;
+    }
+    await this.markOccupied();
   }
 
   private consumeRateToken(
@@ -288,9 +374,48 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   }
 
   private async persist(room: StoredRoom): Promise<void> {
+    if (this.discarding) throw new Error("Room is being discarded");
     await this.ctx.storage.put(ROOM_STORAGE_KEY, room);
     await this.ctx.storage.setAlarm(room.expiresAt);
     this.room = room;
+  }
+
+  private async markVacant(now: number): Promise<void> {
+    if (this.room === null || this.discarding) return;
+    const existing = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
+    const vacantSince = existing ?? now;
+    if (existing === undefined) {
+      await this.ctx.storage.put(VACANT_SINCE_KEY, vacantSince);
+    }
+    await this.ctx.storage.setAlarm(
+      Math.min(
+        this.room.expiresAt,
+        vacantSince + VACANT_ROOM_GRACE_MS,
+      ),
+    );
+  }
+
+  private async markOccupied(): Promise<void> {
+    if (this.room === null || this.discarding) return;
+    await this.ctx.storage.delete(VACANT_SINCE_KEY);
+    await this.ctx.storage.setAlarm(this.room.expiresAt);
+  }
+
+  private livePlayerSockets(except?: WebSocket): WebSocket[] {
+    if (this.room === null) return [];
+    return this.ctx.getWebSockets().filter((socket) => {
+      if (socket === except || socket.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+      const attachment =
+        socket.deserializeAttachment() as SocketAttachment | null;
+      return (
+        attachment !== null &&
+        attachment.leaving !== true &&
+        validGuestId(attachment.guestId) &&
+        getGuestSeat(this.room!, attachment.guestId) === attachment.seat
+      );
+    });
   }
 
   private snapshotFor(guestId: string): RoomSnapshot {
@@ -298,7 +423,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     const seatA = room.seats[SEAT_A];
     const seatB = room.seats[SEAT_B];
     const onlineGuests = new Set(
-      this.ctx.getWebSockets().flatMap((socket) => {
+      this.livePlayerSockets().flatMap((socket) => {
         const attachment =
           socket.deserializeAttachment() as SocketAttachment | null;
         return attachment?.guestId ? [attachment.guestId] : [];
@@ -347,7 +472,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
 
   private broadcastSnapshots(except?: WebSocket): void {
     if (this.room === null) return;
-    for (const socket of this.ctx.getWebSockets()) {
+    for (const socket of this.livePlayerSockets()) {
       if (socket === except) continue;
       const attachment =
         socket.deserializeAttachment() as SocketAttachment | null;

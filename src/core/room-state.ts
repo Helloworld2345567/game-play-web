@@ -1,5 +1,5 @@
 import type { GameRules, RulePosition } from "./game-rules";
-import type { ClientCommand } from "../shared/protocol";
+import type { RoomCommand } from "../shared/protocol";
 
 export const SEAT_A = "seat-a";
 export const SEAT_B = "seat-b";
@@ -132,7 +132,7 @@ export function getGuestSeat(
 export function applyRoomCommand(
   room: StoredRoom,
   guestId: string,
-  command: ClientCommand,
+  command: RoomCommand,
   rules: GameRules,
   now: number,
 ): RoomDecision {

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { JsonValue } from "../core/game-rules";
 import {
   PROTOCOL_VERSION,
-  type ClientCommand,
+  type LeftMessage,
+  type RoomCommand,
   type RoomSnapshot,
   type ServerError,
 } from "../shared/protocol";
@@ -20,11 +21,13 @@ interface RoomClientView {
   phase: ConnectionPhase;
   snapshot: RoomSnapshot | null;
   pending: boolean;
+  leaving: boolean;
   notice: string | null;
   fatalCode: string | null;
   sendGameAction(payload: JsonValue): boolean;
   resign(): boolean;
   setRematchReady(ready: boolean): boolean;
+  leave(): Promise<void>;
   retryNow(): void;
 }
 
@@ -39,7 +42,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseServerMessage(value: unknown): RoomSnapshot | ServerError | null {
+function parseServerMessage(
+  value: unknown,
+): RoomSnapshot | ServerError | LeftMessage | null {
   if (!isRecord(value) || value.v !== PROTOCOL_VERSION) return null;
   if (
     value.type === "snapshot" &&
@@ -54,6 +59,9 @@ function parseServerMessage(value: unknown): RoomSnapshot | ServerError | null {
   }
   if (value.type === "error" && typeof value.code === "string") {
     return value as unknown as ServerError;
+  }
+  if (value.type === "left") {
+    return { v: PROTOCOL_VERSION, type: "left" };
   }
   return null;
 }
@@ -106,12 +114,14 @@ export function useRoom(roomId: string): RoomClientView {
   const [phase, setPhase] = useState<ConnectionPhase>("connecting");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [pending, setPending] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [fatalCode, setFatalCode] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const snapshotRef = useRef<RoomSnapshot | null>(null);
   const pendingRevisionRef = useRef<number | null>(null);
   const retryRef = useRef<() => void>(() => undefined);
+  const leaveRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   useEffect(() => {
     let disposed = false;
@@ -120,7 +130,12 @@ export function useRoom(roomId: string): RoomClientView {
     let retryTimer: number | null = null;
     let heartbeatTimer: number | null = null;
     let connectTimer: number | null = null;
+    let leaveTimer: number | null = null;
     let terminal = false;
+    let leaveRequested = false;
+    let leavePromise: Promise<void> | null = null;
+    let leaveTargetSocket: WebSocket | null = null;
+    let resolveLeave: (() => void) | null = null;
     let lastServerMessageAt = Date.now();
     const sessionReady = ensureBrowserSession();
 
@@ -131,6 +146,22 @@ export function useRoom(roomId: string): RoomClientView {
       retryTimer = null;
       heartbeatTimer = null;
       connectTimer = null;
+    };
+
+    const completeLeave = () => {
+      if (leaveTimer !== null) window.clearTimeout(leaveTimer);
+      leaveTimer = null;
+      const resolve = resolveLeave;
+      resolveLeave = null;
+      resolve?.();
+    };
+
+    const closeForLeave = (socket: WebSocket, reason: string) => {
+      try {
+        socket.close(1000, reason);
+      } catch {
+        // Navigation must not depend on a partially opened socket closing cleanly.
+      }
     };
 
     const applySnapshot = (next: RoomSnapshot) => {
@@ -223,6 +254,10 @@ export function useRoom(roomId: string): RoomClientView {
           applySnapshot(message);
           return;
         }
+        if (message.type === "left") {
+          if (leaveTargetSocket === socket) completeLeave();
+          return;
+        }
         pendingRevisionRef.current = null;
         setPending(false);
         if (message.snapshot) applySnapshot(message.snapshot);
@@ -242,6 +277,7 @@ export function useRoom(roomId: string): RoomClientView {
 
       socket.addEventListener("close", () => {
         if (socketRef.current === socket) socketRef.current = null;
+        if (leaveRequested && leaveTargetSocket === socket) completeLeave();
         if (currentGeneration === generation) scheduleReconnect();
       });
       socket.addEventListener("error", () => socket.close());
@@ -254,6 +290,41 @@ export function useRoom(roomId: string): RoomClientView {
       void connect();
     };
     retryRef.current = retryNow;
+
+    const leave = (): Promise<void> => {
+      if (leavePromise !== null) return leavePromise;
+      leaveRequested = true;
+      terminal = true;
+      clearTimers();
+      setLeaving(true);
+      setPending(false);
+      pendingRevisionRef.current = null;
+      setNotice(null);
+
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        if (socket !== null) closeForLeave(socket, "left");
+        leavePromise = Promise.resolve();
+        return leavePromise;
+      }
+
+      leaveTargetSocket = socket;
+      leavePromise = new Promise<void>((resolve) => {
+        resolveLeave = resolve;
+      });
+      leaveTimer = window.setTimeout(() => {
+        closeForLeave(socket, "leave timeout");
+        completeLeave();
+      }, 1_500);
+      try {
+        socket.send(JSON.stringify({ v: PROTOCOL_VERSION, type: "leave" }));
+      } catch {
+        closeForLeave(socket, "leave failed");
+        completeLeave();
+      }
+      return leavePromise;
+    };
+    leaveRef.current = leave;
 
     const handleOffline = () => {
       setPhase("offline");
@@ -279,16 +350,20 @@ export function useRoom(roomId: string): RoomClientView {
       disposed = true;
       generation += 1;
       clearTimers();
+      if (leaveTimer !== null) window.clearTimeout(leaveTimer);
+      leaveTimer = null;
+      completeLeave();
       socketRef.current?.close();
       socketRef.current = null;
       retryRef.current = () => undefined;
+      leaveRef.current = () => Promise.resolve();
       window.removeEventListener("offline", handleOffline);
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [roomId]);
 
-  const send = useCallback((command: ClientCommand): boolean => {
+  const send = useCallback((command: RoomCommand): boolean => {
     const socket = socketRef.current;
     if (
       socket?.readyState !== WebSocket.OPEN ||
@@ -347,11 +422,13 @@ export function useRoom(roomId: string): RoomClientView {
     phase,
     snapshot,
     pending,
+    leaving,
     notice,
     fatalCode,
     sendGameAction,
     resign,
     setRematchReady,
+    leave: () => leaveRef.current(),
     retryNow: () => retryRef.current(),
   };
 }

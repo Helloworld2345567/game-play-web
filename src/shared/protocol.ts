@@ -7,6 +7,11 @@ interface CommandBase {
   expectedRevision: number;
 }
 
+export interface LeaveCommand {
+  v: typeof PROTOCOL_VERSION;
+  type: "leave";
+}
+
 export interface GameActionCommand extends CommandBase {
   type: "game_action";
   gameType: string;
@@ -23,10 +28,12 @@ export interface RematchReadyCommand extends CommandBase {
   ready: boolean;
 }
 
-export type ClientCommand =
+export type RoomCommand =
   | GameActionCommand
   | ResignCommand
   | RematchReadyCommand;
+
+export type ClientCommand = LeaveCommand | RoomCommand;
 
 export interface RoomSeatView {
   occupied: boolean;
@@ -54,7 +61,12 @@ export interface ServerError {
   snapshot?: RoomSnapshot;
 }
 
-export type ServerMessage = RoomSnapshot | ServerError;
+export interface LeftMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "left";
+}
+
+export type ServerMessage = RoomSnapshot | ServerError | LeftMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -86,6 +98,13 @@ function isShortIdentifier(value: unknown, maxLength: number): value is string {
 }
 
 export function parseClientCommand(value: unknown): ClientCommand | null {
+  if (
+    isRecord(value) &&
+    value.v === PROTOCOL_VERSION &&
+    value.type === "leave"
+  ) {
+    return { v: PROTOCOL_VERSION, type: "leave" };
+  }
   if (
     !isRecord(value) ||
     value.v !== PROTOCOL_VERSION ||

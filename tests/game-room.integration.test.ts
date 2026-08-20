@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { reset, runInDurableObject } from "cloudflare:test";
+import {
+  reset,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
 import type { StoredRoom } from "../src/core/room-state";
 
@@ -154,6 +158,13 @@ function placeCommand(expectedRevision: number, x: number, y: number) {
   };
 }
 
+function leaveCommand() {
+  return {
+    v: 1,
+    type: "leave",
+  };
+}
+
 function xiangqiMoveCommand(
   expectedRevision: number,
   fromX: number,
@@ -178,6 +189,243 @@ afterEach(async () => {
 });
 
 describe("GameRoom Durable Object", () => {
+  it("schedules cleanup when a newly created Room never connects", async () => {
+    const createdAt = Date.now();
+    const stub = await initializeRoom("room-never-connected");
+
+    const lifecycle = await runInDurableObject(
+      stub,
+      async (_instance, state) => ({
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      }),
+    );
+    expect(lifecycle.vacantSince).toBeGreaterThanOrEqual(createdAt);
+    expect(lifecycle.alarm).toBeGreaterThanOrEqual(createdAt + 59_000);
+    expect(lifecycle.alarm).toBeLessThanOrEqual(Date.now() + 61_000);
+  });
+
+  it("keeps the Room and broadcasts presence when one Guest leaves", async () => {
+    const { stub, creator, invitee } = await startRoom("room-one-leaves");
+    const left = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+    const presence = invitee.inbox.nextMatching(
+      (message) =>
+        message.type === "snapshot" &&
+        (message.seats as Record<string, { online?: boolean }>)["seat-a"]
+          ?.online === false,
+    );
+
+    const socketClosed = new Promise<void>((resolve) => {
+      creator.socket.addEventListener("close", () => resolve(), { once: true });
+    });
+    creator.socket.send(JSON.stringify(leaveCommand()));
+
+    await expect(left).resolves.toEqual({ v: 1, type: "left" });
+    await socketClosed;
+    await expect(presence).resolves.toMatchObject({
+      revision: 1,
+      seats: { "seat-a": { occupied: true, online: false } },
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<StoredRoom>("room"),
+      ),
+    ).resolves.toMatchObject({ roomId: "room-one-leaves" });
+  });
+
+  it("discards the Room immediately when the last Guest explicitly leaves", async () => {
+    const { stub, creator, invitee } = await startRoom("room-all-leave");
+    const creatorLeft = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+    const inviteeLeft = invitee.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+
+    creator.socket.send(JSON.stringify(leaveCommand()));
+    invitee.socket.send(JSON.stringify(leaveCommand()));
+    await Promise.all([creatorLeft, inviteeLeft]);
+
+    await expect.poll(() =>
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get("room"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).toEqual({ room: undefined, alarm: null });
+
+    const staleConnection = await connect(stub, "guest-creator");
+    expect(staleConnection.firstMessage).toEqual({
+      v: 1,
+      type: "error",
+      code: "room.expired",
+    });
+  });
+
+  it("starts a 60-second grace period after every browser disconnects", async () => {
+    const { stub, creator, invitee } = await startRoom("room-vacant-grace");
+    const disconnectedAt = Date.now();
+
+    await Promise.all([
+      closeSocket(creator.socket),
+      closeSocket(invitee.socket),
+    ]);
+
+    await expect.poll(() =>
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).toMatchObject({
+      room: { roomId: "room-vacant-grace" },
+      vacantSince: expect.any(Number),
+      alarm: expect.any(Number),
+    });
+
+    const lifecycle = await runInDurableObject(
+      stub,
+      async (_instance, state) => ({
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      }),
+    );
+    expect(lifecycle.vacantSince).toBeGreaterThanOrEqual(disconnectedAt);
+    expect(lifecycle.alarm).toBeGreaterThanOrEqual(disconnectedAt + 59_000);
+    expect(lifecycle.alarm).toBeLessThanOrEqual(Date.now() + 61_000);
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const afterPrematureAlarm = await runInDurableObject(
+      stub,
+      async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      }),
+    );
+    expect(afterPrematureAlarm.room).toMatchObject({
+      roomId: "room-vacant-grace",
+    });
+    expect(afterPrematureAlarm.vacantSince).toBe(lifecycle.vacantSince);
+    expect(afterPrematureAlarm.alarm).toBe(
+      lifecycle.vacantSince! + 60_000,
+    );
+  });
+
+  it("preserves a vacant Room when a Guest reconnects during the grace period", async () => {
+    const { stub, creator, invitee } = await startRoom("room-grace-reconnect");
+    await Promise.all([
+      closeSocket(creator.socket),
+      closeSocket(invitee.socket),
+    ]);
+
+    const reconnected = await connect(stub, "guest-creator");
+    expect(reconnected.firstMessage).toMatchObject({
+      type: "snapshot",
+      roomId: "room-grace-reconnect",
+      selfSeat: "seat-a",
+    });
+    const lifecycle = await runInDurableObject(
+      stub,
+      async (_instance, state) => ({
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+        room: await state.storage.get<StoredRoom>("room"),
+      }),
+    );
+    expect(lifecycle.vacantSince).toBeUndefined();
+    expect(lifecycle.alarm).toBe(lifecycle.room?.expiresAt);
+  });
+
+  it("discards a Room after its persisted vacancy grace period", async () => {
+    const stub = await initializeRoom("room-vacant-expired");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("vacantSince", Date.now() - 61_000);
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get("room"),
+        vacantSince: await state.storage.get("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).resolves.toEqual({
+      room: undefined,
+      vacantSince: undefined,
+      alarm: null,
+    });
+
+    const staleConnection = await connect(stub, "guest-creator");
+    expect(staleConnection.firstMessage).toMatchObject({
+      type: "error",
+      code: "room.expired",
+    });
+  });
+
+  it("rejects a late reconnect even when the vacancy alarm is delayed", async () => {
+    const stub = await initializeRoom("room-late-reconnect");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("vacantSince", Date.now() - 61_000);
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    const lateConnection = await connect(stub, "guest-creator");
+
+    expect(lateConnection.firstMessage).toMatchObject({
+      type: "error",
+      code: "room.expired",
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("keeps a Seat online when only one of its browser tabs leaves", async () => {
+    const { stub, creator, invitee } = await startRoom("room-multiple-tabs");
+    const creatorSecondTab = await connect(stub, "guest-creator");
+    await Promise.all([
+      creator.inbox.nextMatching((message) => message.type === "snapshot"),
+      invitee.inbox.nextMatching((message) => message.type === "snapshot"),
+    ]);
+    const creatorLeft = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+    const presence = invitee.inbox.nextMatching(
+      (message) =>
+        message.type === "snapshot" &&
+        (message.seats as Record<string, { online?: boolean }>)["seat-a"]
+          ?.online === true,
+    );
+
+    creator.socket.send(JSON.stringify(leaveCommand()));
+
+    await expect(creatorLeft).resolves.toMatchObject({ type: "left" });
+    await expect(presence).resolves.toMatchObject({
+      seats: { "seat-a": { occupied: true, online: true } },
+    });
+    const lifecycle = await runInDurableObject(
+      stub,
+      async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        vacantSince: await state.storage.get("vacantSince"),
+        openSockets: state
+          .getWebSockets()
+          .filter((socket) => socket.readyState === WebSocket.OPEN).length,
+      }),
+    );
+    expect(lifecycle).toMatchObject({
+      room: { roomId: "room-multiple-tabs" },
+      vacantSince: undefined,
+      openSockets: 2,
+    });
+    expect(creatorSecondTab.socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("persists the creator as Seat A and starts after the invitee claims Seat B", async () => {
     const stub = await initializeRoom("room-1");
 
