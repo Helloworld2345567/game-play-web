@@ -13,10 +13,9 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1",
+    command: "npm run dev -- --host 127.0.0.1 --mode e2e",
     url: "http://localhost:5173",
     reuseExistingServer: false,
     timeout: 120_000,
   },
 });
-

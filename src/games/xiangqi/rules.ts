@@ -530,13 +530,14 @@ function initialBoard(): XiangqiCell[] {
   return board;
 }
 
-export const xiangqiRules: GameRules = {
+export const xiangqiRules = {
   definition: {
     gameType: "xiangqi",
     ruleSetId: "xiangqi.casual.v1",
+    actionConsistency: "strict_revision",
   },
 
-  create([redSeat, blackSeat]) {
+  create([redSeat, blackSeat]): RulePosition {
     const board = initialBoard();
     const repetition = { [positionKey(board, "red")]: 1 };
     return {
@@ -669,4 +670,8 @@ export const xiangqiRules: GameRules = {
       },
     };
   },
-};
+
+  project(position) {
+    return position;
+  },
+} satisfies GameRules;

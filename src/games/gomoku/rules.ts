@@ -96,13 +96,14 @@ export function readGomokuPosition(position: RulePosition): GomokuPosition {
   return position.data as unknown as GomokuPosition;
 }
 
-export const gomokuRules: GameRules = {
+export const gomokuRules = {
   definition: {
     gameType: "gomoku",
     ruleSetId: "gomoku.freestyle15.v1",
+    actionConsistency: "strict_revision",
   },
 
-  create([blackSeat, whiteSeat]) {
+  create([blackSeat, whiteSeat]): RulePosition {
     return {
       data: {
         board: Array<Stone>(BOARD_CELLS).fill(0),
@@ -176,4 +177,8 @@ export const gomokuRules: GameRules = {
       },
     };
   },
-};
+
+  project(position) {
+    return position;
+  },
+} satisfies GameRules;

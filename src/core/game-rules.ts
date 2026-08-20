@@ -22,16 +22,32 @@ export interface RuleCommand {
   payload: JsonValue;
 }
 
+export interface RuleContext {
+  now: number;
+  randomSeed: string;
+}
+
+export type RuleActionStatus = "applied" | "already_revealed";
+
+export type ActionConsistency =
+  | "strict_revision"
+  | "concurrent_idempotent";
+
 export type RuleDecision =
-  | { ok: true; next: RulePosition }
+  | { ok: true; next: RulePosition; actionStatus?: RuleActionStatus }
   | { ok: false; code: string };
 
 export interface GameRules {
   readonly definition: {
     gameType: string;
     ruleSetId: string;
+    actionConsistency: ActionConsistency;
   };
-  create(seats: Seats): RulePosition;
-  apply(current: RulePosition, command: RuleCommand): RuleDecision;
+  create(seats: Seats, context: RuleContext): RulePosition;
+  apply(
+    current: RulePosition,
+    command: RuleCommand,
+    context: RuleContext,
+  ): RuleDecision;
+  project(position: RulePosition, viewerSeat: SeatId | null): RulePosition;
 }
-

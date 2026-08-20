@@ -5,6 +5,8 @@ import type {
   RulePosition,
 } from "../../core/game-rules";
 import { gomokuAdapter } from "./gomoku/Board";
+import { minesweeperDuelAdapters } from "./minesweeper/DuelBoard";
+import { ticTacToeAdapter } from "./tictactoe/Board";
 import { xiangqiAdapter } from "./xiangqi/Board";
 
 export type PlatformSeatId = "seat-a" | "seat-b";
@@ -23,6 +25,7 @@ export interface GameRendererProps {
   selfSeat: string | null;
   disabled: boolean;
   pending: boolean;
+  pendingCells?: ReadonlySet<string>;
   onAction(payload: JsonValue): void;
 }
 
@@ -35,6 +38,7 @@ export interface GameAdapter {
   readonly Renderer: FunctionComponent<GameRendererProps>;
   getSeatPresentations(position: RulePosition | null): SeatPresentations;
   getErrorMessage(code: string): string | null;
+  getStatusMessage?(position: RulePosition, selfSeat: string | null): string;
   getOutcomeMessage?(
     outcome: RuleOutcome,
     viewer: {
@@ -52,6 +56,8 @@ export const unknownSeatPresentations: SeatPresentations = {
 export const availableGameAdapters = [
   gomokuAdapter,
   xiangqiAdapter,
+  ticTacToeAdapter,
+  ...minesweeperDuelAdapters,
 ] as const satisfies readonly GameAdapter[];
 
 const adaptersByRuleSetId = new Map<string, GameAdapter>(

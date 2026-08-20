@@ -1,6 +1,6 @@
 # Board Game Platform
 
-这是当前极简邀请房平台的统一语言。当前支持五子棋与中国象棋；以后增加其他棋类时保持房间基础设施不变。
+这是当前极简邀请房平台的统一语言。当前支持五子棋、中国象棋、井字棋、单人扫雷与双人同时扫雷；以后增加其他棋类时保持房间基础设施不变。
 
 ## Language
 
@@ -38,7 +38,13 @@
 单个 Guest 在一个 Room 内最多同时保持 4 条 WebSocket 或 HTTPS 兼容连接；单房总连接最多 16 条。其中观众最多占 8 条，剩余容量为两个玩家及其重连保留。
 
 **GameRules（棋类规则模块）**  
-隐藏某棋种初始局面、回合、合法性和规则终局的深模块。公共接口只有确定性的 `create` 与 `apply`。
+隐藏某棋种初始局面、回合、合法性和规则终局的深模块。公共接口由确定性的 `create`、`apply` 和按观看者生成公开局面的 `project` 组成。
+
+**Authoritative Position（权威局面）**
+仅保存在服务端的完整规则局面。具有隐藏信息的游戏可以在这里保存雷区、随机种子和私有旗帜。
+
+**Public Position（公开局面）**
+`GameRules.project` 根据观看者 Seat 从权威局面生成的快照。终局前不得包含未公开的雷区、种子、隐藏数字或对手私有信息。
 
 **RuleSet（规则集）**  
 具有不可变语义和版本号的规则定义，例如 `gomoku.freestyle15.v1` 或 `xiangqi.casual.v1`。规则语义变化必须发布新 ID。
@@ -50,6 +56,9 @@
 规则导致的胜、负、和，或平台动作导致的认输结果。
 
 **Revision（修订号）**  
-房间每接受一个命令后递增的序号。客户端用 `expectedRevision` 防止旧页面或重复提交覆盖新状态。
+房间每处理一个改变持久状态的命令后递增的序号。严格棋类用 `expectedRevision` 防止旧页面或重复提交覆盖新状态；并发棋类按最新权威局面处理携带 `actionId`、`clientSeq` 和 `baseRevision` 的动作。
+
+**Action Consistency（动作一致性策略）**
+规则模块声明 `strict_revision` 或 `concurrent_idempotent`。五子棋、中国象棋和井字棋保持严格 revision；双人扫雷允许不同格子的并发幂等动作，客户端从房间快照读取策略而不按棋种名称判断。
 
 避免把 User、Match、Rating、OpeningRule 和通用 Board 等未来概念提前加入当前实现；真实功能出现时再扩充语言。

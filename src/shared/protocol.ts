@@ -1,6 +1,12 @@
-import type { JsonValue } from "../core/game-rules";
+import type {
+  ActionConsistency,
+  JsonValue,
+  RulePosition,
+} from "../core/game-rules";
 
 export const PROTOCOL_VERSION = 1 as const;
+
+const ACTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
 
 interface CommandBase {
   v: typeof PROTOCOL_VERSION;
@@ -17,6 +23,9 @@ export interface GameActionCommand extends CommandBase {
   gameType: string;
   ruleSetId: string;
   payload: JsonValue;
+  actionId?: string;
+  clientSeq?: number;
+  baseRevision?: number;
 }
 
 export interface ResignCommand extends CommandBase {
@@ -47,18 +56,28 @@ export interface RoomSpectatorView {
   isSelf: boolean;
 }
 
+export interface ActionReceipt {
+  actionId: string;
+  clientSeq: number;
+  status: "applied" | "already_revealed" | "rejected";
+  code?: string;
+  revision: number;
+}
+
 export interface RoomSnapshot {
   v: typeof PROTOCOL_VERSION;
   type: "snapshot";
   roomId: string;
   gameType: string;
   ruleSetId: string;
+  actionConsistency?: ActionConsistency;
   revision: number;
   round: number;
   selfSeat: string | null;
   seats: Record<string, RoomSeatView>;
   spectators: RoomSpectatorView[];
-  position: import("../core/game-rules").RulePosition | null;
+  position: RulePosition | null;
+  actionReceipts?: ActionReceipt[];
 }
 
 export interface ServerError {
@@ -66,6 +85,7 @@ export interface ServerError {
   type: "error";
   code: string;
   snapshot?: RoomSnapshot;
+  actionId?: string;
 }
 
 export interface LeftMessage {
@@ -130,6 +150,24 @@ export function parseClientCommand(value: unknown): ClientCommand | null {
     ) {
       return null;
     }
+    const metadataKeys = ["actionId", "clientSeq", "baseRevision"] as const;
+    const metadataCount = metadataKeys.filter((key) =>
+      Object.hasOwn(value, key)
+    ).length;
+    if (metadataCount !== 0 && metadataCount !== metadataKeys.length) {
+      return null;
+    }
+    if (
+      metadataCount === metadataKeys.length &&
+      (typeof value.actionId !== "string" ||
+        !ACTION_ID_PATTERN.test(value.actionId) ||
+        !Number.isSafeInteger(value.clientSeq) ||
+        (value.clientSeq as number) < 0 ||
+        !Number.isSafeInteger(value.baseRevision) ||
+        (value.baseRevision as number) < 0)
+    ) {
+      return null;
+    }
     return {
       v: PROTOCOL_VERSION,
       type: "game_action",
@@ -137,6 +175,13 @@ export function parseClientCommand(value: unknown): ClientCommand | null {
       ruleSetId: value.ruleSetId,
       expectedRevision,
       payload: value.payload,
+      ...(metadataCount === metadataKeys.length
+        ? {
+            actionId: value.actionId as string,
+            clientSeq: value.clientSeq as number,
+            baseRevision: value.baseRevision as number,
+          }
+        : {}),
     };
   }
   if (value.type === "resign") {

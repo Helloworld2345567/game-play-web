@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 import { getGameAdapter } from "./registry";
 
 describe("game outcome presentation", () => {
+  it("registers all three double-player minesweeper difficulties", () => {
+    for (const ruleSetId of [
+      "minesweeper.duel.9x9x10.v1",
+      "minesweeper.duel.16x16x40.v1",
+      "minesweeper.duel.30x16x99.v1",
+    ]) {
+      expect(getGameAdapter("minesweeper", ruleSetId)).toMatchObject({
+        gameType: "minesweeper",
+        ruleSetId,
+      });
+    }
+  });
+
   it("names a Xiangqi checkmate from both players' perspectives", () => {
     const adapter = getGameAdapter("xiangqi", "xiangqi.casual.v1");
     const outcome = {

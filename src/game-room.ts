@@ -3,9 +3,11 @@ import {
   applyRoomCommand,
   createRoom,
   getGuestSeat,
+  hydrateStoredRoom,
   joinRoom,
   SEAT_A,
   SEAT_B,
+  type PersistedRoom,
   type PlatformSeatId,
   type StoredRoom,
 } from "./core/room-state";
@@ -187,8 +189,10 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       new WebSocketRequestResponsePair("ping", "pong"),
     );
     void this.ctx.blockConcurrencyWhile(async () => {
+      const storedRoom =
+        (await this.ctx.storage.get<PersistedRoom>(ROOM_STORAGE_KEY)) ?? null;
       this.room =
-        (await this.ctx.storage.get<StoredRoom>(ROOM_STORAGE_KEY)) ?? null;
+        storedRoom === null ? null : hydrateStoredRoom(storedRoom);
       this.httpLeases =
         (await this.ctx.storage.get<HttpLeases>(HTTP_LEASES_KEY)) ?? {};
       this.httpRateBuckets =
@@ -284,7 +288,13 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (existing === undefined) {
       const rules = getGameRules(room.ruleSetId);
       if (rules === null) return this.httpError("room.rule_mismatch");
-      const joined = joinRoom(room, guestId, rules, now);
+      const joined = joinRoom(
+        room,
+        guestId,
+        rules,
+        now,
+        crypto.randomUUID(),
+      );
       if (!joined.ok && joined.code !== "room.full") {
         return this.httpError(joined.code);
       }
@@ -336,16 +346,18 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (command === null || command.type === "leave") {
       return this.httpError("protocol.invalid_message");
     }
+    const actionId =
+      command.type === "game_action" ? command.actionId : undefined;
     if (this.room === null || this.discarding) {
-      return this.httpError("room.expired");
+      return this.httpError("room.expired", undefined, actionId);
     }
     const now = Date.now();
     if (now >= this.room.expiresAt) {
       await this.discardRoom();
-      return this.httpError("room.expired");
+      return this.httpError("room.expired", undefined, actionId);
     }
     if (await this.isVacancyExpired(now)) {
-      return this.httpError("room.expired");
+      return this.httpError("room.expired", undefined, actionId);
     }
     const lease = this.httpLeases[value.connectionId];
     if (
@@ -353,10 +365,10 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       lease.guestId !== guestId ||
       getGuestSeat(this.room, guestId) !== lease.seat
     ) {
-      return this.httpError("room.connection_required", guestId);
+      return this.httpError("room.connection_required", guestId, actionId);
     }
     if (lease.seat === null) {
-      return this.httpError("room.spectator_read_only", guestId);
+      return this.httpError("room.spectator_read_only", guestId, actionId);
     }
     const bucket = this.httpRateBuckets[guestId] ?? {
       tokens: RATE_CAPACITY,
@@ -379,20 +391,35 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     await this.ctx.storage.put(HTTP_RATE_BUCKETS_KEY, this.httpRateBuckets);
     await this.markOccupied();
     if (replenished < 1) {
-      return this.httpError("protocol.rate_limited", guestId);
+      return this.httpError("protocol.rate_limited", guestId, actionId);
     }
     const rules = getGameRules(this.room.ruleSetId);
-    if (rules === null) return this.httpError("room.rule_mismatch", guestId);
+    if (rules === null) {
+      return this.httpError("room.rule_mismatch", guestId, actionId);
+    }
     const decision = applyRoomCommand(
       this.room,
       guestId,
       command,
       rules,
       now,
+      crypto.randomUUID(),
     );
-    if (!decision.ok) return this.httpError(decision.code, guestId);
-    await this.persist(decision.room);
-    this.broadcastSnapshots();
+    if (!decision.ok) {
+      if (decision.changed) {
+        await this.persist(decision.room);
+        this.broadcastSnapshots();
+      }
+      return this.httpError(
+        decision.code,
+        guestId,
+        actionId,
+      );
+    }
+    if (decision.changed) {
+      await this.persist(decision.room);
+      this.broadcastSnapshots();
+    }
     return Response.json(this.snapshotFor(guestId));
   }
 
@@ -480,11 +507,16 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     await this.pruneOfflineSpectatorDisplayNames(now);
   }
 
-  private httpError(code: string, guestId?: string): Response {
+  private httpError(
+    code: string,
+    guestId?: string,
+    actionId?: string,
+  ): Response {
     const error: ServerError = {
       v: PROTOCOL_VERSION,
       type: "error",
       code,
+      ...(actionId === undefined ? {} : { actionId }),
       ...(guestId !== undefined && this.room !== null
         ? { snapshot: this.snapshotFor(guestId) }
         : {}),
@@ -611,7 +643,13 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       return this.rejectedSocket("room.rule_mismatch");
     }
 
-    const joined = joinRoom(this.room, guestId, rules, now);
+    const joined = joinRoom(
+      this.room,
+      guestId,
+      rules,
+      now,
+      crypto.randomUUID(),
+    );
     if (!joined.ok && joined.code !== "room.full") {
       return this.rejectedSocket(joined.code);
     }
@@ -718,11 +756,21 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       return;
     }
     if (command.type !== "leave" && !hasRateToken) {
-      this.sendError(socket, "protocol.rate_limited");
+      this.sendError(
+        socket,
+        "protocol.rate_limited",
+        attachment.guestId,
+        command.type === "game_action" ? command.actionId : undefined,
+      );
       return;
     }
     if (this.room === null) {
-      this.sendError(socket, "room.expired");
+      this.sendError(
+        socket,
+        "room.expired",
+        undefined,
+        command.type === "game_action" ? command.actionId : undefined,
+      );
       return;
     }
     if (getGuestSeat(this.room, attachment.guestId) !== attachment.seat) {
@@ -738,12 +786,18 @@ export class GameRoom extends DurableObject<WorkerEnv> {
         socket,
         "room.spectator_read_only",
         attachment.guestId,
+        command.type === "game_action" ? command.actionId : undefined,
       );
       return;
     }
     const rules = getGameRules(this.room.ruleSetId);
     if (rules === null) {
-      this.sendError(socket, "room.rule_mismatch");
+      this.sendError(
+        socket,
+        "room.rule_mismatch",
+        attachment.guestId,
+        command.type === "game_action" ? command.actionId : undefined,
+      );
       return;
     }
 
@@ -753,14 +807,28 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       command,
       rules,
       Date.now(),
+      crypto.randomUUID(),
     );
     if (!decision.ok) {
-      this.sendError(socket, decision.code, attachment.guestId);
+      if (decision.changed) {
+        await this.persist(decision.room);
+        this.broadcastSnapshots();
+      }
+      this.sendError(
+        socket,
+        decision.code,
+        attachment.guestId,
+        command.type === "game_action" ? command.actionId : undefined,
+      );
       return;
     }
 
-    await this.persist(decision.room);
-    this.broadcastSnapshots();
+    if (decision.changed) {
+      await this.persist(decision.room);
+      this.broadcastSnapshots();
+    } else {
+      socket.send(JSON.stringify(this.snapshotFor(attachment.guestId)));
+    }
   }
 
   async alarm(): Promise<void> {
@@ -1244,6 +1312,11 @@ export class GameRoom extends DurableObject<WorkerEnv> {
 
   private snapshotFor(guestId: string): RoomSnapshot {
     const room = this.room!;
+    const viewerSeat = getGuestSeat(room, guestId);
+    const rules = getGameRules(room.ruleSetId);
+    if (rules === null) {
+      throw new Error(`Stored Room has unknown rules: ${room.ruleSetId}`);
+    }
     const seatA = room.seats[SEAT_A];
     const seatB = room.seats[SEAT_B];
     const onlineGuests = new Set(
@@ -1267,6 +1340,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       roomId: room.roomId,
       gameType: room.gameType,
       ruleSetId: room.ruleSetId,
+      actionConsistency: rules.definition.actionConsistency,
       revision: room.revision,
       round: room.round,
       selfSeat: getGuestSeat(room, guestId),
@@ -1296,7 +1370,17 @@ export class GameRoom extends DurableObject<WorkerEnv> {
           defaultDisplayName(spectatorGuestId),
         isSelf: spectatorGuestId === guestId,
       })),
-      position: room.position,
+      position:
+        room.position === null
+          ? null
+          : rules.project(room.position, viewerSeat),
+      ...(viewerSeat !== null &&
+      rules.definition.actionConsistency === "concurrent_idempotent"
+        ? {
+            actionReceipts:
+              room.recentActionReceipts?.[viewerSeat] ?? [],
+          }
+        : {}),
     };
   }
 
@@ -1304,11 +1388,13 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     socket: WebSocket,
     code: string,
     guestId?: string,
+    actionId?: string,
   ): void {
     const error: ServerError = {
       v: PROTOCOL_VERSION,
       type: "error",
       code,
+      ...(actionId === undefined ? {} : { actionId }),
       ...(guestId !== undefined && this.room !== null
         ? { snapshot: this.snapshotFor(guestId) }
         : {}),

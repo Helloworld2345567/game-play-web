@@ -300,6 +300,262 @@ function xiangqiMoveCommand(
   };
 }
 
+const MINESWEEPER_GAME_TYPE = "minesweeper";
+const MINESWEEPER_SMALL_RULE_SET = "minesweeper.duel.9x9x10.v1";
+
+interface StoredMinesweeperCell {
+  mine: boolean;
+  adjacentMines: number;
+}
+
+interface StoredMinesweeperData {
+  phase: "waiting_ready" | "countdown" | "selecting" | "playing" | "finished";
+  countdownEndsAt: number | null;
+  field: { cells: StoredMinesweeperCell[] } | null;
+  revealed: boolean[];
+  revealedBy: Array<string | null>;
+  privateFlags: Record<string, boolean[]>;
+  scores: Record<string, number>;
+  exploded: number | null;
+}
+
+interface StartedMinesweeperRoom {
+  stub: DurableObjectStub<GameRoom>;
+  creator: TestConnection;
+  invitee: TestConnection;
+  spectator: TestConnection;
+  firstSelection: {
+    creator: JsonMessage;
+    invitee: JsonMessage;
+    spectator: JsonMessage;
+  };
+  playing: {
+    creator: JsonMessage;
+    invitee: JsonMessage;
+    spectator: JsonMessage;
+  };
+}
+
+function minesweeperCommand(
+  baseRevision: number,
+  actionId: string,
+  clientSeq: number,
+  payload: Record<string, unknown>,
+) {
+  return {
+    v: 1,
+    type: "game_action",
+    gameType: MINESWEEPER_GAME_TYPE,
+    ruleSetId: MINESWEEPER_SMALL_RULE_SET,
+    expectedRevision: baseRevision,
+    actionId,
+    clientSeq,
+    baseRevision,
+    payload,
+  };
+}
+
+function minesweeperPublicData(message: JsonMessage): Record<string, unknown> {
+  const position = message.position;
+  if (
+    typeof position !== "object" ||
+    position === null ||
+    Array.isArray(position)
+  ) {
+    throw new Error("Expected a minesweeper position");
+  }
+  const data = (position as Record<string, unknown>).data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("Expected public minesweeper data");
+  }
+  return data as Record<string, unknown>;
+}
+
+function collectObjectKeys(value: unknown, keys = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectObjectKeys(entry, keys);
+    return keys;
+  }
+  if (typeof value !== "object" || value === null) return keys;
+  for (const [key, entry] of Object.entries(value)) {
+    keys.add(key);
+    collectObjectKeys(entry, keys);
+  }
+  return keys;
+}
+
+function expectPreFinishMinesweeperSnapshotToBePublic(
+  message: JsonMessage,
+): void {
+  const data = minesweeperPublicData(message);
+  const keys = collectObjectKeys(data);
+  for (const forbidden of [
+    "seed",
+    "field",
+    "cells",
+    "mine",
+    "privateFlags",
+    "startSelections",
+    "mines",
+  ]) {
+    expect(keys.has(forbidden), `public snapshot leaked ${forbidden}`).toBe(
+      false,
+    );
+  }
+}
+
+async function readStoredMinesweeper(
+  stub: DurableObjectStub<GameRoom>,
+): Promise<{ room: StoredRoom; data: StoredMinesweeperData }> {
+  const room = await runInDurableObject(stub, (_instance, state) =>
+    state.storage.get<StoredRoom>("room"),
+  );
+  if (room?.position === null || room?.position === undefined) {
+    throw new Error("Expected a stored minesweeper position");
+  }
+  return {
+    room,
+    data: room.position.data as unknown as StoredMinesweeperData,
+  };
+}
+
+async function setStoredMinesweeperSeed(
+  stub: DurableObjectStub<GameRoom>,
+  seed: string,
+): Promise<void> {
+  await runInDurableObject(stub, async (instance, state) => {
+    const room = await state.storage.get<StoredRoom>("room");
+    if (room?.position === null || room?.position === undefined) {
+      throw new Error("Expected a stored minesweeper position");
+    }
+    const data = room.position.data as unknown as StoredMinesweeperData & {
+      seed: string;
+    };
+    const next: StoredRoom = {
+      ...room,
+      position: {
+        ...room.position,
+        data: { ...data, seed } as unknown as typeof room.position.data,
+      },
+    };
+    await (
+      instance as unknown as { persist(nextRoom: StoredRoom): Promise<void> }
+    ).persist(next);
+  });
+}
+
+function cellPoint(index: number): { x: number; y: number } {
+  return { x: index % 9, y: Math.floor(index / 9) };
+}
+
+function findHiddenSafeNumber(
+  data: StoredMinesweeperData,
+  excluded: ReadonlySet<number> = new Set(),
+): number {
+  return (
+    data.field?.cells.findIndex(
+      (cell, index) =>
+        !cell.mine &&
+        cell.adjacentMines > 0 &&
+        !data.revealed[index] &&
+        !excluded.has(index),
+    ) ?? -1
+  );
+}
+
+async function startMinesweeperRoom(
+  roomLabel: string,
+  firstStart = { x: 1, y: 1 },
+  secondStart = { x: 7, y: 7 },
+): Promise<StartedMinesweeperRoom> {
+  const initialized = await initializeManagedRoom(
+    roomLabel,
+    "guest-mine-creator",
+    MINESWEEPER_GAME_TYPE,
+    MINESWEEPER_SMALL_RULE_SET,
+  );
+  const { stub } = initialized;
+  const creator = await connect(stub, "guest-mine-creator");
+  const invitee = await connect(stub, "guest-mine-invitee");
+  await creator.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 1,
+  );
+  await setStoredMinesweeperSeed(stub, "worker-minesweeper-fixed-seed");
+  const spectator = await connect(stub, "guest-mine-spectator");
+
+  creator.socket.send(
+    JSON.stringify(
+      minesweeperCommand(1, `${roomLabel}-a-ready`, 1, { type: "ready" }),
+    ),
+  );
+  await creator.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 2,
+  );
+
+  invitee.socket.send(
+    JSON.stringify(
+      minesweeperCommand(1, `${roomLabel}-b-ready`, 1, { type: "ready" }),
+    ),
+  );
+  const countdown = await invitee.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 3,
+  );
+  const countdownEndsAt = minesweeperPublicData(countdown).countdownEndsAt;
+  if (typeof countdownEndsAt !== "number") {
+    throw new Error("Expected a minesweeper countdown deadline");
+  }
+  vi.setSystemTime(countdownEndsAt + 1);
+
+  creator.socket.send(
+    JSON.stringify(
+      minesweeperCommand(3, `${roomLabel}-a-start`, 2, {
+        type: "select_start",
+        ...firstStart,
+      }),
+    ),
+  );
+  const firstSelection = {
+    creator: await creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 4,
+    ),
+    invitee: await invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 4,
+    ),
+    spectator: await spectator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 4,
+    ),
+  };
+
+  invitee.socket.send(
+    JSON.stringify(
+      minesweeperCommand(3, `${roomLabel}-b-start`, 2, {
+        type: "select_start",
+        ...secondStart,
+      }),
+    ),
+  );
+  const playing = {
+    creator: await creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 5,
+    ),
+    invitee: await invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 5,
+    ),
+    spectator: await spectator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 5,
+    ),
+  };
+
+  return {
+    ...initialized,
+    creator,
+    invitee,
+    spectator,
+    firstSelection,
+    playing,
+  };
+}
+
 afterEach(async () => {
   await Promise.all([...liveSockets].map(closeSocket));
   liveSockets.clear();
@@ -1734,6 +1990,415 @@ describe("GameRoom Durable Object", () => {
         turn: "seat-b",
         data: { moveCount: 1, lastMove: { x: 7, y: 7, stone: 1 } },
       },
+    });
+  });
+
+  it("starts minesweeper only after both private starts and projects no secret field", async () => {
+    try {
+      const started = await startMinesweeperRoom("mine-private-starts");
+
+      expect(minesweeperPublicData(started.firstSelection.creator)).toMatchObject(
+        {
+          phase: "selecting",
+          ownStart: { x: 1, y: 1 },
+        },
+      );
+      expect(minesweeperPublicData(started.firstSelection.invitee)).toMatchObject(
+        {
+          phase: "selecting",
+          ownStart: null,
+        },
+      );
+      expect(minesweeperPublicData(started.firstSelection.spectator)).toMatchObject(
+        {
+          phase: "selecting",
+          ownStart: null,
+        },
+      );
+      for (const snapshot of Object.values(started.firstSelection)) {
+        expectPreFinishMinesweeperSnapshotToBePublic(snapshot);
+      }
+
+      expect(minesweeperPublicData(started.playing.creator)).toMatchObject({
+        phase: "playing",
+        ownStart: { x: 1, y: 1 },
+        scores: { "seat-a": 0, "seat-b": 0 },
+      });
+      expect(minesweeperPublicData(started.playing.invitee)).toMatchObject({
+        phase: "playing",
+        ownStart: { x: 7, y: 7 },
+        scores: { "seat-a": 0, "seat-b": 0 },
+      });
+      expect(minesweeperPublicData(started.playing.spectator)).toMatchObject({
+        phase: "playing",
+        ownStart: null,
+        flags: [],
+      });
+      for (const snapshot of Object.values(started.playing)) {
+        expectPreFinishMinesweeperSnapshotToBePublic(snapshot);
+      }
+
+      const authoritative = await readStoredMinesweeper(started.stub);
+      expect(authoritative.data.field?.cells.filter((cell) => cell.mine)).toHaveLength(
+        10,
+      );
+      expect(authoritative.data.revealedBy.every((seat) => seat === null)).toBe(
+        true,
+      );
+      for (const center of [
+        { x: 1, y: 1 },
+        { x: 7, y: 7 },
+      ]) {
+        for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+          for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+            const x = center.x + offsetX;
+            const y = center.y + offsetY;
+            expect(authoritative.data.field?.cells[y * 9 + x]?.mine).toBe(
+              false,
+            );
+          }
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes simultaneous minesweeper actions across WebSocket and HTTPS without leaking private flags", async () => {
+    try {
+      const started = await startMinesweeperRoom(
+        "mine-concurrent-actions",
+        { x: 0, y: 0 },
+        { x: 0, y: 0 },
+      );
+      const httpConnectionId = "mine-http-invitee-01";
+      const httpSync = await postRoomHttp(
+        started.stub,
+        "sync",
+        "guest-mine-invitee",
+        { v: 1, connectionId: httpConnectionId },
+      );
+      expect(httpSync.message).toMatchObject({
+        type: "snapshot",
+        revision: 5,
+        selfSeat: "seat-b",
+      });
+
+      const initial = await readStoredMinesweeper(started.stub);
+      expect(initial.data.phase).toBe("playing");
+      const safeA = findHiddenSafeNumber(initial.data);
+      const safeB = findHiddenSafeNumber(initial.data, new Set([safeA]));
+      expect(safeA).toBeGreaterThanOrEqual(0);
+      expect(safeB).toBeGreaterThanOrEqual(0);
+
+      started.creator.socket.send(
+        JSON.stringify(
+          minesweeperCommand(5, "mine-a-safe-old-base", 3, {
+            type: "reveal",
+            ...cellPoint(safeA),
+          }),
+        ),
+      );
+      await started.creator.inbox.nextMatching(
+        (message) => message.type === "snapshot" && message.revision === 6,
+      );
+
+      const safeBResponse = await postRoomHttp(
+        started.stub,
+        "command",
+        "guest-mine-invitee",
+        {
+          v: 1,
+          connectionId: httpConnectionId,
+          command: minesweeperCommand(5, "mine-b-safe-old-base", 3, {
+            type: "reveal",
+            ...cellPoint(safeB),
+          }),
+        },
+      );
+      expect(safeBResponse.message).toMatchObject({
+        type: "snapshot",
+        revision: 7,
+        actionReceipts: [
+          expect.anything(),
+          expect.anything(),
+          {
+            actionId: "mine-b-safe-old-base",
+            status: "applied",
+            revision: 7,
+          },
+        ],
+      });
+      const afterDifferentCells = await readStoredMinesweeper(started.stub);
+      expect(afterDifferentCells.data.revealed[safeA]).toBe(true);
+      expect(afterDifferentCells.data.revealed[safeB]).toBe(true);
+      expect(afterDifferentCells.data.revealedBy[safeA]).toBe("seat-a");
+      expect(afterDifferentCells.data.revealedBy[safeB]).toBe("seat-b");
+      expect(afterDifferentCells.data.scores).toEqual({
+        "seat-a": 1,
+        "seat-b": 1,
+      });
+
+      const sameCell = findHiddenSafeNumber(afterDifferentCells.data);
+      expect(sameCell).toBeGreaterThanOrEqual(0);
+      const duplicateCommand = minesweeperCommand(
+        7,
+        "mine-b-same-cell",
+        4,
+        { type: "reveal", ...cellPoint(sameCell) },
+      );
+      started.creator.socket.send(
+        JSON.stringify(
+          minesweeperCommand(7, "mine-a-same-cell", 4, {
+            type: "reveal",
+            ...cellPoint(sameCell),
+          }),
+        ),
+      );
+      await started.creator.inbox.nextMatching(
+        (message) => message.type === "snapshot" && message.revision === 8,
+      );
+      const sameCellResponse = await postRoomHttp(
+        started.stub,
+        "command",
+        "guest-mine-invitee",
+        {
+          v: 1,
+          connectionId: httpConnectionId,
+          command: duplicateCommand,
+        },
+      );
+      expect(sameCellResponse.message).toMatchObject({
+        revision: 9,
+        actionReceipts: expect.arrayContaining([
+          {
+            actionId: "mine-b-same-cell",
+            clientSeq: 4,
+            status: "already_revealed",
+            revision: 9,
+          },
+        ]),
+      });
+      const afterSameCell = await readStoredMinesweeper(started.stub);
+      expect(afterSameCell.data.scores).toEqual({
+        "seat-a": 2,
+        "seat-b": 1,
+      });
+      expect(afterSameCell.data.revealedBy[sameCell]).toBe("seat-a");
+
+      const duplicateResponse = await postRoomHttp(
+        started.stub,
+        "command",
+        "guest-mine-invitee",
+        {
+          v: 1,
+          connectionId: httpConnectionId,
+          command: duplicateCommand,
+        },
+      );
+      expect(duplicateResponse.message).toMatchObject({ revision: 9 });
+      const afterDuplicate = await readStoredMinesweeper(started.stub);
+      expect(afterDuplicate.room.revision).toBe(9);
+      expect(afterDuplicate.data.scores).toEqual(afterSameCell.data.scores);
+      expect(
+        afterDuplicate.room.recentActionReceipts["seat-b"].filter(
+          (receipt) => receipt.actionId === "mine-b-same-cell",
+        ),
+      ).toHaveLength(1);
+
+      const mines = afterDuplicate.data.field!.cells.flatMap((cell, index) =>
+        cell.mine ? [index] : [],
+      );
+      expect(mines).toHaveLength(10);
+      const [creatorFlag, inviteeFlag, lateMine] = mines;
+      expect(creatorFlag).not.toBeUndefined();
+      expect(inviteeFlag).not.toBeUndefined();
+      expect(lateMine).not.toBeUndefined();
+
+      started.creator.socket.send(
+        JSON.stringify(
+          minesweeperCommand(9, "mine-a-private-flag", 5, {
+            type: "toggle_flag",
+            ...cellPoint(creatorFlag!),
+          }),
+        ),
+      );
+      await started.creator.inbox.nextMatching(
+        (message) => message.type === "snapshot" && message.revision === 10,
+      );
+      const inviteeFlagResponse = await postRoomHttp(
+        started.stub,
+        "command",
+        "guest-mine-invitee",
+        {
+          v: 1,
+          connectionId: httpConnectionId,
+          command: minesweeperCommand(9, "mine-b-private-flag", 5, {
+            type: "toggle_flag",
+            ...cellPoint(inviteeFlag!),
+          }),
+        },
+      );
+      expect(inviteeFlagResponse.message).toMatchObject({ revision: 11 });
+      const creatorPrivateView = await started.creator.inbox.nextMatching(
+        (message) => message.type === "snapshot" && message.revision === 11,
+      );
+      const spectatorPrivateView = await started.spectator.inbox.nextMatching(
+        (message) => message.type === "snapshot" && message.revision === 11,
+      );
+      expect(minesweeperPublicData(creatorPrivateView)).toMatchObject({
+        flags: [creatorFlag],
+      });
+      expect(minesweeperPublicData(inviteeFlagResponse.message)).toMatchObject({
+        flags: [inviteeFlag],
+      });
+      expect(minesweeperPublicData(spectatorPrivateView)).toMatchObject({
+        flags: [],
+      });
+      for (const snapshot of [
+        creatorPrivateView,
+        inviteeFlagResponse.message,
+        spectatorPrivateView,
+      ]) {
+        expectPreFinishMinesweeperSnapshotToBePublic(snapshot);
+      }
+
+      await closeSocket(started.creator.socket);
+      const creatorAfterRefresh = await connect(
+        started.stub,
+        "guest-mine-creator",
+      );
+      expect(creatorAfterRefresh.firstMessage).toMatchObject({
+        revision: 11,
+        selfSeat: "seat-a",
+      });
+      expect(minesweeperPublicData(creatorAfterRefresh.firstMessage)).toMatchObject(
+        { flags: [creatorFlag] },
+      );
+
+      const scoresBeforeMine = (await readStoredMinesweeper(started.stub)).data
+        .scores;
+      const exploded = await postRoomHttp(
+        started.stub,
+        "command",
+        "guest-mine-invitee",
+        {
+          v: 1,
+          connectionId: httpConnectionId,
+          command: minesweeperCommand(11, "mine-b-hits-a-private-flag", 6, {
+            type: "reveal",
+            ...cellPoint(creatorFlag!),
+          }),
+        },
+      );
+      expect(exploded.message).toMatchObject({
+        type: "snapshot",
+        revision: 12,
+        position: {
+          outcome: {
+            kind: "win",
+            winner: "seat-a",
+            reason: "opponent_hit_mine",
+          },
+          data: {
+            phase: "finished",
+            exploded: creatorFlag,
+            scores: scoresBeforeMine,
+            mines: expect.arrayContaining([creatorFlag]),
+          },
+        },
+      });
+      const terminalData = minesweeperPublicData(exploded.message);
+      expect(terminalData.mines).toHaveLength(10);
+      const terminalKeys = collectObjectKeys(terminalData);
+      for (const forbidden of [
+        "seed",
+        "field",
+        "cells",
+        "mine",
+        "privateFlags",
+        "startSelections",
+      ]) {
+        expect(terminalKeys.has(forbidden)).toBe(false);
+      }
+
+      creatorAfterRefresh.socket.send(
+        JSON.stringify(
+          minesweeperCommand(11, "mine-a-arrives-after-finish", 6, {
+            type: "reveal",
+            ...cellPoint(lateMine!),
+          }),
+        ),
+      );
+      const tooLate = await creatorAfterRefresh.inbox.nextMatching(
+        (message) =>
+          message.type === "error" &&
+          message.actionId === "mine-a-arrives-after-finish",
+      );
+      expect(tooLate).toMatchObject({
+        code: "minesweeper.game_finished",
+        actionId: "mine-a-arrives-after-finish",
+        snapshot: {
+          revision: 13,
+          position: {
+            outcome: { kind: "win", winner: "seat-a" },
+            data: { exploded: creatorFlag, mines: expect.any(Array) },
+          },
+          actionReceipts: expect.arrayContaining([
+            expect.objectContaining({
+              actionId: "mine-a-arrives-after-finish",
+              status: "rejected",
+              code: "minesweeper.game_finished",
+            }),
+          ]),
+        },
+      });
+      const final = await readStoredMinesweeper(started.stub);
+      expect(final.room.revision).toBe(13);
+      expect(final.room.position?.outcome).toEqual({
+        kind: "win",
+        winner: "seat-a",
+        reason: "opponent_hit_mine",
+      });
+      expect(final.data.exploded).toBe(creatorFlag);
+      expect(final.data.scores).toEqual(scoresBeforeMine);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps Chinese chess on strict revisions while concurrent games accept stale bases", async () => {
+    const stub = await initializeRoom(
+      "room-xiangqi-stale",
+      "guest-xiangqi-strict-creator",
+      "xiangqi",
+      "xiangqi.casual.v1",
+    );
+    const creator = await connect(stub, "guest-xiangqi-strict-creator");
+    await connect(stub, "guest-xiangqi-strict-invitee");
+    await creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 1,
+    );
+
+    creator.socket.send(
+      JSON.stringify(xiangqiMoveCommand(0, 4, 6, 4, 5)),
+    );
+
+    await expect(
+      creator.inbox.nextMatching((message) => message.type === "error"),
+    ).resolves.toMatchObject({
+      code: "room.revision_mismatch",
+      snapshot: {
+        revision: 1,
+        position: { data: { moveCount: 0, lastMove: null } },
+      },
+    });
+    const stored = await runInDurableObject(stub, (_instance, state) =>
+      state.storage.get<StoredRoom>("room"),
+    );
+    expect(stored).toMatchObject({
+      revision: 1,
+      position: { data: { moveCount: 0, lastMove: null } },
     });
   });
 

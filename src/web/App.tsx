@@ -9,6 +9,7 @@ import {
   UnsupportedGame,
   unknownSeatPresentations,
 } from "./games/registry";
+import { SoloPage } from "./games/minesweeper/SoloPage";
 import {
   ensureBrowserSession,
   useRoom,
@@ -180,6 +181,13 @@ function LandingPage({
           onSave={onDisplayNameChange}
         />
         <div class="game-choice-grid" aria-label="选择棋种">
+          <a
+            href="/minesweeper"
+            class="secondary-button hero-button game-choice link-button"
+          >
+            <strong>单人扫雷</strong>
+            <small>本机运行 · 三种难度 · 不占房间名额</small>
+          </a>
           {availableGameAdapters.map((game, index) => (
             <button
               key={game.ruleSetId}
@@ -216,7 +224,7 @@ function LandingPage({
         </article>
       </section>
       <footer class="site-footer">
-        五子棋与中国象棋 · 一条邀请链接，一局私人对战
+        五子棋、中国象棋、井字棋与扫雷 · 一条邀请链接，一局私人对战
       </footer>
     </main>
   );
@@ -274,6 +282,11 @@ function mainStatus(
   if (outcome?.kind === "win") {
     return outcome.winner === snapshot.selfSeat ? "你赢了" : "对手获胜";
   }
+  const gameStatus = adapter?.getStatusMessage?.(
+    snapshot.position,
+    snapshot.selfSeat,
+  );
+  if (gameStatus !== undefined) return gameStatus;
   return snapshot.position.turn === snapshot.selfSeat ? "轮到你" : "等待对手落子";
 }
 
@@ -309,12 +322,10 @@ function RoomPage({
   const isPlayer = selfSeat !== null;
   const canPlace =
     client.phase === "online" &&
-    !client.pending &&
     !client.leaving &&
     adapter !== null &&
     isPlayer &&
     bothOccupied &&
-    snapshot?.position?.turn === selfSeat &&
     outcome === null;
   const ownReady =
     snapshot !== null &&
@@ -466,6 +477,7 @@ function RoomPage({
             selfSeat={snapshot.selfSeat}
             disabled={!canPlace}
             pending={client.pending}
+            pendingCells={client.pendingCells}
             onAction={(payload) => client.sendGameAction(payload)}
           />
         ) : (
@@ -573,6 +585,9 @@ export function App() {
         onDisplayNameChange={saveDisplayName}
       />
     );
+  }
+  if (path === "/minesweeper" || path === "/minesweeper/") {
+    return <SoloPage />;
   }
   const match = path.match(ROOM_PATH);
   if (match?.[1]) {

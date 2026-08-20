@@ -76,6 +76,7 @@ describe("xiangqi rules", () => {
     expect(xiangqiRules.definition).toEqual({
       gameType: "xiangqi",
       ruleSetId: "xiangqi.casual.v1",
+      actionConsistency: "strict_revision",
     });
     expect(data.board).toHaveLength(90);
     expect(data.redSeat).toBe("seat-a");

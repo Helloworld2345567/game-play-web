@@ -1,7 +1,9 @@
 # ym0v0 棋类对战平台：≤10 人极简方案
 
 方案日期：2026-08-19  
-当前执行基线：邀请房 MVP
+当前执行基线：邀请房 MVP（2026-08-20 已扩展）
+
+> 本文保留最初五子棋/象棋 MVP 的调研与架构背景。2026-08-20 后的权威统一语言以 [`CONTEXT.md`](../CONTEXT.md) 为准；下文已同步规则投影与并发协议，仍以“五子棋”为例的目录和交互描述只代表该 renderer，不再限制其他棋种。
 
 ## 1. 一句话结论
 
@@ -23,6 +25,9 @@ flowchart LR
 - 前两个不同身份占据两个席位；第三位及之后的游客作为只读观众实时接收完整局面。
 - `15×15` 自由五子棋：黑先，横竖斜连续 `>=5` 获胜，无禁手，满盘和棋。
 - 休闲中国象棋：红先，支持九宫/河界、所有基础棋子走法、飞将、将死、困毙、三次重复与连续 60 回合无进展自动和棋；暂不实现竞赛规则的长将/长捉责任裁定。
+- 经典 `3×3` 井字棋：X 先，三连获胜，支持观战和复赛换先。
+- 单人扫雷：三种标准难度、延迟布雷与首点 3×3 保护，在浏览器本机运行。
+- 双人同时扫雷：双秘密安全起点、服务端顺序裁决、私有旗帜、计分和幂等并发动作。
 - 服务端权威校验落子、回合、胜负；支持认输和双方确认后再来一局。
 - 刷新、短暂断网、Worker/DO 休眠后自动重连并恢复完整局面。
 - 手机优先棋盘、落点预览、最近一手、胜利连线、连接状态和明确错误提示。
@@ -77,19 +82,22 @@ src/
 
 ## 5. 棋类扩展缝
 
-平台只认识房间、连接、匿名身份、席位、`revision`、持久化和广播；棋类模块负责初始局面、轮次、动作合法性、局面变化和规则终局。接口保持两个同步纯方法：
+平台只认识房间、连接、匿名身份、席位、`revision`、持久化和广播；棋类模块负责初始局面、轮次、动作合法性、局面变化、规则终局和公开投影。接口保持三个同步纯方法：
 
 ```ts
 interface GameRules {
   readonly definition: {
     gameType: string;
     ruleSetId: string; // 例如 gomoku.freestyle15.v1 / xiangqi.casual.v1
+    actionConsistency: "strict_revision" | "concurrent_idempotent";
   };
-  create(seats: readonly [SeatId, SeatId]): RulePosition;
+  create(seats: readonly [SeatId, SeatId], context: RuleContext): RulePosition;
   apply(
     current: RulePosition,
     command: { seat: SeatId; payload: JsonValue },
+    context: RuleContext,
   ): { ok: true; next: RulePosition } | { ok: false; code: string };
+  project(position: RulePosition, viewerSeat: SeatId | null): RulePosition;
 }
 
 interface RulePosition {
@@ -101,11 +109,11 @@ interface RulePosition {
 }
 ```
 
-约束同样属于接口：`create/apply` 必须确定、无 I/O、无时间和随机数、不修改输入；所有状态可 JSON 序列化；规则升级发布新的不可变 `ruleSetId`。平台绝不读取 `position.data.board`，也不出现象棋专用判断。
+约束同样属于接口：`create/apply/project` 必须对相同输入与 `RuleContext` 产生相同结果、无 I/O、不修改输入；时间和随机种子只能由平台显式注入。所有状态可 JSON 序列化；规则升级发布新的不可变 `ruleSetId`。平台绝不读取 `position.data.board` 或雷区内容，也不出现棋种专用判断。
 
-前端按 `ruleSetId` 从 adapter Map 生成首页入口并选择棋盘，再用 `gameType` 做一致性校验。当前中国象棋已经通过同一扩展缝接入；以后增加第三种棋类只需新增对应 `games/<game>/rules.ts`、测试和 `web/games/<game>/Board.tsx`，再在规则 Map 与 adapter 列表各注册一次；Worker、GameRoom、首页、席位、重连和存储无需改变。
+前端按 `ruleSetId` 从 adapter Map 生成首页入口并选择棋盘，再用 `gameType` 做一致性校验。中国象棋、井字棋和扫雷已经通过同一扩展缝接入；以后增加棋类只需新增对应规则、测试和 renderer，再在规则 Map 与 adapter 列表各注册一次；Worker、GameRoom、席位和重连核心无需按棋种名称改变。
 
-不提前设计通用棋盘、棋子、坐标、吃子或将军接口。当前接口只承诺两席位、确定性、完全信息棋类；真正出现第三类需求时再扩接口。
+不提前设计通用棋盘、棋子、坐标、吃子或将军接口。当前接口承诺两席位、确定性规则，并通过 `project` 同时支持完全信息与隐藏信息游戏。
 
 ## 6. 房间、身份与协议
 
@@ -127,11 +135,11 @@ interface RulePosition {
 }
 ```
 
-服务端返回 `snapshot`，包含 `gameType`、`ruleSetId`、最新 `revision`、自己的席位、双方状态和完整 `RulePosition`。认输和准备复赛是平台命令；复赛必须双方确认，并交换先后手。
+服务端返回 `snapshot`，包含 `gameType`、`ruleSetId`、`actionConsistency`、最新 `revision`、自己的席位、双方状态和面向该观看者投影后的 `RulePosition`。认输和准备复赛是平台命令；复赛必须双方确认，并交换先后手。权威局面只保存在 Durable Object，隐藏雷区、种子和对手旗帜不会进入终局前的浏览器快照。
 
 客户端 envelope 中的 `gameType/ruleSetId` 只用于版本一致性检查；服务端始终使用房间初始化时持久化的不可变 `ruleSetId` 选择规则模块，不一致立即拒绝，绝不按客户端字段切换规则。
 
-每个已接受命令令 `revision + 1`。DO 逐条执行：校验消息 → 校验身份、规则 ID 与 revision → 调用房间已绑定的规则模块 → `storage.put("room", nextState)` → 广播完整 snapshot。必须先持久化再广播。并发落子会被 DO 串行化，后到的旧 revision 被拒绝并获得新 snapshot。
+每个改变持久状态的命令令 `revision + 1`。DO 逐条执行：校验消息 → 校验身份、规则 ID 与一致性策略 → 调用房间已绑定的规则模块 → `storage.put("room", nextState)` → 广播观看者专属 snapshot。必须先持久化再广播。五子棋、象棋和井字棋继续严格拒绝旧 revision；双人扫雷携带 `actionId + clientSeq + baseRevision`，允许基于旧 revision 的不同格动作按服务端收到顺序依次生效，并用有限 receipt 缓存幂等去重。
 
 五子棋完整快照通常只有几 KB；当前小规模房间中，全量同步比 delta、事件日志、补包和命令去重缓存更简单可靠。客户端断线后指数退避重连，离线时禁用操作，重连以服务端 snapshot 覆盖本地状态。
 
@@ -153,9 +161,9 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 
 - 静态资源、API 和 WebSocket 同源，减少 DNS/TLS、CORS 和 Cookie 问题。
 - 首屏 JS gzip 目标 `<100 KB`，硬上限 `150 KB`；不用第三方字体、广告、统计脚本和大型组件库。
-- 棋盘使用 Canvas 2D，按设备像素比绘制但 DPR 上限为 2；只在局面或尺寸变化时重绘，不运行永久动画循环。
-- 手机棋盘占满可用宽度；指针按最近交叉点吸附，按下/拖动显示半透明预览，抬起才提交。服务端确认前不画实心棋子。
-- Canvas 可聚焦，方向键移动落点、Enter 提交；页面同时提供当前回合和最后落点的文本状态。
+- 交叉点棋盘使用 Canvas 2D，按设备像素比绘制但 DPR 上限为 2；井字棋和扫雷使用语义化 DOM Grid。
+- 手机棋盘占满可用宽度；大扫雷地图在自身 viewport 内拖动/缩放，不造成页面横向溢出。严格棋类确认前不画实子，双人扫雷按格显示 pending。
+- 所有棋盘提供可访问名称与文本状态；桌面扫雷支持右键插旗，手机支持长按插旗。
 - 正常落子只执行一次 GameRoom 小对象写入和一次房间广播，不跨 DO 续租；`RoomDirectory` 只参与建房、旧房登记和废弃释放。两个 DO 都使用 `locationHint: "apac"`。
 - 目标：规则计算 `<1 ms`；同区域落子确认 p95 `<200 ms`；重连恢复 p95 `<1 s`。大陆网络延迟主要受运营商到 Cloudflare 的链路影响，必须用移动、联通、电信实测，普通全球网络不能承诺稳定低延迟。
 
@@ -188,7 +196,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 ## 11. 测试与上线门槛
 
 - 纯规则单测覆盖全部合法性和胜负边界。
-- DO 集成测试覆盖同时落同一点、旧 revision、伪造席位、错误 payload、存储后广播和休眠恢复。
+- DO 集成测试覆盖严格棋类旧 revision、扫雷并发旧 revision、重复 `actionId`、私有投影、伪造席位、错误 payload、存储后广播和休眠恢复。
 - Playwright 使用两个独立浏览器 context 完成整局，并覆盖刷新、断网和 360 px 手机视口。
 - 容量测试并发创建 11 个房间时必须严格得到 10 个成功与 1 个容量拒绝；同时覆盖初始化幂等重试、提交结果未知、旧房登记、租约防 ABA 与废弃释放重试。
 - 生产只记录错误、房间生命周期、重连次数和 ACK 延迟，不记录 Cookie、昵称或完整棋谱。
