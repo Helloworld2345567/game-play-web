@@ -4,6 +4,7 @@ import {
   availableGameAdapters,
   GameRenderer,
   getGameAdapter,
+  type GameAdapter,
   UnsupportedGame,
   unknownSeatPresentations,
 } from "./games/registry";
@@ -136,12 +137,20 @@ function mainStatus(
   snapshot: RoomSnapshot | null,
   phase: ConnectionPhase,
   transport: RoomTransport,
+  adapter: GameAdapter | null,
 ): string {
   if (phase !== "online" || snapshot === null) {
     return phaseText(phase, transport);
   }
   if (snapshot.position === null) return "等待对手加入";
   const outcome = snapshot.position.outcome;
+  if (outcome !== null) {
+    const gameMessage = adapter?.getOutcomeMessage?.(
+      outcome,
+      snapshot.selfSeat,
+    );
+    if (gameMessage !== null && gameMessage !== undefined) return gameMessage;
+  }
   if (outcome?.kind === "draw") return "本局和棋";
   if (outcome?.kind === "win") {
     return outcome.winner === snapshot.selfSeat ? "你赢了" : "对手获胜";
@@ -254,7 +263,12 @@ function RoomPage({
           <h1>
             {unsupportedGame
               ? "暂不支持这个规则版本"
-              : mainStatus(snapshot, client.phase, client.transport)}
+              : mainStatus(
+                  snapshot,
+                  client.phase,
+                  client.transport,
+                  adapter,
+                )}
           </h1>
         </header>
 

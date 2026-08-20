@@ -1,5 +1,9 @@
 import type { FunctionComponent } from "preact";
-import type { JsonValue, RulePosition } from "../../core/game-rules";
+import type {
+  JsonValue,
+  RuleOutcome,
+  RulePosition,
+} from "../../core/game-rules";
 import { gomokuAdapter } from "./gomoku/Board";
 import { xiangqiAdapter } from "./xiangqi/Board";
 
@@ -31,6 +35,10 @@ export interface GameAdapter {
   readonly Renderer: FunctionComponent<GameRendererProps>;
   getSeatPresentations(position: RulePosition | null): SeatPresentations;
   getErrorMessage(code: string): string | null;
+  getOutcomeMessage?(
+    outcome: RuleOutcome,
+    selfSeat: string | null,
+  ): string | null;
 }
 
 export const unknownSeatPresentations: SeatPresentations = {

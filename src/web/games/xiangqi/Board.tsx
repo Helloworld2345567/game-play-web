@@ -688,4 +688,10 @@ export const xiangqiAdapter = {
   getErrorMessage(code) {
     return XIANGQI_ERROR_MESSAGES[code] ?? null;
   },
+  getOutcomeMessage(outcome, selfSeat) {
+    if (outcome.kind !== "win" || outcome.reason !== "checkmate") return null;
+    return outcome.winner === selfSeat
+      ? "绝杀 · 你赢了"
+      : "对手绝杀获胜";
+  },
 } satisfies GameAdapter;

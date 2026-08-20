@@ -379,24 +379,20 @@ describe("xiangqi rules", () => {
   });
 
   it("ends in checkmate or stalemate when the side to move has no legal move", () => {
-    const checkmate = customPosition(
-      [
-        [4, 9, red("general")],
-        [0, 0, black("general")],
-        [0, 2, black("rook")],
-        [3, 0, black("rook")],
-        [5, 0, black("rook")],
-      ],
-      "black",
-    );
+    const checkmate = customPosition([
+      [4, 9, red("general")],
+      [4, 0, black("general")],
+      [0, 1, red("rook")],
+      [4, 2, red("pawn")],
+    ]);
     const mate = xiangqiRules.apply(checkmate, {
-      seat: "black",
-      payload: { type: "move", fromX: 0, fromY: 2, toX: 4, toY: 2 },
+      seat: "red",
+      payload: { type: "move", fromX: 0, fromY: 1, toX: 0, toY: 0 },
     });
     expect(mate).toMatchObject({
       ok: true,
       next: {
-        outcome: { kind: "win", winner: "black", reason: "checkmate" },
+        outcome: { kind: "win", winner: "red", reason: "checkmate" },
         turn: null,
       },
     });
@@ -426,21 +422,55 @@ describe("xiangqi rules", () => {
     });
   });
 
-  it("marks a checking move without ending a position that still has a reply", () => {
+  it("keeps the game running when the checked general can escape", () => {
     const position = customPosition([
-      [4, 9, red("general")],
-      [4, 5, red("pawn")],
+      [3, 9, red("general")],
       [4, 0, black("general")],
-      [0, 2, red("rook")],
+      [0, 1, red("rook")],
     ]);
-    const next = move(position, "red", 0, 2, 4, 2);
+    const checked = move(position, "red", 0, 1, 0, 0);
 
-    expect(next.outcome).toBeNull();
-    expect(next.turn).toBe("black");
-    expect(readXiangqiPosition(next).inCheck).toEqual({
+    expect(checked.outcome).toBeNull();
+    expect(checked.turn).toBe("black");
+    expect(readXiangqiPosition(checked).inCheck).toEqual({
       red: false,
       black: true,
     });
+    const escaped = move(checked, "black", 4, 0, 4, 1);
+    expect(escaped.outcome).toBeNull();
+    expect(readXiangqiPosition(escaped).inCheck.black).toBe(false);
+  });
+
+  it("keeps the game running when the defender can block the check", () => {
+    const position = customPosition([
+      [4, 9, red("general")],
+      [4, 0, black("general")],
+      [0, 1, red("rook")],
+      [4, 2, red("pawn")],
+      [4, 1, black("advisor")],
+    ]);
+    const checked = move(position, "red", 0, 1, 0, 0);
+
+    expect(checked.outcome).toBeNull();
+    const blocked = move(checked, "black", 4, 1, 3, 0);
+    expect(blocked.outcome).toBeNull();
+    expect(readXiangqiPosition(blocked).inCheck.black).toBe(false);
+  });
+
+  it("keeps the game running when the defender can capture the checking piece", () => {
+    const position = customPosition([
+      [4, 9, red("general")],
+      [4, 0, black("general")],
+      [0, 1, red("rook")],
+      [4, 2, red("pawn")],
+      [0, 2, black("rook")],
+    ]);
+    const checked = move(position, "red", 0, 1, 0, 0);
+
+    expect(checked.outcome).toBeNull();
+    const captured = move(checked, "black", 0, 2, 0, 0);
+    expect(captured.outcome).toBeNull();
+    expect(readXiangqiPosition(captured).inCheck.black).toBe(false);
   });
 
   it("declares a serializable draw on the third repetition", () => {
