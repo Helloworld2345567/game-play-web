@@ -253,27 +253,23 @@ function mainStatus(
   if (phase !== "online" || snapshot === null) {
     return phaseText(phase, transport);
   }
-  if (snapshot.selfSeat === null) {
-    const outcome = snapshot.position?.outcome ?? null;
-    if (outcome === null) return "正在观战";
-    if (outcome.kind === "draw") return "本局和棋";
-    const winnerName = snapshot.seats[outcome.winner]?.displayName;
-    if (winnerName === null || winnerName === undefined) {
-      return outcome.reason === "checkmate" ? "本局以绝杀结束" : "本局已分胜负";
-    }
-    return outcome.reason === "checkmate"
-      ? `${winnerName}绝杀获胜`
-      : `${winnerName}获胜`;
-  }
-  if (snapshot.position === null) return "等待对手加入";
-  const outcome = snapshot.position.outcome;
+  const outcome = snapshot.position?.outcome ?? null;
   if (outcome !== null) {
-    const gameMessage = adapter?.getOutcomeMessage?.(
-      outcome,
-      snapshot.selfSeat,
-    );
+    const gameMessage = adapter?.getOutcomeMessage?.(outcome, {
+      selfSeat: snapshot.selfSeat,
+      winnerDisplayName: outcome.kind === "win"
+        ? snapshot.seats[outcome.winner]?.displayName ?? null
+        : null,
+    });
     if (gameMessage !== null && gameMessage !== undefined) return gameMessage;
   }
+  if (snapshot.selfSeat === null) {
+    if (outcome === null) return "正在观战";
+    if (outcome.kind === "draw") return "本局和棋";
+    const winnerName = snapshot.seats[outcome.winner]?.displayName ?? null;
+    return winnerName === null ? "本局已分胜负" : `${winnerName}获胜`;
+  }
+  if (snapshot.position === null) return "等待对手加入";
   if (outcome?.kind === "draw") return "本局和棋";
   if (outcome?.kind === "win") {
     return outcome.winner === snapshot.selfSeat ? "你赢了" : "对手获胜";

@@ -37,7 +37,10 @@ export interface GameAdapter {
   getErrorMessage(code: string): string | null;
   getOutcomeMessage?(
     outcome: RuleOutcome,
-    selfSeat: string | null,
+    viewer: {
+      selfSeat: string | null;
+      winnerDisplayName: string | null;
+    },
   ): string | null;
 }
 

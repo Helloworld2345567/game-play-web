@@ -688,9 +688,14 @@ export const xiangqiAdapter = {
   getErrorMessage(code) {
     return XIANGQI_ERROR_MESSAGES[code] ?? null;
   },
-  getOutcomeMessage(outcome, selfSeat) {
+  getOutcomeMessage(outcome, viewer) {
     if (outcome.kind !== "win" || outcome.reason !== "checkmate") return null;
-    return outcome.winner === selfSeat
+    if (viewer.selfSeat === null) {
+      return viewer.winnerDisplayName === null
+        ? "本局以绝杀结束"
+        : `${viewer.winnerDisplayName}绝杀获胜`;
+    }
+    return outcome.winner === viewer.selfSeat
       ? "绝杀 · 你赢了"
       : "对手绝杀获胜";
   },
