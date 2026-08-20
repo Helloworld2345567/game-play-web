@@ -28,6 +28,120 @@ afterEach(async () => {
 });
 
 describe("RoomDirectory Durable Object", () => {
+  it("reports only activated Rooms in the current platform stats", async () => {
+    const stub = directory();
+    const reservation = await stub.reserve(roomId(0));
+    if (!reservation.ok) throw new Error("Expected a Room lease");
+
+    await expect(stub.stats()).resolves.toEqual({
+      onlineGuests: 0,
+      activeRooms: 0,
+    });
+
+    await stub.activate(roomId(0), reservation.leaseId);
+
+    await expect(stub.stats()).resolves.toEqual({
+      onlineGuests: 0,
+      activeRooms: 1,
+    });
+
+    await stub.release(roomId(0), reservation.leaseId);
+
+    await expect(stub.stats()).resolves.toEqual({
+      onlineGuests: 0,
+      activeRooms: 0,
+    });
+  });
+
+  it("counts one online Guest once across multiple browser presences", async () => {
+    const stub = directory();
+
+    await stub.heartbeat("guest-one", crypto.randomUUID());
+    await stub.heartbeat("guest-one", crypto.randomUUID());
+
+    await expect(stub.stats()).resolves.toEqual({
+      onlineGuests: 1,
+      activeRooms: 0,
+    });
+  });
+
+  it("counts different online Guests separately", async () => {
+    const stub = directory();
+
+    await stub.heartbeat("guest-one", crypto.randomUUID());
+    await stub.heartbeat("guest-two", crypto.randomUUID());
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 2 });
+  });
+
+  it("keeps a Guest online until their last browser presence leaves", async () => {
+    const stub = directory();
+    const firstPresenceId = crypto.randomUUID();
+    const secondPresenceId = crypto.randomUUID();
+    await stub.heartbeat("guest-one", firstPresenceId);
+    await stub.heartbeat("guest-one", secondPresenceId);
+
+    await stub.leavePresence("guest-one", firstPresenceId);
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 1 });
+
+    await stub.leavePresence("guest-one", secondPresenceId);
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+  });
+
+  it("stops counting an expired Presence even when its alarm is delayed", async () => {
+    const stub = directory();
+    const presenceId = crypto.randomUUID();
+    await stub.heartbeat("guest-one", presenceId);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const presences = await state.storage.get<
+        Record<string, Record<string, number>>
+      >("presences");
+      if (presences?.["guest-one"]?.[presenceId] === undefined) {
+        throw new Error("Missing Presence lease");
+      }
+      presences["guest-one"]![presenceId] = Date.now() - 1;
+      await state.storage.put("presences", presences);
+    });
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+    await expect(
+      runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
+    ).resolves.toBeNull();
+  });
+
+  it("bounds abandoned browser Presences for one Guest", async () => {
+    const stub = directory();
+    const presenceIds = Array.from({ length: 9 }, () => crypto.randomUUID());
+    for (const presenceId of presenceIds) {
+      await stub.heartbeat("guest-one", presenceId);
+    }
+
+    for (const presenceId of presenceIds.slice(1)) {
+      await stub.leavePresence("guest-one", presenceId);
+    }
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+  });
+
+  it("keeps provisional Room cleanup scheduled after the last Presence leaves", async () => {
+    const stub = directory();
+    await stub.reserve(roomId(0));
+    const provisionalAlarm = await runInDurableObject(
+      stub,
+      (_instance, state) => state.storage.getAlarm(),
+    );
+    const presenceId = crypto.randomUUID();
+    await stub.heartbeat("guest-one", presenceId);
+
+    await stub.leavePresence("guest-one", presenceId);
+
+    await expect(
+      runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
+    ).resolves.toBe(provisionalAlarm);
+  });
+
   it("atomically limits Room Capacity to ten concurrent Rooms", async () => {
     const results = await Promise.all(
       Array.from({ length: 11 }, (_, index) =>

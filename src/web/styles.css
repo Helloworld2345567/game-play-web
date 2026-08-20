@@ -64,6 +64,20 @@ canvas:focus-visible {
   justify-content: space-between;
 }
 
+.platform-stats {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #a9a195;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.platform-stats > span[aria-hidden="true"] {
+  color: #5f584f;
+}
+
 .brand {
   display: inline-flex;
   align-items: center;

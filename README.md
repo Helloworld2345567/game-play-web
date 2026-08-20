@@ -5,6 +5,7 @@
 - 线上地址：<https://play.ym0v0.com>
 - 服务端权威裁决：严格棋类拒绝旧修订；并发棋类始终按最新权威局面验证动作
 - 匿名签名 Cookie 恢复席位与游客昵称
+- 首页实时显示按游客去重的在线人数和当前已创建房间数
 - 每个房间一个 SQLite-backed Durable Object
 - 前两位游客对战，之后进入的游客可实时观战且不能执行玩家操作
 - 全站最多同时存在 10 个房间；废弃时会持久记录释放任务，短暂故障后自动重试
@@ -17,7 +18,7 @@
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的 HTTP、WebSocket、断连和闹钟事件，持久化权威状态并按观看者投影公开快照；单例 `RoomDirectory` Durable Object 原子管理 10 个房间的全局容量。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的 HTTP、WebSocket、断连和闹钟事件，持久化权威状态并按观看者投影公开快照；单例 `RoomDirectory` Durable Object 原子管理 10 个房间的全局容量，并通过按 Guest 去重的短期 Presence 租约生成匿名平台统计。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
 
 五子棋、中国象棋和井字棋继续使用严格 revision。双人扫雷使用 `actionId + clientSeq + baseRevision` 的并发幂等通道，WebSocket 为首选，受限网络下每个操作仍会立即通过 HTTPS 兼容连接提交。单人和双人扫雷复用同一个纯函数 `MinefieldEngine` 与响应式 `MinesweeperBoard`。
 
@@ -53,7 +54,7 @@ npm run test:e2e
 npm run build
 ```
 
-测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋和扫雷引擎、真实 workerd Durable Object、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量，以及多个独立浏览器身份的昵称、邀请、观战、退出与空房回收、断网恢复、完整胜局和复赛流程。
+测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋和扫雷引擎、真实 workerd Durable Object、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、观战、退出与空房回收、断网恢复、完整胜局和复赛流程。
 
 ## 部署
 

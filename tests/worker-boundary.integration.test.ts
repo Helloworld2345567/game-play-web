@@ -98,6 +98,120 @@ describe("Worker request boundary", () => {
     },
   );
 
+  it("renews a browser Presence and returns only anonymous platform stats", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const presenceId = crypto.randomUUID();
+
+    const response = await app.default.fetch(
+      apiRequest(origin, "/api/stats", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ presenceId }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      onlineGuests: 1,
+      activeRooms: 0,
+    });
+  });
+
+  it("reflects Room creation and discard in the platform stats", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const created = await app.default.fetch(
+      apiRequest(origin, "/api/rooms", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+    const { roomId } = (await created.json()) as { roomId: string };
+    const presenceId = crypto.randomUUID();
+    const readStats = () =>
+      app.default.fetch(
+        apiRequest(origin, "/api/stats", {
+          method: "POST",
+          headers: { Cookie: cookie!, "Content-Type": "application/json" },
+          body: JSON.stringify({ presenceId }),
+        }),
+      );
+
+    await expect((await readStats()).json()).resolves.toMatchObject({
+      activeRooms: 1,
+    });
+
+    const connectionId = "stats-room-client-0001";
+    await app.default.fetch(
+      apiRequest(origin, `/api/rooms/${roomId}/sync`, {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ v: 1, connectionId }),
+      }),
+    );
+    await app.default.fetch(
+      apiRequest(origin, `/api/rooms/${roomId}/leave`, {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ v: 1, connectionId }),
+      }),
+    );
+
+    await expect((await readStats()).json()).resolves.toMatchObject({
+      activeRooms: 0,
+    });
+  });
+
+  it("removes only the leaving browser Presence", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const presenceIds = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const presenceId of presenceIds) {
+      const heartbeat = await app.default.fetch(
+        apiRequest(origin, "/api/stats", {
+          method: "POST",
+          headers: { Cookie: cookie!, "Content-Type": "application/json" },
+          body: JSON.stringify({ presenceId }),
+        }),
+      );
+      expect(heartbeat.status).toBe(200);
+    }
+
+    const firstLeave = await app.default.fetch(
+      apiRequest(origin, "/api/presence/leave", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ presenceId: presenceIds[0] }),
+      }),
+    );
+    expect(firstLeave.status).toBe(200);
+    await expect(firstLeave.json()).resolves.toMatchObject({ onlineGuests: 1 });
+
+    const lastLeave = await app.default.fetch(
+      apiRequest(origin, "/api/presence/leave", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ presenceId: presenceIds[1] }),
+      }),
+    );
+    expect(lastLeave.status).toBe(200);
+    await expect(lastLeave.json()).resolves.toMatchObject({ onlineGuests: 0 });
+  });
+
   it("forwards an authenticated HTTP sync to the authoritative Room", async () => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(

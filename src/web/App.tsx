@@ -21,6 +21,123 @@ const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
 const DISPLAY_NAME_STORAGE_KEY = "ym0v0.display-name";
 let memoryDisplayName: string | null = null;
 
+interface PlatformStats {
+  onlineGuests: number;
+  activeRooms: number;
+}
+
+function isPlatformStats(value: unknown): value is PlatformStats {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const stats = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(stats.onlineGuests) &&
+    (stats.onlineGuests as number) >= 0 &&
+    Number.isSafeInteger(stats.activeRooms) &&
+    (stats.activeRooms as number) >= 0
+  );
+}
+
+function usePlatformStats(displayName: string): PlatformStats | null {
+  const [presenceId] = useState(() => crypto.randomUUID());
+  const [stats, setStats] = useState<PlatformStats | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let refreshTimer: number | undefined;
+    let refreshing = false;
+    let refreshAgain = false;
+    let sessionReady = false;
+    const clearRefreshTimer = () => {
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = undefined;
+      }
+    };
+    const refresh = async () => {
+      clearRefreshTimer();
+      if (refreshing) {
+        refreshAgain = true;
+        return;
+      }
+      refreshing = true;
+      try {
+        if (!sessionReady) {
+          await ensureBrowserSession(displayName, controller.signal);
+          sessionReady = true;
+        }
+        const response = await fetch("/api/stats", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({ presenceId }),
+          signal: controller.signal,
+        });
+        const value: unknown = await response.json();
+        if (response.status === 401) sessionReady = false;
+        if (!response.ok || !isPlatformStats(value)) return;
+        setStats(value);
+      } catch {
+        // Keep the last known values when the network is temporarily unavailable.
+      } finally {
+        refreshing = false;
+        if (controller.signal.aborted) return;
+        if (refreshAgain) {
+          refreshAgain = false;
+          void refresh();
+        } else {
+          refreshTimer = window.setTimeout(() => void refresh(), 10_000);
+        }
+      }
+    };
+    const refreshNow = () => void refresh();
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshNow();
+    };
+    window.addEventListener("online", refreshNow);
+    window.addEventListener("pageshow", refreshNow);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    void refresh();
+    return () => {
+      controller.abort();
+      clearRefreshTimer();
+      window.removeEventListener("online", refreshNow);
+      window.removeEventListener("pageshow", refreshNow);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [displayName, presenceId]);
+
+  useEffect(() => {
+    const leave = () => {
+      const body = JSON.stringify({ presenceId });
+      let queued = false;
+      try {
+        queued = navigator.sendBeacon(
+          "/api/presence/leave",
+          new Blob([body], { type: "application/json" }),
+        );
+      } catch {
+        // Fall back to a keepalive request when Beacon is unavailable.
+      }
+      if (!queued) {
+        void fetch("/api/presence/leave", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+        }).catch(() => undefined);
+      }
+    };
+    window.addEventListener("pagehide", leave);
+    return () => window.removeEventListener("pagehide", leave);
+  }, [presenceId]);
+
+  return stats;
+}
+
 function randomDisplayName(): string {
   const random = crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
   return `棋友${String(random % 10_000).padStart(4, "0")}`;
@@ -126,9 +243,11 @@ function Brand() {
 function LandingPage({
   displayName,
   onDisplayNameChange,
+  stats,
 }: {
   displayName: string;
   onDisplayNameChange(displayName: string): void;
+  stats: PlatformStats | null;
 }) {
   const [creating, setCreating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -169,7 +288,18 @@ function LandingPage({
 
   return (
     <main class="landing">
-      <nav class="topbar"><Brand /></nav>
+      <nav class="topbar">
+        <Brand />
+        <div
+          class="platform-stats"
+          aria-label="平台实时状态"
+          aria-live="polite"
+        >
+          <span>在线 {stats?.onlineGuests ?? "—"} 人</span>
+          <span aria-hidden="true">·</span>
+          <span>房间 {stats?.activeRooms ?? "—"} 个</span>
+        </div>
+      </nav>
       <section class="hero">
         <p class="eyebrow">轻量 · 实时 · 无需注册</p>
         <h1>一条链接，<br />马上下一局。</h1>
@@ -568,6 +698,7 @@ function NotFoundPage() {
 export function App() {
   const [path, setPath] = useState(location.pathname);
   const [displayName, setDisplayName] = useState(loadDisplayName);
+  const stats = usePlatformStats(displayName);
   const saveDisplayName = (nextDisplayName: string) => {
     storeDisplayName(nextDisplayName);
     setDisplayName(nextDisplayName);
@@ -583,6 +714,7 @@ export function App() {
       <LandingPage
         displayName={displayName}
         onDisplayNameChange={saveDisplayName}
+        stats={stats}
       />
     );
   }

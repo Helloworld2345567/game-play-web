@@ -262,20 +262,74 @@ function humanizeError(
   return "操作未完成，请重试。";
 }
 
-export async function ensureBrowserSession(
+interface PendingBrowserSession {
+  displayName: string;
+  controller: AbortController;
+  request: Promise<void>;
+}
+
+let pendingBrowserSession: PendingBrowserSession | null = null;
+
+function startBrowserSessionRequest(displayName: string): Promise<void> {
+  if (pendingBrowserSession?.displayName === displayName) {
+    return pendingBrowserSession.request;
+  }
+  pendingBrowserSession?.controller.abort();
+  const controller = new AbortController();
+  const request = (async () => {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ displayName }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("session_failed");
+  })();
+  const pending = { displayName, controller, request };
+  pendingBrowserSession = pending;
+  const clear = () => {
+    if (pendingBrowserSession === pending) pendingBrowserSession = null;
+  };
+  void request.then(clear, clear);
+  return request;
+}
+
+function waitForSession(
+  request: Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal === undefined) return request;
+  if (signal.aborted) {
+    return Promise.reject(
+      signal.reason ?? new DOMException("Aborted", "AbortError"),
+    );
+  }
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void request.then(
+      () => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+export function ensureBrowserSession(
   displayName: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch("/api/session", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({ displayName }),
-    signal,
-  });
-  if (!response.ok) throw new Error("session_failed");
+  return waitForSession(startBrowserSessionRequest(displayName), signal);
 }
 
 function websocketUrl(roomId: string): string {

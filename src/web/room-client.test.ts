@@ -1,10 +1,66 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
   createConcurrentActionLedger,
   createGameActionCommand,
+  ensureBrowserSession,
   sendOutstandingConcurrentActions,
 } from "./room-client";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("browser Guest session", () => {
+  it("uses one session bootstrap when Presence and Room connect together", async () => {
+    let finishRequest: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          finishRequest = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const presenceSession = ensureBrowserSession("棋友0001");
+    const roomSession = ensureBrowserSession("棋友0001");
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    finishRequest?.(Response.json({ ok: true }));
+    await Promise.all([presenceSession, roomSession]);
+  });
+
+  it("lets the latest Display Name supersede a pending bootstrap", async () => {
+    let finishLatest: ((response: Response) => void) | undefined;
+    const signals: AbortSignal[] = [];
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!(signal instanceof AbortSignal)) {
+        throw new Error("Expected a session request AbortSignal");
+      }
+      signals.push(signal);
+      return new Promise<Response>((resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+        if (signals.length === 2) finishLatest = resolve;
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stale = ensureBrowserSession("旧昵称").catch((error: unknown) => error);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const latest = ensureBrowserSession("新昵称");
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(signals[0]?.aborted).toBe(true);
+    finishLatest?.(Response.json({ ok: true }));
+    await latest;
+    await expect(stale).resolves.toBeInstanceOf(DOMException);
+  });
+});
 
 function snapshot(
   overrides: Partial<RoomSnapshot> = {},

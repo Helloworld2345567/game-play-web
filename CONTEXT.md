@@ -7,6 +7,12 @@
 **Guest（游客）**  
 由浏览器匿名会话识别、没有账号的访问者。
 
+**Platform Presence（平台在线租约）**
+浏览器页面为 Guest 周期续期的 45 秒短租约。一个 Guest 的多个页面各有独立 Presence，但平台在线人数只计一次；关页会主动释放，通知丢失时由到期清理兜底。
+
+**Platform Stats（平台实时统计）**
+首页展示的匿名聚合数字，包括具有有效 Platform Presence 的 Guest 数和当前已激活、尚未废弃的 Room 数；不得包含 Guest、Presence 或 Room 标识。
+
 **Seat（席位）**  
 游客在一个 Room 内稳定的平台身份。席位与每局棋种侧的黑、白、红等阵营映射分离；复赛可交换阵营，但不交换 Seat。
 

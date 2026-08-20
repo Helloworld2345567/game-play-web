@@ -13,6 +13,7 @@ export { GameRoom, RoomDirectory };
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
+const PRESENCE_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
 const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
 const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
@@ -129,6 +130,18 @@ async function readRequestedDisplayName(
   return normalized === null
     ? { ok: false }
     : { ok: true, displayName: normalized };
+}
+
+async function readPresenceId(request: Request): Promise<string | null> {
+  const value = await readSmallJson(request);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const presenceId = (value as Record<string, unknown>).presenceId;
+  return typeof presenceId === "string" &&
+    PRESENCE_ID_PATTERN.test(presenceId)
+    ? presenceId
+    : null;
 }
 
 function setInternalGuestHeaders(headers: Headers, guest: GuestSession): void {
@@ -318,6 +331,31 @@ export default {
     const guest = await readGuestSession(request, env.SESSION_SECRET);
     if (guest === null) {
       return json({ error: "session.required" }, { status: 401 });
+    }
+    if (url.pathname === "/api/stats" && request.method === "POST") {
+      const presenceId = await readPresenceId(request);
+      if (presenceId === null) {
+        return json({ error: "presence.invalid_request" }, { status: 400 });
+      }
+      const directory = env.ROOM_DIRECTORY.getByName(
+        ROOM_DIRECTORY_NAME,
+        { locationHint: "apac" },
+      );
+      return json(await directory.heartbeat(guest.guestId, presenceId));
+    }
+    if (
+      url.pathname === "/api/presence/leave" &&
+      request.method === "POST"
+    ) {
+      const presenceId = await readPresenceId(request);
+      if (presenceId === null) {
+        return json({ error: "presence.invalid_request" }, { status: 400 });
+      }
+      const directory = env.ROOM_DIRECTORY.getByName(
+        ROOM_DIRECTORY_NAME,
+        { locationHint: "apac" },
+      );
+      return json(await directory.leavePresence(guest.guestId, presenceId));
     }
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       return createRoom(request, env, guest);
