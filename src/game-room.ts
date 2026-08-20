@@ -44,8 +44,7 @@ interface InitializePayload {
   roomId: string;
   gameType: string;
   ruleSetId: string;
-  capacityLeaseId?: string;
-  capacityMode?: "unmanaged-test-fixture";
+  capacityLeaseId: string;
 }
 
 interface PendingCapacityRelease {
@@ -86,7 +85,6 @@ const DISPLAY_NAMES_KEY = "displayNames";
 const CAPACITY_LEASE_ID_KEY = "capacityLeaseId";
 const CAPACITY_PHASE_KEY = "capacityPhase";
 const CAPACITY_PROVISIONING_SINCE_KEY = "capacityProvisioningSince";
-const CAPACITY_UNMANAGED_FIXTURE_KEY = "capacityUnmanagedTestFixture";
 const PENDING_CAPACITY_RELEASE_KEY = "pendingCapacityRelease";
 const RETIRED_ROOM_STATE_KEYS = [
   ROOM_STORAGE_KEY,
@@ -97,7 +95,6 @@ const RETIRED_ROOM_STATE_KEYS = [
   CAPACITY_LEASE_ID_KEY,
   CAPACITY_PHASE_KEY,
   CAPACITY_PROVISIONING_SINCE_KEY,
-  CAPACITY_UNMANAGED_FIXTURE_KEY,
 ] as const;
 const VACANT_ROOM_GRACE_MS = 60_000;
 const CAPACITY_RECONCILE_MS = 60_000;
@@ -125,11 +122,11 @@ function isInitializePayload(value: unknown): value is InitializePayload {
     /^[A-Za-z0-9_-]{1,64}$/u.test(payload.roomId) &&
     typeof payload.gameType === "string" &&
     typeof payload.ruleSetId === "string" &&
-    ((typeof payload.capacityLeaseId === "string" &&
-      /^[0-9a-f-]{36}$/u.test(payload.capacityLeaseId) &&
-      payload.capacityMode === undefined) ||
-      (payload.capacityLeaseId === undefined &&
-        payload.capacityMode === "unmanaged-test-fixture")) &&
+    typeof payload.capacityLeaseId === "string" &&
+    /^[0-9a-f-]{36}$/u.test(payload.capacityLeaseId) &&
+    Object.keys(payload).every((key) =>
+      ["roomId", "gameType", "ruleSetId", "capacityLeaseId"].includes(key),
+    ) &&
     isSupportedGame(payload.gameType, payload.ruleSetId)
   );
 }
@@ -180,7 +177,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   private capacityLeaseId: string | null = null;
   private capacityPhase: "provisioning" | "active" | null = null;
   private capacityProvisioningSince: number | null = null;
-  private unmanagedCapacityFixture = false;
   private pendingCapacityRelease: PendingCapacityRelease | null = null;
   private discarding = false;
   private roomEventTail: Promise<void> = Promise.resolve();
@@ -212,10 +208,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
         (await this.ctx.storage.get<number>(
           CAPACITY_PROVISIONING_SINCE_KEY,
         )) ?? null;
-      this.unmanagedCapacityFixture =
-        (await this.ctx.storage.get<boolean>(
-          CAPACITY_UNMANAGED_FIXTURE_KEY,
-        )) === true;
       this.pendingCapacityRelease =
         (await this.ctx.storage.get<PendingCapacityRelease>(
           PENDING_CAPACITY_RELEASE_KEY,
@@ -422,10 +414,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
         const now = Date.now();
         await this.pruneOfflineSpectatorDisplayNames(now);
         const hasPlayers = this.hasLivePlayers(now);
-        const hasConnections =
-          this.liveSockets().length > 0 ||
-          this.activeHttpLeases(now).length > 0;
-        if ((!hasPlayers && wasPlayer) || (!hasConnections && !hasPlayers)) {
+        if (!hasPlayers && wasPlayer) {
           await this.discardRoom();
         } else if (hasPlayers) {
           await this.markOccupied();
@@ -529,7 +518,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       }
       this.displayNames[guestId] = displayName;
       await this.ctx.storage.put(DISPLAY_NAMES_KEY, this.displayNames);
-      if (this.unmanagedCapacityFixture || this.capacityPhase === "active") {
+      if (this.capacityPhase === "active") {
         return Response.json({ ok: true }, { status: 201 });
       }
       const activated = await this.activateCapacityLease();
@@ -547,26 +536,18 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       rules,
       now,
     });
-    this.capacityLeaseId = payload.capacityLeaseId ?? null;
-    this.capacityPhase =
-      this.capacityLeaseId === null ? null : "provisioning";
-    this.capacityProvisioningSince =
-      this.capacityLeaseId === null ? null : now;
-    this.unmanagedCapacityFixture =
-      payload.capacityMode === "unmanaged-test-fixture";
+    this.capacityLeaseId = payload.capacityLeaseId;
+    this.capacityPhase = "provisioning";
+    this.capacityProvisioningSince = now;
     this.displayNames[guestId] = displayName;
     try {
       await this.ctx.storage.transaction(async (transaction) => {
         await transaction.put(ROOM_STORAGE_KEY, room);
         await transaction.put(DISPLAY_NAMES_KEY, this.displayNames);
         await transaction.put(VACANT_SINCE_KEY, now);
-        if (this.capacityLeaseId !== null) {
-          await transaction.put(CAPACITY_LEASE_ID_KEY, this.capacityLeaseId);
-          await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
-          await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
-        } else {
-          await transaction.put(CAPACITY_UNMANAGED_FIXTURE_KEY, true);
-        }
+        await transaction.put(CAPACITY_LEASE_ID_KEY, this.capacityLeaseId);
+        await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
+        await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
         await transaction.setAlarm(
           Math.min(room.expiresAt, now + VACANT_ROOM_GRACE_MS),
         );
@@ -578,17 +559,14 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       this.capacityLeaseId = null;
       this.capacityPhase = null;
       this.capacityProvisioningSince = null;
-      this.unmanagedCapacityFixture = false;
       throw new Error("Room initialization outcome is unknown");
     }
-    if (!this.unmanagedCapacityFixture) {
-      const activated = await this.activateCapacityLease();
-      if (!activated) {
-        await this.discardRoom();
-        return new Response("Room capacity lease unavailable", {
-          status: 503,
-        });
-      }
+    const activated = await this.activateCapacityLease();
+    if (!activated) {
+      await this.discardRoom();
+      return new Response("Room capacity lease unavailable", {
+        status: 503,
+      });
     }
     return Response.json({ ok: true }, { status: 201 });
   }
@@ -605,9 +583,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       getGuestSeat(this.room, guestId) !== SEAT_A
     ) {
       return false;
-    }
-    if (payload.capacityMode === "unmanaged-test-fixture") {
-      return this.unmanagedCapacityFixture && this.capacityLeaseId === null;
     }
     return this.capacityLeaseId === payload.capacityLeaseId;
   }
@@ -798,7 +773,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       return;
     }
     if (this.room === null || this.discarding) return;
-    if (!this.unmanagedCapacityFixture && this.capacityPhase !== "active") {
+    if (this.capacityPhase !== "active") {
       const capacityAdmission = await this.ensureRoomCapacity();
       if (capacityAdmission !== "ready") return;
     }
@@ -881,7 +856,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       this.capacityLeaseId = null;
       this.capacityPhase = null;
       this.capacityProvisioningSince = null;
-      this.unmanagedCapacityFixture = false;
       this.pendingCapacityRelease = pendingRelease;
     } catch (error) {
       this.discarding = false;
@@ -950,14 +924,8 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     socket.send(JSON.stringify(acknowledgement));
     const now = Date.now();
     const hasOtherPlayers = this.hasLivePlayers(now, socket);
-    const hasOtherConnections =
-      this.liveSockets(socket).length > 0 ||
-      this.activeHttpLeases(now).length > 0;
     socket.close(1000, "left");
-    if (
-      (!hasOtherPlayers && attachment.seat !== null) ||
-      (!hasOtherPlayers && !hasOtherConnections)
-    ) {
+    if (!hasOtherPlayers && attachment.seat !== null) {
       await this.discardRoom();
       return;
     }
@@ -999,7 +967,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
 
   private async persist(room: StoredRoom): Promise<void> {
     if (this.discarding) throw new Error("Room is being discarded");
-    if (!this.unmanagedCapacityFixture && this.capacityPhase !== "active") {
+    if (this.capacityPhase !== "active") {
       throw new Error("Room capacity lease is not active");
     }
     await this.ctx.storage.put(ROOM_STORAGE_KEY, room);
@@ -1015,7 +983,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       return "expired";
     }
     if (this.room === null || this.discarding) return "expired";
-    if (this.unmanagedCapacityFixture || this.capacityPhase === "active") {
+    if (this.capacityPhase === "active") {
       return "ready";
     }
 
@@ -1079,7 +1047,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   }
 
   private async activateCapacityLease(): Promise<boolean> {
-    if (this.unmanagedCapacityFixture) return true;
     if (this.capacityPhase === "active") return true;
     if (this.room === null || this.capacityLeaseId === null) return false;
 

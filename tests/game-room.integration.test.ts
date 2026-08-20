@@ -84,6 +84,27 @@ interface TestConnection {
 
 const liveSockets = new Set<WebSocket>();
 
+interface InitializedRoomFixture {
+  stub: DurableObjectStub<GameRoom>;
+  roomId: string;
+  capacityLeaseId: string;
+}
+
+function fixtureRoomId(label: string): string {
+  if (/^[A-Za-z0-9_-]{16}$/u.test(label)) return label;
+  let first = 2_166_136_261;
+  let second = 2_166_136_261 ^ 0x9e37_79b9;
+  for (const character of label) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    first = Math.imul(first ^ codePoint, 16_777_619);
+    second = Math.imul(second ^ codePoint, 2_246_822_519);
+  }
+  return `t_${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0)
+    .toString(16)
+    .padStart(8, "0")
+    .slice(0, 6)}`;
+}
+
 async function connect(
   stub: DurableObjectStub<GameRoom>,
   guestId: string,
@@ -116,14 +137,20 @@ async function closeSocket(socket: WebSocket): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-async function initializeRoom(
-  roomId: string,
+async function initializeManagedRoom(
+  roomLabel: string,
   creatorGuestId = "guest-creator",
   gameType = "gomoku",
   ruleSetId = "gomoku.freestyle15.v1",
   creatorDisplayName?: string,
-): Promise<DurableObjectStub<GameRoom>> {
+): Promise<InitializedRoomFixture> {
   const testEnv = env as unknown as TestEnv;
+  const roomId = fixtureRoomId(roomLabel);
+  const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+  const reservation = await directory.reserve(roomId);
+  if (!reservation.ok) {
+    throw new Error(`Unable to reserve test Room: ${reservation.reason}`);
+  }
   const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
   const headers = new Headers({
     "Content-Type": "application/json",
@@ -143,12 +170,53 @@ async function initializeRoom(
         roomId,
         gameType,
         ruleSetId,
-        capacityMode: "unmanaged-test-fixture",
+        capacityLeaseId: reservation.leaseId,
       }),
     }),
   );
   expect(initialized.status).toBe(201);
-  return stub;
+  return { stub, roomId, capacityLeaseId: reservation.leaseId };
+}
+
+async function initializeRoom(
+  roomLabel: string,
+  creatorGuestId = "guest-creator",
+  gameType = "gomoku",
+  ruleSetId = "gomoku.freestyle15.v1",
+  creatorDisplayName?: string,
+): Promise<DurableObjectStub<GameRoom>> {
+  return (
+    await initializeManagedRoom(
+      roomLabel,
+      creatorGuestId,
+      gameType,
+      ruleSetId,
+      creatorDisplayName,
+    )
+  ).stub;
+}
+
+async function makeLegacyRoom(
+  fixture: InitializedRoomFixture,
+): Promise<void> {
+  const testEnv = env as unknown as TestEnv;
+  const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+  await directory.release(fixture.roomId, fixture.capacityLeaseId);
+  await runInDurableObject(fixture.stub, async (instance, state) => {
+    await state.storage.delete([
+      "capacityLeaseId",
+      "capacityPhase",
+      "capacityProvisioningSince",
+    ]);
+    const target = instance as unknown as {
+      capacityLeaseId: string | null;
+      capacityPhase: "provisioning" | "active" | null;
+      capacityProvisioningSince: number | null;
+    };
+    target.capacityLeaseId = null;
+    target.capacityPhase = null;
+    target.capacityProvisioningSince = null;
+  });
 }
 
 async function postRoomHttp(
@@ -179,19 +247,22 @@ async function postRoomHttp(
 }
 
 async function startRoom(
-  roomId: string,
+  roomLabel: string,
   creatorGuestId = "guest-creator",
   inviteeGuestId = "guest-invitee",
 ): Promise<{
   stub: DurableObjectStub<GameRoom>;
+  roomId: string;
+  capacityLeaseId: string;
   creator: TestConnection;
   invitee: TestConnection;
 }> {
-  const stub = await initializeRoom(roomId, creatorGuestId);
+  const initialized = await initializeManagedRoom(roomLabel, creatorGuestId);
+  const { stub } = initialized;
   const creator = await connect(stub, creatorGuestId);
   const invitee = await connect(stub, inviteeGuestId);
   await creator.inbox.next();
-  return { stub, creator, invitee };
+  return { ...initialized, creator, invitee };
 }
 
 function placeCommand(expectedRevision: number, x: number, y: number) {
@@ -236,6 +307,63 @@ afterEach(async () => {
 });
 
 describe("GameRoom Durable Object", () => {
+  it("rejects initialization that attempts to bypass Room capacity", async () => {
+    const testEnv = env as unknown as TestEnv;
+    const roomId = "bypass-room-0001";
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+
+    const response = await stub.fetch(
+      new Request("https://room.internal/initialize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Guest-Id": "guest-bypass-creator",
+        },
+        body: JSON.stringify({
+          roomId,
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+          capacityMode: "unmanaged-test-fixture",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("requires a Room capacity lease for initialization", async () => {
+    const testEnv = env as unknown as TestEnv;
+    const roomId = "no-lease-room-01";
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+
+    const response = await stub.fetch(
+      new Request("https://room.internal/initialize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Guest-Id": "guest-no-lease-creator",
+        },
+        body: JSON.stringify({
+          roomId,
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it("treats a retry with the same creator and capacity lease as one initialization", async () => {
     const roomId = "retry-room-00001";
     const testEnv = env as unknown as TestEnv;
@@ -282,13 +410,14 @@ describe("GameRoom Durable Object", () => {
 
   it("registers a legacy production Room before allowing its first reconnect", async () => {
     const roomId = "legacy-room-0001";
-    let stub = await initializeRoom(roomId, "guest-legacy-creator");
-    await runInDurableObject(stub, async (_instance, state) => {
-      await state.storage.delete("capacityUnmanagedTestFixture");
-    });
+    const initialized = await initializeManagedRoom(
+      roomId,
+      "guest-legacy-creator",
+    );
+    await makeLegacyRoom(initialized);
     await abortAllDurableObjects();
     const testEnv = env as unknown as TestEnv;
-    stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
 
     const connection = await connect(stub, "guest-legacy-creator");
 
@@ -310,13 +439,14 @@ describe("GameRoom Durable Object", () => {
 
   it("retires a legacy Room instead of serving an eleventh accessible Room", async () => {
     const roomId = "legacy-full-0001";
-    let stub = await initializeRoom(roomId, "guest-legacy-creator");
-    await runInDurableObject(stub, async (_instance, state) => {
-      await state.storage.delete("capacityUnmanagedTestFixture");
-    });
+    const initialized = await initializeManagedRoom(
+      roomId,
+      "guest-legacy-creator",
+    );
+    await makeLegacyRoom(initialized);
     await abortAllDurableObjects();
     const testEnv = env as unknown as TestEnv;
-    stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
     const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
     const reservations = await Promise.all(
       Array.from({ length: 10 }, (_, index) =>
@@ -339,13 +469,14 @@ describe("GameRoom Durable Object", () => {
 
   it("does not let a legacy Room adopt a colliding creator reservation", async () => {
     const roomId = "legacy-aba-00001";
-    let stub = await initializeRoom(roomId, "guest-legacy-creator");
-    await runInDurableObject(stub, async (_instance, state) => {
-      await state.storage.delete("capacityUnmanagedTestFixture");
-    });
+    const initialized = await initializeManagedRoom(
+      roomId,
+      "guest-legacy-creator",
+    );
+    await makeLegacyRoom(initialized);
     await abortAllDurableObjects();
     const testEnv = env as unknown as TestEnv;
-    stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
     const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
     const creatorReservation = await directory.reserve(roomId);
     if (!creatorReservation.ok) throw new Error("Expected creator reservation");
@@ -362,13 +493,9 @@ describe("GameRoom Durable Object", () => {
   });
 
   it("capacity-checks a legacy hibernating WebSocket before accepting its next command", async () => {
-    const { stub, creator } = await startRoom("legacy-live-room");
-    await runInDurableObject(stub, async (instance, state) => {
-      await state.storage.delete("capacityUnmanagedTestFixture");
-      (
-        instance as unknown as { unmanagedCapacityFixture: boolean }
-      ).unmanagedCapacityFixture = false;
-    });
+    const fixture = await startRoom("legacy-live-room");
+    const { stub, creator } = fixture;
+    await makeLegacyRoom(fixture);
     const testEnv = env as unknown as TestEnv;
     const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
     const reservations = await Promise.all(
@@ -404,7 +531,7 @@ describe("GameRoom Durable Object", () => {
       message: {
         v: 1,
         type: "snapshot",
-        roomId: "room-http-sync",
+        roomId: fixtureRoomId("room-http-sync"),
         revision: 0,
         selfSeat: "seat-a",
         seats: { "seat-a": { occupied: true, online: true } },
@@ -577,7 +704,7 @@ describe("GameRoom Durable Object", () => {
     );
     expect(stillConnected.message).toMatchObject({
       type: "snapshot",
-      roomId: "room-ws-leave-http-remains",
+      roomId: fixtureRoomId("room-ws-leave-http-remains"),
       selfSeat: "seat-b",
     });
   });
@@ -598,7 +725,7 @@ describe("GameRoom Durable Object", () => {
         vacantSince: await state.storage.get("vacantSince"),
       })),
     ).toMatchObject({
-      room: { roomId: "room-ws-drops-http-remains" },
+      room: { roomId: fixtureRoomId("room-ws-drops-http-remains") },
       vacantSince: undefined,
     });
   });
@@ -627,7 +754,7 @@ describe("GameRoom Durable Object", () => {
     );
     expect(remainingTab.message).toMatchObject({
       type: "snapshot",
-      roomId: "room-http-multiple-tabs",
+      roomId: fixtureRoomId("room-http-multiple-tabs"),
       seats: { "seat-a": { online: true } },
     });
   });
@@ -943,7 +1070,7 @@ describe("GameRoom Durable Object", () => {
 
       expect(response.message).toMatchObject({
         type: "snapshot",
-        roomId: "room-http-grace-reconnect",
+        roomId: fixtureRoomId("room-http-grace-reconnect"),
         selfSeat: "seat-a",
       });
       await expect(
@@ -1022,7 +1149,7 @@ describe("GameRoom Durable Object", () => {
       runInDurableObject(stub, (_instance, state) =>
         state.storage.get<StoredRoom>("room"),
       ),
-    ).resolves.toMatchObject({ roomId: "room-one-leaves" });
+    ).resolves.toMatchObject({ roomId: fixtureRoomId("room-one-leaves") });
   });
 
   it("discards the Room immediately when the last Guest explicitly leaves", async () => {
@@ -1147,7 +1274,7 @@ describe("GameRoom Durable Object", () => {
         alarm: await state.storage.getAlarm(),
       })),
     ).toMatchObject({
-      room: { roomId: "room-vacant-grace" },
+      room: { roomId: fixtureRoomId("room-vacant-grace") },
       vacantSince: expect.any(Number),
       alarm: expect.any(Number),
     });
@@ -1173,7 +1300,7 @@ describe("GameRoom Durable Object", () => {
       }),
     );
     expect(afterPrematureAlarm.room).toMatchObject({
-      roomId: "room-vacant-grace",
+      roomId: fixtureRoomId("room-vacant-grace"),
     });
     expect(afterPrematureAlarm.vacantSince).toBe(lifecycle.vacantSince);
     expect(afterPrematureAlarm.alarm).toBe(
@@ -1215,6 +1342,104 @@ describe("GameRoom Durable Object", () => {
     ).resolves.toBe(vacantSince);
   });
 
+  it("keeps the player reconnect grace when the last HTTP Spectator leaves", async () => {
+    const { stub, creator, invitee } = await startRoom(
+      "room-http-spectator-leaves-vacant",
+    );
+    await postRoomHttp(stub, "sync", "guest-spectator", {
+      v: 1,
+      connectionId: "http-spectator-leaves-vacant",
+    });
+    await Promise.all([
+      closeSocket(creator.socket),
+      closeSocket(invitee.socket),
+    ]);
+
+    await expect.poll(() =>
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<number>("vacantSince"),
+      ),
+    ).toBeTypeOf("number");
+    const vacantSince = await runInDurableObject(
+      stub,
+      (_instance, state) => state.storage.get<number>("vacantSince"),
+    );
+
+    await postRoomHttp(stub, "leave", "guest-spectator", {
+      v: 1,
+      connectionId: "http-spectator-leaves-vacant",
+    });
+
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).resolves.toMatchObject({
+      room: {
+        roomId: fixtureRoomId("room-http-spectator-leaves-vacant"),
+      },
+      vacantSince,
+      alarm: vacantSince! + 60_000,
+    });
+
+    const reconnected = await connect(stub, "guest-creator");
+    expect(reconnected.firstMessage).toMatchObject({
+      type: "snapshot",
+      roomId: fixtureRoomId("room-http-spectator-leaves-vacant"),
+      selfSeat: "seat-a",
+    });
+  });
+
+  it("keeps the player reconnect grace when the last WebSocket Spectator leaves", async () => {
+    const { stub, creator, invitee } = await startRoom(
+      "room-ws-spectator-leaves-vacant",
+    );
+    const spectator = await connect(stub, "guest-spectator");
+    await Promise.all([
+      closeSocket(creator.socket),
+      closeSocket(invitee.socket),
+    ]);
+
+    await expect.poll(() =>
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<number>("vacantSince"),
+      ),
+    ).toBeTypeOf("number");
+    const vacantSince = await runInDurableObject(
+      stub,
+      (_instance, state) => state.storage.get<number>("vacantSince"),
+    );
+    const left = spectator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+
+    spectator.socket.send(JSON.stringify(leaveCommand()));
+    await left;
+
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        vacantSince: await state.storage.get<number>("vacantSince"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).resolves.toMatchObject({
+      room: {
+        roomId: fixtureRoomId("room-ws-spectator-leaves-vacant"),
+      },
+      vacantSince,
+      alarm: vacantSince! + 60_000,
+    });
+
+    const reconnected = await connect(stub, "guest-creator");
+    expect(reconnected.firstMessage).toMatchObject({
+      type: "snapshot",
+      roomId: fixtureRoomId("room-ws-spectator-leaves-vacant"),
+      selfSeat: "seat-a",
+    });
+  });
+
   it("preserves a vacant Room when a Guest reconnects during the grace period", async () => {
     const { stub, creator, invitee } = await startRoom("room-grace-reconnect");
     await Promise.all([
@@ -1225,7 +1450,7 @@ describe("GameRoom Durable Object", () => {
     const reconnected = await connect(stub, "guest-creator");
     expect(reconnected.firstMessage).toMatchObject({
       type: "snapshot",
-      roomId: "room-grace-reconnect",
+      roomId: fixtureRoomId("room-grace-reconnect"),
       selfSeat: "seat-a",
     });
     const lifecycle = await runInDurableObject(
@@ -1321,7 +1546,7 @@ describe("GameRoom Durable Object", () => {
       }),
     );
     expect(lifecycle).toMatchObject({
-      room: { roomId: "room-multiple-tabs" },
+      room: { roomId: fixtureRoomId("room-multiple-tabs") },
       vacantSince: undefined,
       openSockets: 2,
     });

@@ -1,6 +1,10 @@
 import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reset, runInDurableObject } from "cloudflare:test";
+import {
+  abortAllDurableObjects,
+  reset,
+  runInDurableObject,
+} from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
 import {
   ROOM_DIRECTORY_NAME,
@@ -26,6 +30,43 @@ function apiRequest(
   const headers = new Headers(init.headers);
   headers.set("Origin", origin);
   return new Request(`${origin}${path}`, { ...init, headers });
+}
+
+async function seedLegacyOccupiedRoom(
+  roomId: string,
+  creatorGuestId: string,
+): Promise<void> {
+  const testEnv = env as unknown as TestEnv;
+  const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+  const reservation = await directory.reserve(roomId);
+  if (!reservation.ok) throw new Error("Expected a Room lease");
+  const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+  const initialized = await stub.fetch(
+    new Request("https://room.internal/initialize", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Guest-Id": creatorGuestId,
+      },
+      body: JSON.stringify({
+        roomId,
+        gameType: "gomoku",
+        ruleSetId: "gomoku.freestyle15.v1",
+        capacityLeaseId: reservation.leaseId,
+      }),
+    }),
+  );
+  expect(initialized.status).toBe(201);
+
+  await directory.release(roomId, reservation.leaseId);
+  await runInDurableObject(stub, async (_instance, state) => {
+    await state.storage.delete([
+      "capacityLeaseId",
+      "capacityPhase",
+      "capacityProvisioningSince",
+    ]);
+  });
+  await abortAllDurableObjects();
 }
 
 afterEach(async () => {
@@ -266,25 +307,7 @@ describe("Worker request boundary", () => {
     const origin = "http://localhost:5173";
     const fixedRoomId = "AAAAAAAAAAAAAAAA";
     const testEnv = env as unknown as TestEnv;
-    const occupied = testEnv.ROOMS.get(
-      testEnv.ROOMS.idFromName(fixedRoomId),
-    );
-    const initialized = await occupied.fetch(
-      new Request("https://room.internal/initialize", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Internal-Guest-Id": "guest-existing-room",
-        },
-        body: JSON.stringify({
-          roomId: fixedRoomId,
-          gameType: "gomoku",
-          ruleSetId: "gomoku.freestyle15.v1",
-          capacityMode: "unmanaged-test-fixture",
-        }),
-      }),
-    );
-    expect(initialized.status).toBe(201);
+    await seedLegacyOccupiedRoom(fixedRoomId, "guest-existing-room");
     vi.spyOn(crypto, "getRandomValues").mockImplementation((array) => {
       new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(0);
       return array;
