@@ -11,9 +11,11 @@
 flowchart LR
     B[浏览器] <-->|静态资源 / HTTP / WebSocket| W[一个 Cloudflare Worker]
     W <-->|按 roomId 路由| R[每房一个 GameRoom Durable Object]
+    W <-->|建房预留| D[单例 RoomDirectory Durable Object]
+    R <-->|激活 / 释放| D
 ```
 
-平台不设置在线游客人数闸门，但全站同时最多存在 10 个尚未废弃的 Room。单例 `RoomDirectory` 通过带过期时间的租约原子占位；GameRoom 废弃时释放租约，初始化失败会回滚，陈旧临时租约也会自动清理。
+平台不设置在线游客人数闸门，但全站同时最多存在 10 个尚未废弃的 Room。单例 `RoomDirectory` 先原子创建 60 秒 provisional lease，GameRoom 持久化后再把它激活。明确的初始化失败会立即回滚；若只是返回途中断导致提交结果未知，Worker 会使用同一租约幂等重试，并保留临时占位而不误释放已提交房间。GameRoom 废弃前先持久化释放任务，失败由 alarm 重试；旧版本房间首次唤醒时也必须先登记容量才能继续服务。
 
 ## 2. MVP 做什么
 
@@ -154,7 +156,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 棋盘使用 Canvas 2D，按设备像素比绘制但 DPR 上限为 2；只在局面或尺寸变化时重绘，不运行永久动画循环。
 - 手机棋盘占满可用宽度；指针按最近交叉点吸附，按下/拖动显示半透明预览，抬起才提交。服务端确认前不画实心棋子。
 - Canvas 可聚焦，方向键移动落点、Enter 提交；页面同时提供当前回合和最后落点的文本状态。
-- 正常落子执行一次小对象写入、一次容量租约续期和一次房间广播。两个 DO 都使用 `locationHint: "apac"`；在最多 10 个房间的规模下优先保证容量语义明确。
+- 正常落子只执行一次 GameRoom 小对象写入和一次房间广播，不跨 DO 续租；`RoomDirectory` 只参与建房、旧房登记和废弃释放。两个 DO 都使用 `locationHint: "apac"`。
 - 目标：规则计算 `<1 ms`；同区域落子确认 p95 `<200 ms`；重连恢复 p95 `<1 s`。大陆网络延迟主要受运营商到 Cloudflare 的链路影响，必须用移动、联通、电信实测，普通全球网络不能承诺稳定低延迟。
 
 ## 9. 最小安全基线
@@ -162,6 +164,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 仅接受 `https://play.ym0v0.com` 和明确预览域的 WebSocket Origin。
 - 单条客户端消息最多 4 KB；运行时校验消息结构、字符串长度、坐标和枚举值。
 - 每连接令牌桶限制约 10 条命令/秒、突发 20；房间创建按匿名身份和 IP 粗限速。
+- 同一 Guest 每房最多 4 条 WebSocket/HTTPS 连接，单房最多 16 条；观众最多占 8 条，不能挤占玩家入座或重连容量。离线观众的昵称会从房间存储中清理。
 - 房间 ID 至少 96 bit 随机；会话 Cookie、签名和内部异常不写日志、不放 URL。
 - 每位游客有显示昵称；统一做 Unicode/空白规范化，拒绝控制字符并限制为 1–16 个 Unicode code point。昵称只渲染为文本，不解析 HTML，也不作为身份凭据。
 - 设置 CSP、`X-Content-Type-Options: nosniff`、`Referrer-Policy: same-origin`。不做自由文本聊天，避免首版引入审核面。
@@ -187,7 +190,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 纯规则单测覆盖全部合法性和胜负边界。
 - DO 集成测试覆盖同时落同一点、旧 revision、伪造席位、错误 payload、存储后广播和休眠恢复。
 - Playwright 使用两个独立浏览器 context 完成整局，并覆盖刷新、断网和 360 px 手机视口。
-- 容量测试并发创建 11 个房间时必须严格得到 10 个成功与 1 个容量拒绝；房间废弃或初始化失败后名额必须可再次使用。
+- 容量测试并发创建 11 个房间时必须严格得到 10 个成功与 1 个容量拒绝；同时覆盖初始化幂等重试、提交结果未知、旧房登记、租约防 ABA 与废弃释放重试。
 - 生产只记录错误、房间生命周期、重连次数和 ACK 延迟，不记录 Cookie、昵称或完整棋谱。
 - 告警关注 Worker/DO 错误率、请求额度和 p95 ACK；错误率持续超过 1% 或 p95 超过 500 ms 时调查。
 

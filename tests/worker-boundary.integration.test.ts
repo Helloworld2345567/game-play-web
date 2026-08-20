@@ -1,6 +1,6 @@
 import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reset } from "cloudflare:test";
+import { reset, runInDurableObject } from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
 import {
   ROOM_DIRECTORY_NAME,
@@ -280,6 +280,7 @@ describe("Worker request boundary", () => {
           roomId: fixedRoomId,
           gameType: "gomoku",
           ruleSetId: "gomoku.freestyle15.v1",
+          capacityMode: "unmanaged-test-fixture",
         }),
       }),
     );
@@ -314,6 +315,95 @@ describe("Worker request boundary", () => {
       ),
     );
     expect(reservations.every((reservation) => reservation.ok)).toBe(true);
+  });
+
+  it("retries the same idempotent initialization after its response is lost", async () => {
+    const origin = "http://localhost:5173";
+    const fixedRoomId = "AAAAAAAAAAAAAAAA";
+    const testEnv = env as unknown as TestEnv;
+    const room = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(fixedRoomId));
+    let initializeCalls = 0;
+    await runInDurableObject(room, (instance) => {
+      const originalFetch = instance.fetch.bind(instance);
+      vi.spyOn(instance, "fetch").mockImplementation(async (request) => {
+        const response = await originalFetch(request);
+        initializeCalls += 1;
+        if (initializeCalls === 1) throw new Error("response lost");
+        return response;
+      });
+    });
+    vi.spyOn(crypto, "getRandomValues").mockImplementation((array) => {
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(0);
+      return array;
+    });
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const created = await app.default.fetch(
+      apiRequest(origin, "/api/rooms", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toMatchObject({ roomId: fixedRoomId });
+    expect(initializeCalls).toBe(2);
+  });
+
+  it("keeps capacity reserved when both initialization responses are unknown", async () => {
+    const origin = "http://localhost:5173";
+    const fixedRoomId = "AAAAAAAAAAAAAAAA";
+    const testEnv = env as unknown as TestEnv;
+    const room = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(fixedRoomId));
+    let initializeCalls = 0;
+    await runInDurableObject(room, (instance) => {
+      const originalFetch = instance.fetch.bind(instance);
+      vi.spyOn(instance, "fetch").mockImplementation(async (request) => {
+        await originalFetch(request);
+        initializeCalls += 1;
+        throw new Error("response lost");
+      });
+    });
+    vi.spyOn(crypto, "getRandomValues").mockImplementation((array) => {
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(0);
+      return array;
+    });
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const failed = await app.default.fetch(
+      apiRequest(origin, "/api/rooms", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+
+    expect(failed.status).toBe(500);
+    expect(initializeCalls).toBe(2);
+    const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+    const remaining = await Promise.all(
+      Array.from({ length: 9 }, (_, index) =>
+        directory.reserve(`held-room-${String(index).padStart(6, "0")}`),
+      ),
+    );
+    expect(remaining.every((reservation) => reservation.ok)).toBe(true);
+    await expect(directory.reserve("held-room-999999")).resolves.toEqual({
+      ok: false,
+      reason: "capacity",
+    });
   });
 
   it("coarsely limits room creation by Cloudflare client IP across identities", async () => {

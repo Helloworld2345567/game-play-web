@@ -7,15 +7,15 @@
 - 匿名签名 Cookie 恢复席位与游客昵称
 - 每个房间一个 SQLite-backed Durable Object
 - 前两位游客对战，之后进入的游客可实时观战且不能执行玩家操作
-- 全站最多同时存在 10 个房间，废弃房间会立即释放容量
+- 全站最多同时存在 10 个房间；废弃时会持久记录释放任务，短暂故障后自动重试
 - WebSocket Hibernation、完整快照重连、手机与键盘操作
-- 可主动退出房间；全部关页后保留 60 秒重连窗口，随后自动废弃旧链接
+- 可主动退出房间；玩家全部关页后保留 60 秒重连窗口，随后自动废弃旧链接
 - 双方确认复赛并自动交换先手
 - 中国象棋支持标准棋子走法、九宫、河界、将军/将死、困毙、飞将、三次重复与连续 60 回合无进展自动和棋；不含竞赛规则的长将/长捉责任裁定
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的命令、持久化状态并向玩家和观众广播快照；单例 `RoomDirectory` Durable Object 原子管理 10 个房间的全局容量。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的 HTTP、WebSocket、断连和闹钟事件，持久化状态并向玩家和观众广播快照；单例 `RoomDirectory` Durable Object 原子管理 10 个房间的全局容量。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
 
 详细设计与调研见 [`docs/GOMOKU_PLATFORM_PLAN.md`](docs/GOMOKU_PLATFORM_PLAN.md) 和 [`docs/research/GITHUB_SURVEY.md`](docs/research/GITHUB_SURVEY.md)。
 

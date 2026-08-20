@@ -45,6 +45,12 @@ interface InitializePayload {
   gameType: string;
   ruleSetId: string;
   capacityLeaseId?: string;
+  capacityMode?: "unmanaged-test-fixture";
+}
+
+interface PendingCapacityRelease {
+  roomId: string;
+  leaseId: string;
 }
 
 interface HttpConnectionEnvelope {
@@ -78,10 +84,31 @@ const HTTP_LEASES_KEY = "httpLeases";
 const HTTP_RATE_BUCKETS_KEY = "httpRateBuckets";
 const DISPLAY_NAMES_KEY = "displayNames";
 const CAPACITY_LEASE_ID_KEY = "capacityLeaseId";
+const CAPACITY_PHASE_KEY = "capacityPhase";
+const CAPACITY_PROVISIONING_SINCE_KEY = "capacityProvisioningSince";
+const CAPACITY_UNMANAGED_FIXTURE_KEY = "capacityUnmanagedTestFixture";
+const PENDING_CAPACITY_RELEASE_KEY = "pendingCapacityRelease";
+const RETIRED_ROOM_STATE_KEYS = [
+  ROOM_STORAGE_KEY,
+  VACANT_SINCE_KEY,
+  HTTP_LEASES_KEY,
+  HTTP_RATE_BUCKETS_KEY,
+  DISPLAY_NAMES_KEY,
+  CAPACITY_LEASE_ID_KEY,
+  CAPACITY_PHASE_KEY,
+  CAPACITY_PROVISIONING_SINCE_KEY,
+  CAPACITY_UNMANAGED_FIXTURE_KEY,
+] as const;
 const VACANT_ROOM_GRACE_MS = 60_000;
+const CAPACITY_RECONCILE_MS = 60_000;
+const CAPACITY_RELEASE_RETRY_MS = 10_000;
 const HTTP_LEASE_MS = 15_000;
-const MAX_HTTP_LEASES_PER_GUEST = 4;
-const MAX_HTTP_LEASES_PER_ROOM = 8;
+const MAX_CONNECTIONS_PER_GUEST = 4;
+const MAX_CONNECTIONS_PER_ROOM = 16;
+// Reserve four connections for each of the two Seats so Spectators can never
+// prevent a player from reconnecting while the total remains bounded at 16.
+const MAX_SPECTATOR_CONNECTIONS_PER_ROOM =
+  MAX_CONNECTIONS_PER_ROOM - 2 * MAX_CONNECTIONS_PER_GUEST;
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const MAX_MESSAGE_BYTES = 4_096;
@@ -98,9 +125,11 @@ function isInitializePayload(value: unknown): value is InitializePayload {
     /^[A-Za-z0-9_-]{1,64}$/u.test(payload.roomId) &&
     typeof payload.gameType === "string" &&
     typeof payload.ruleSetId === "string" &&
-    (payload.capacityLeaseId === undefined ||
-      (typeof payload.capacityLeaseId === "string" &&
-        /^[0-9a-f-]{36}$/u.test(payload.capacityLeaseId))) &&
+    ((typeof payload.capacityLeaseId === "string" &&
+      /^[0-9a-f-]{36}$/u.test(payload.capacityLeaseId) &&
+      payload.capacityMode === undefined) ||
+      (payload.capacityLeaseId === undefined &&
+        payload.capacityMode === "unmanaged-test-fixture")) &&
     isSupportedGame(payload.gameType, payload.ruleSetId)
   );
 }
@@ -149,7 +178,12 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   private httpRateBuckets: HttpRateBuckets = {};
   private displayNames: Record<string, string> = {};
   private capacityLeaseId: string | null = null;
+  private capacityPhase: "provisioning" | "active" | null = null;
+  private capacityProvisioningSince: number | null = null;
+  private unmanagedCapacityFixture = false;
+  private pendingCapacityRelease: PendingCapacityRelease | null = null;
   private discarding = false;
+  private roomEventTail: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
@@ -170,10 +204,30 @@ export class GameRoom extends DurableObject<WorkerEnv> {
         )) ?? {};
       this.capacityLeaseId =
         (await this.ctx.storage.get<string>(CAPACITY_LEASE_ID_KEY)) ?? null;
+      this.capacityPhase =
+        (await this.ctx.storage.get<"provisioning" | "active">(
+          CAPACITY_PHASE_KEY,
+        )) ?? null;
+      this.capacityProvisioningSince =
+        (await this.ctx.storage.get<number>(
+          CAPACITY_PROVISIONING_SINCE_KEY,
+        )) ?? null;
+      this.unmanagedCapacityFixture =
+        (await this.ctx.storage.get<boolean>(
+          CAPACITY_UNMANAGED_FIXTURE_KEY,
+        )) === true;
+      this.pendingCapacityRelease =
+        (await this.ctx.storage.get<PendingCapacityRelease>(
+          PENDING_CAPACITY_RELEASE_KEY,
+        )) ?? null;
     });
   }
 
   async fetch(request: Request): Promise<Response> {
+    return this.withRoomEventLock(() => this.handleFetch(request));
+  }
+
+  private async handleFetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const guestId = request.headers.get(INTERNAL_GUEST_HEADER);
     if (!validGuestId(guestId)) {
@@ -183,6 +237,16 @@ export class GameRoom extends DurableObject<WorkerEnv> {
 
     if (url.pathname === "/initialize" && request.method === "POST") {
       return this.initialize(request, guestId, displayName);
+    }
+    const capacityAdmission = await this.ensureRoomCapacity();
+    if (capacityAdmission !== "ready") {
+      const code =
+        capacityAdmission === "expired"
+          ? "room.expired"
+          : "room.capacity_unavailable";
+      return url.pathname === "/websocket"
+        ? this.rejectedSocket(code)
+        : this.httpError(code);
     }
     if (url.pathname === "/websocket") {
       return this.handleWebSocket(request, guestId, displayName);
@@ -219,22 +283,10 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (await this.isVacancyExpired(now)) {
       return this.httpError("room.expired");
     }
-    await this.upsertDisplayName(guestId, displayName);
     await this.pruneExpiredHttpLeases(now);
     const existing = this.httpLeases[value.connectionId];
     if (existing !== undefined && existing.guestId !== guestId) {
       return this.httpError("room.connection_conflict");
-    }
-    if (existing === undefined) {
-      const guestLeaseCount = Object.values(this.httpLeases).filter(
-        (lease) => lease.guestId === guestId,
-      ).length;
-      if (
-        guestLeaseCount >= MAX_HTTP_LEASES_PER_GUEST ||
-        Object.keys(this.httpLeases).length >= MAX_HTTP_LEASES_PER_ROOM
-      ) {
-        return this.httpError("room.too_many_connections");
-      }
     }
     let room = this.room;
     if (existing === undefined) {
@@ -244,13 +296,25 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       if (!joined.ok && joined.code !== "room.full") {
         return this.httpError(joined.code);
       }
+      const admittedRoom = joined.ok ? joined.room : room;
+      const prospectiveSeat = getGuestSeat(admittedRoom, guestId);
+      const connectionCounts = this.connectionCounts(guestId, now);
+      if (
+        connectionCounts.guest >= MAX_CONNECTIONS_PER_GUEST ||
+        (prospectiveSeat === null &&
+          connectionCounts.spectators >=
+            MAX_SPECTATOR_CONNECTIONS_PER_ROOM)
+      ) {
+        return this.httpError("room.too_many_connections");
+      }
+      room = admittedRoom;
       if (joined.ok) {
-        room = joined.room;
         if (joined.changed) await this.persist(room);
       }
     }
     const seat = getGuestSeat(room, guestId);
 
+    await this.upsertDisplayName(guestId, displayName);
     this.httpLeases[value.connectionId] = {
       guestId,
       seat,
@@ -356,6 +420,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
       if (this.room !== null) {
         const now = Date.now();
+        await this.pruneOfflineSpectatorDisplayNames(now);
         const hasPlayers = this.hasLivePlayers(now);
         const hasConnections =
           this.liveSockets().length > 0 ||
@@ -423,6 +488,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       delete this.httpLeases[connectionId];
     }
     await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    await this.pruneOfflineSpectatorDisplayNames(now);
   }
 
   private httpError(code: string, guestId?: string): Response {
@@ -442,9 +508,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     guestId: string,
     displayName: string,
   ): Promise<Response> {
-    if (this.room !== null) {
-      return new Response("Room already exists", { status: 409 });
-    }
     let payload: unknown;
     try {
       payload = await request.json();
@@ -454,35 +517,99 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (!isInitializePayload(payload)) {
       return new Response("Unsupported game", { status: 400 });
     }
+    if (this.pendingCapacityRelease !== null) {
+      await this.retryPendingCapacityRelease();
+      if (this.pendingCapacityRelease !== null) {
+        return new Response("Room retirement is pending", { status: 409 });
+      }
+    }
+    if (this.room !== null) {
+      if (!this.matchesInitialization(payload, guestId)) {
+        return new Response("Room already exists", { status: 409 });
+      }
+      this.displayNames[guestId] = displayName;
+      await this.ctx.storage.put(DISPLAY_NAMES_KEY, this.displayNames);
+      if (this.unmanagedCapacityFixture || this.capacityPhase === "active") {
+        return Response.json({ ok: true }, { status: 201 });
+      }
+      const activated = await this.activateCapacityLease();
+      if (activated) {
+        return Response.json({ ok: true }, { status: 201 });
+      }
+      await this.discardRoom();
+      return new Response("Room capacity lease unavailable", { status: 503 });
+    }
     const rules = getGameRules(payload.ruleSetId)!;
+    const now = Date.now();
     const room = createRoom({
       roomId: payload.roomId,
       creatorGuestId: guestId,
       rules,
-      now: Date.now(),
+      now,
     });
     this.capacityLeaseId = payload.capacityLeaseId ?? null;
+    this.capacityPhase =
+      this.capacityLeaseId === null ? null : "provisioning";
+    this.capacityProvisioningSince =
+      this.capacityLeaseId === null ? null : now;
+    this.unmanagedCapacityFixture =
+      payload.capacityMode === "unmanaged-test-fixture";
     this.displayNames[guestId] = displayName;
     try {
-      await this.ctx.storage.put(DISPLAY_NAMES_KEY, this.displayNames);
-      if (this.capacityLeaseId !== null) {
-        await this.ctx.storage.put(
-          CAPACITY_LEASE_ID_KEY,
-          this.capacityLeaseId,
+      await this.ctx.storage.transaction(async (transaction) => {
+        await transaction.put(ROOM_STORAGE_KEY, room);
+        await transaction.put(DISPLAY_NAMES_KEY, this.displayNames);
+        await transaction.put(VACANT_SINCE_KEY, now);
+        if (this.capacityLeaseId !== null) {
+          await transaction.put(CAPACITY_LEASE_ID_KEY, this.capacityLeaseId);
+          await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
+          await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
+        } else {
+          await transaction.put(CAPACITY_UNMANAGED_FIXTURE_KEY, true);
+        }
+        await transaction.setAlarm(
+          Math.min(room.expiresAt, now + VACANT_ROOM_GRACE_MS),
         );
-      }
-      await this.persist(room);
-      await this.markVacant(Date.now());
+      });
+      this.room = room;
     } catch {
-      await this.ctx.storage.deleteAll();
       this.room = null;
       this.displayNames = {};
       this.capacityLeaseId = null;
-      return new Response("Room capacity lease unavailable", {
-        status: 503,
-      });
+      this.capacityPhase = null;
+      this.capacityProvisioningSince = null;
+      this.unmanagedCapacityFixture = false;
+      throw new Error("Room initialization outcome is unknown");
+    }
+    if (!this.unmanagedCapacityFixture) {
+      const activated = await this.activateCapacityLease();
+      if (!activated) {
+        await this.discardRoom();
+        return new Response("Room capacity lease unavailable", {
+          status: 503,
+        });
+      }
     }
     return Response.json({ ok: true }, { status: 201 });
+  }
+
+  private matchesInitialization(
+    payload: InitializePayload,
+    guestId: string,
+  ): boolean {
+    if (
+      this.room === null ||
+      this.room.roomId !== payload.roomId ||
+      this.room.gameType !== payload.gameType ||
+      this.room.ruleSetId !== payload.ruleSetId ||
+      getGuestSeat(this.room, guestId) !== SEAT_A
+    ) {
+      return false;
+    }
+    if (payload.capacityMode === "unmanaged-test-fixture") {
+      return this.unmanagedCapacityFixture && this.capacityLeaseId === null;
+    }
+    return this.capacityLeaseId === payload.capacityLeaseId;
   }
 
   private async handleWebSocket(
@@ -504,7 +631,6 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (await this.isVacancyExpired(now)) {
       return this.rejectedSocket("room.expired");
     }
-    await this.upsertDisplayName(guestId, displayName);
     const rules = getGameRules(this.room.ruleSetId);
     if (rules === null) {
       return this.rejectedSocket("room.rule_mismatch");
@@ -515,6 +641,17 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       return this.rejectedSocket(joined.code);
     }
     const admittedRoom = joined.ok ? joined.room : this.room;
+    await this.pruneExpiredHttpLeases(now);
+    const prospectiveSeat = getGuestSeat(admittedRoom, guestId);
+    const connectionCounts = this.connectionCounts(guestId, now);
+    if (
+      connectionCounts.guest >= MAX_CONNECTIONS_PER_GUEST ||
+      (prospectiveSeat === null &&
+        connectionCounts.spectators >= MAX_SPECTATOR_CONNECTIONS_PER_ROOM)
+    ) {
+      return this.rejectedSocket("room.too_many_connections");
+    }
+    await this.upsertDisplayName(guestId, displayName);
     if (joined.ok && joined.changed) await this.persist(admittedRoom);
     const seat = getGuestSeat(admittedRoom, guestId);
 
@@ -552,6 +689,27 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   }
 
   async webSocketMessage(
+    socket: WebSocket,
+    message: string | ArrayBuffer,
+  ): Promise<void> {
+    await this.withRoomEventLock(async () => {
+      const capacityAdmission = await this.ensureRoomCapacity();
+      if (capacityAdmission !== "ready") {
+        const code =
+          capacityAdmission === "expired"
+            ? "room.expired"
+            : "room.capacity_unavailable";
+        if (socket.readyState === WebSocket.OPEN) {
+          this.sendError(socket, code);
+          socket.close(1008, code);
+        }
+        return;
+      }
+      await this.handleWebSocketMessage(socket, message);
+    });
+  }
+
+  private async handleWebSocketMessage(
     socket: WebSocket,
     message: string | ArrayBuffer,
   ): Promise<void> {
@@ -631,7 +789,19 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   }
 
   async alarm(): Promise<void> {
+    await this.withRoomEventLock(() => this.handleAlarm());
+  }
+
+  private async handleAlarm(): Promise<void> {
+    if (this.pendingCapacityRelease !== null) {
+      await this.retryPendingCapacityRelease();
+      return;
+    }
     if (this.room === null || this.discarding) return;
+    if (!this.unmanagedCapacityFixture && this.capacityPhase !== "active") {
+      const capacityAdmission = await this.ensureRoomCapacity();
+      if (capacityAdmission !== "ready") return;
+    }
     const now = Date.now();
     if (now >= this.room.expiresAt) {
       await this.discardRoom();
@@ -651,6 +821,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
         delete this.httpLeases[connectionId];
       }
       await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+      await this.pruneOfflineSpectatorDisplayNames(now);
       this.broadcastSnapshots();
     }
     if (
@@ -683,47 +854,85 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     this.discarding = true;
     const roomId = this.room?.roomId ?? null;
     const capacityLeaseId = this.capacityLeaseId;
+    const pendingRelease =
+      roomId !== null && capacityLeaseId !== null
+        ? { roomId, leaseId: capacityLeaseId }
+        : null;
     try {
       for (const socket of this.ctx.getWebSockets()) {
         if (socket.readyState < WebSocket.CLOSING) {
           socket.close(1001, "Room expired");
         }
       }
-      await this.ctx.storage.deleteAll();
+      await this.ctx.storage.transaction(async (transaction) => {
+        await transaction.delete([...RETIRED_ROOM_STATE_KEYS]);
+        if (pendingRelease === null) {
+          await transaction.delete(PENDING_CAPACITY_RELEASE_KEY);
+          await transaction.deleteAlarm();
+        } else {
+          await transaction.put(PENDING_CAPACITY_RELEASE_KEY, pendingRelease);
+          await transaction.setAlarm(Date.now() + CAPACITY_RELEASE_RETRY_MS);
+        }
+      });
       this.room = null;
       this.httpLeases = {};
       this.httpRateBuckets = {};
       this.displayNames = {};
       this.capacityLeaseId = null;
+      this.capacityPhase = null;
+      this.capacityProvisioningSince = null;
+      this.unmanagedCapacityFixture = false;
+      this.pendingCapacityRelease = pendingRelease;
     } catch (error) {
       this.discarding = false;
       await this.markVacant(Date.now());
       throw error;
     }
     this.discarding = false;
-    if (roomId !== null && capacityLeaseId !== null) {
-      try {
-        await this.roomDirectory().release(roomId, capacityLeaseId);
-      } catch {
-        this.ctx.waitUntil(
-          this.roomDirectory()
-            .release(roomId, capacityLeaseId)
-            .catch(() => undefined),
-        );
-        // The lease expiry remains a safe fallback if both attempts fail.
-      }
+    if (this.pendingCapacityRelease !== null) {
+      await this.retryPendingCapacityRelease();
+    }
+  }
+
+  private async retryPendingCapacityRelease(): Promise<void> {
+    const pending = this.pendingCapacityRelease;
+    if (pending === null) return;
+    try {
+      await this.roomDirectory().release(pending.roomId, pending.leaseId);
+    } catch {
+      await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RELEASE_RETRY_MS);
+      return;
+    }
+
+    await this.ctx.storage.transaction(async (transaction) => {
+      await transaction.delete(PENDING_CAPACITY_RELEASE_KEY);
+      await transaction.deleteAlarm();
+    });
+    if (
+      this.pendingCapacityRelease?.roomId === pending.roomId &&
+      this.pendingCapacityRelease.leaseId === pending.leaseId
+    ) {
+      this.pendingCapacityRelease = null;
     }
   }
 
   async webSocketClose(socket: WebSocket): Promise<void> {
-    await this.handleSocketGone(socket);
+    await this.withRoomEventLock(async () => {
+      if ((await this.ensureRoomCapacity()) === "ready") {
+        await this.handleSocketGone(socket);
+      }
+    });
   }
 
   async webSocketError(socket: WebSocket): Promise<void> {
-    if (socket.readyState < WebSocket.CLOSING) {
-      socket.close(1011, "Connection error");
-    }
-    await this.handleSocketGone(socket);
+    await this.withRoomEventLock(async () => {
+      if (socket.readyState < WebSocket.CLOSING) {
+        socket.close(1011, "Connection error");
+      }
+      if ((await this.ensureRoomCapacity()) === "ready") {
+        await this.handleSocketGone(socket);
+      }
+    });
   }
 
   private async leaveSocket(
@@ -752,6 +961,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       await this.discardRoom();
       return;
     }
+    await this.pruneOfflineSpectatorDisplayNames(now);
     if (hasOtherPlayers) await this.markOccupied();
     else await this.markVacant(now);
     this.broadcastSnapshots();
@@ -759,6 +969,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
 
   private async handleSocketGone(socket: WebSocket): Promise<void> {
     if (this.room === null || this.discarding) return;
+    await this.pruneOfflineSpectatorDisplayNames(Date.now());
     this.broadcastSnapshots();
     if (!this.hasLivePlayers(Date.now(), socket)) {
       await this.markVacant(Date.now());
@@ -788,17 +999,108 @@ export class GameRoom extends DurableObject<WorkerEnv> {
 
   private async persist(room: StoredRoom): Promise<void> {
     if (this.discarding) throw new Error("Room is being discarded");
-    if (this.capacityLeaseId !== null) {
-      const touched = await this.roomDirectory().touch(
-        room.roomId,
-        this.capacityLeaseId,
-        room.expiresAt,
-      );
-      if (!touched) throw new Error("Room capacity lease is unavailable");
+    if (!this.unmanagedCapacityFixture && this.capacityPhase !== "active") {
+      throw new Error("Room capacity lease is not active");
     }
     await this.ctx.storage.put(ROOM_STORAGE_KEY, room);
     this.room = room;
     await this.scheduleNextAlarm();
+  }
+
+  private async ensureRoomCapacity(): Promise<
+    "ready" | "expired" | "unavailable"
+  > {
+    if (this.pendingCapacityRelease !== null) {
+      await this.retryPendingCapacityRelease();
+      return "expired";
+    }
+    if (this.room === null || this.discarding) return "expired";
+    if (this.unmanagedCapacityFixture || this.capacityPhase === "active") {
+      return "ready";
+    }
+
+    if (this.capacityLeaseId === null) {
+      const desiredLeaseId = crypto.randomUUID();
+      const now = Date.now();
+      try {
+        await this.persistCapacityProvisioning(desiredLeaseId, now);
+      } catch {
+        return "unavailable";
+      }
+    }
+    const leaseId = this.capacityLeaseId;
+    if (leaseId === null) return "unavailable";
+
+    let adopted;
+    try {
+      adopted = await this.roomDirectory().adopt(this.room.roomId, leaseId);
+    } catch {
+      await this.scheduleCapacityReconciliation();
+      return "unavailable";
+    }
+    if (!adopted.ok) {
+      await this.discardRoom();
+      return "expired";
+    }
+
+    let activated: boolean;
+    try {
+      activated = await this.activateCapacityLease();
+    } catch {
+      await this.scheduleCapacityReconciliation();
+      return "unavailable";
+    }
+    if (!activated) {
+      await this.discardRoom();
+      return "expired";
+    }
+    return "ready";
+  }
+
+  private async persistCapacityProvisioning(
+    leaseId: string,
+    now: number,
+  ): Promise<void> {
+    const existingAlarm = await this.ctx.storage.getAlarm();
+    await this.ctx.storage.transaction(async (transaction) => {
+      await transaction.put(CAPACITY_LEASE_ID_KEY, leaseId);
+      await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
+      await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
+      await transaction.setAlarm(
+        Math.min(
+          existingAlarm ?? Number.POSITIVE_INFINITY,
+          now + CAPACITY_RECONCILE_MS,
+        ),
+      );
+    });
+    this.capacityLeaseId = leaseId;
+    this.capacityPhase = "provisioning";
+    this.capacityProvisioningSince = now;
+  }
+
+  private async activateCapacityLease(): Promise<boolean> {
+    if (this.unmanagedCapacityFixture) return true;
+    if (this.capacityPhase === "active") return true;
+    if (this.room === null || this.capacityLeaseId === null) return false;
+
+    const activated = await this.roomDirectory().activate(
+      this.room.roomId,
+      this.capacityLeaseId,
+    );
+    if (!activated) return false;
+    await this.ctx.storage.transaction(async (transaction) => {
+      await transaction.put(CAPACITY_PHASE_KEY, "active");
+      await transaction.delete(CAPACITY_PROVISIONING_SINCE_KEY);
+    });
+    this.capacityPhase = "active";
+    this.capacityProvisioningSince = null;
+    await this.scheduleNextAlarm();
+    return true;
+  }
+
+  private async scheduleCapacityReconciliation(): Promise<void> {
+    if (this.room === null || this.discarding) return;
+    await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RELEASE_RETRY_MS);
   }
 
   private roomDirectory(): DurableObjectStub<RoomDirectory> {
@@ -814,6 +1116,34 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (this.displayNames[guestId] === displayName) return;
     this.displayNames[guestId] = displayName;
     await this.ctx.storage.put(DISPLAY_NAMES_KEY, this.displayNames);
+  }
+
+  private async pruneOfflineSpectatorDisplayNames(now: number): Promise<void> {
+    if (this.room === null || this.discarding) return;
+    const retainedGuestIds = new Set<string>([
+      this.room.seats[SEAT_A].guestId,
+      ...(this.room.seats[SEAT_B] === null
+        ? []
+        : [this.room.seats[SEAT_B].guestId]),
+    ]);
+    for (const socket of this.liveSockets()) {
+      const attachment =
+        socket.deserializeAttachment() as SocketAttachment | null;
+      if (attachment !== null) retainedGuestIds.add(attachment.guestId);
+    }
+    for (const lease of this.activeHttpLeases(now)) {
+      retainedGuestIds.add(lease.guestId);
+    }
+
+    let changed = false;
+    for (const guestId of Object.keys(this.displayNames)) {
+      if (retainedGuestIds.has(guestId)) continue;
+      delete this.displayNames[guestId];
+      changed = true;
+    }
+    if (changed) {
+      await this.ctx.storage.put(DISPLAY_NAMES_KEY, this.displayNames);
+    }
   }
 
   private async markVacant(now: number): Promise<void> {
@@ -850,7 +1180,29 @@ export class GameRoom extends DurableObject<WorkerEnv> {
         candidates.push(vacantSince + VACANT_ROOM_GRACE_MS);
       }
     }
+    if (
+      this.capacityPhase === "provisioning" &&
+      this.capacityProvisioningSince !== null
+    ) {
+      candidates.push(
+        this.capacityProvisioningSince + CAPACITY_RECONCILE_MS,
+      );
+    }
     await this.ctx.storage.setAlarm(Math.min(...candidates));
+  }
+
+  private async withRoomEventLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.roomEventTail;
+    let release!: () => void;
+    this.roomEventTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private liveSockets(except?: WebSocket): WebSocket[] {
@@ -891,6 +1243,29 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     return this.activeHttpLeases(now).filter(
       (lease) => lease.seat !== null,
     );
+  }
+
+  private connectionCounts(
+    guestId: string,
+    now: number,
+  ): { guest: number; spectators: number } {
+    const sockets = this.liveSockets();
+    const httpLeases = this.activeHttpLeases(now);
+    return {
+      guest:
+        sockets.filter((socket) => {
+          const attachment =
+            socket.deserializeAttachment() as SocketAttachment | null;
+          return attachment?.guestId === guestId;
+        }).length +
+        httpLeases.filter((lease) => lease.guestId === guestId).length,
+      spectators:
+        sockets.filter((socket) => {
+          const attachment =
+            socket.deserializeAttachment() as SocketAttachment | null;
+          return attachment?.seat === null;
+        }).length + httpLeases.filter((lease) => lease.seat === null).length,
+    };
   }
 
   private hasLivePlayers(now: number, exceptSocket?: WebSocket): boolean {

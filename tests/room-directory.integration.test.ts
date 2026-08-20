@@ -55,22 +55,76 @@ describe("RoomDirectory Durable Object", () => {
     await expect(stub.reserve(roomId(10))).resolves.toMatchObject({ ok: true });
   });
 
-  it("only lets the lease owner extend a Room reservation", async () => {
+  it("only lets the lease owner activate a Room reservation", async () => {
     const stub = directory();
     const reservation = await stub.reserve(roomId(0));
     expect(reservation.ok).toBe(true);
     if (!reservation.ok) throw new Error("Expected a Room lease");
 
     await expect(
-      stub.touch(roomId(0), reservation.leaseId, Date.now() + 3_600_000),
+      stub.activate(roomId(0), reservation.leaseId),
     ).resolves.toBe(true);
     await expect(
-      stub.touch(
+      stub.activate(
         roomId(0),
         "00000000-0000-4000-8000-000000000000",
-        Date.now() + 7_200_000,
       ),
     ).resolves.toBe(false);
+
+    await expect(
+      runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
+    ).resolves.toBeNull();
+  });
+
+  it("lets the authoritative legacy Room adopt one stable capacity lease", async () => {
+    const stub = directory();
+    const desiredLeaseId = crypto.randomUUID();
+    const first = await stub.adopt(roomId(0), desiredLeaseId);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("Expected an adopted Room lease");
+
+    await expect(stub.adopt(roomId(0), desiredLeaseId)).resolves.toEqual(first);
+    await expect(stub.adopt(roomId(0), crypto.randomUUID())).resolves.toEqual({
+      ok: false,
+      reason: "room_id_conflict",
+    });
+    await expect(stub.activate(roomId(0), first.leaseId)).resolves.toBe(true);
+    await expect(stub.adopt(roomId(0), desiredLeaseId)).resolves.toEqual(first);
+
+    const remaining = await Promise.all(
+      Array.from({ length: 9 }, (_, index) => stub.reserve(roomId(index + 1))),
+    );
+    expect(remaining.every((reservation) => reservation.ok)).toBe(true);
+    await expect(stub.adopt(roomId(10), crypto.randomUUID())).resolves.toEqual({
+      ok: false,
+      reason: "capacity",
+    });
+  });
+
+  it("keeps an activated Room counted without per-move lease renewal", async () => {
+    const stub = directory();
+    const active = await stub.reserve(roomId(0));
+    if (!active.ok) throw new Error("Expected an active Room lease");
+    await stub.activate(roomId(0), active.leaseId);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const reservations = await state.storage.get<
+        Record<string, { leaseId: string; phase: string; expiresAt: number }>
+      >("reservations");
+      if (reservations?.[roomId(0)] === undefined) {
+        throw new Error("Missing active reservation");
+      }
+      reservations[roomId(0)]!.expiresAt = Date.now() - 1;
+      await state.storage.put("reservations", reservations);
+    });
+    const remaining = await Promise.all(
+      Array.from({ length: 9 }, (_, index) => stub.reserve(roomId(index + 1))),
+    );
+    expect(remaining.every((reservation) => reservation.ok)).toBe(true);
+
+    await expect(stub.reserve(roomId(10))).resolves.toEqual({
+      ok: false,
+      reason: "capacity",
+    });
   });
 
   it("reclaims expired provisional leases before checking capacity", async () => {

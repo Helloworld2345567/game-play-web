@@ -179,21 +179,36 @@ async function createRoom(
     const stub = env.ROOMS.get(id, { locationHint: "apac" });
     const headers = new Headers({ "Content-Type": "application/json" });
     setInternalGuestHeaders(headers, guest);
-    let initialized: Response;
-    try {
-      initialized = await stub.fetch(
-        new Request("https://room.internal/initialize", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            roomId,
-            gameType,
-            ruleSetId,
-            capacityLeaseId: reservation.leaseId,
+    const initializationBody = JSON.stringify({
+      roomId,
+      gameType,
+      ruleSetId,
+      capacityLeaseId: reservation.leaseId,
+    });
+    let initialized: Response | null = null;
+    for (
+      let initializationAttempt = 0;
+      initializationAttempt < 2;
+      initializationAttempt += 1
+    ) {
+      try {
+        initialized = await stub.fetch(
+          new Request("https://room.internal/initialize", {
+            method: "POST",
+            headers,
+            body: initializationBody,
           }),
-        }),
-      );
-    } catch {
+        );
+        break;
+      } catch {
+        // The Room may have committed before its response was lost. Retrying the
+        // same lease is safe because initialization is idempotent.
+      }
+    }
+    if (initialized === null) {
+      // Do not release an outcome-unknown lease: a committed Room would then be
+      // accessible without counting toward capacity. Provisional/vacancy cleanup
+      // converges within sixty seconds.
       return json({ error: "room.create_failed" }, { status: 500 });
     }
     if (initialized.ok) {
