@@ -6,6 +6,7 @@ import type {
 } from "../../core/game-rules";
 import { gomokuAdapter } from "./gomoku/Board";
 import { minesweeperDuelAdapters } from "./minesweeper/DuelBoard";
+import { minesweeperRaceAdapters } from "./minesweeper/RaceBoard";
 import { ticTacToeAdapter } from "./tictactoe/Board";
 import { xiangqiAdapter } from "./xiangqi/Board";
 
@@ -33,6 +34,7 @@ export interface GameAdapter {
   readonly gameType: string;
   readonly ruleSetId: string;
   readonly displayName: string;
+  readonly landingLabel?: string;
   readonly createRoomLabel: string;
   readonly landingDescription: string;
   readonly Renderer: FunctionComponent<GameRendererProps>;
@@ -53,12 +55,13 @@ export const unknownSeatPresentations: SeatPresentations = {
   "seat-b": { label: "席位 B", swatchClassName: "neutral" },
 };
 
-export const availableGameAdapters = [
+export const availableGameAdapters: readonly GameAdapter[] = [
   gomokuAdapter,
   xiangqiAdapter,
   ticTacToeAdapter,
+  ...minesweeperRaceAdapters,
   ...minesweeperDuelAdapters,
-] as const satisfies readonly GameAdapter[];
+];
 
 const adaptersByRuleSetId = new Map<string, GameAdapter>(
   availableGameAdapters.map((adapter) => [adapter.ruleSetId, adapter]),

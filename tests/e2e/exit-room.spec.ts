@@ -1,5 +1,17 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+async function setDisplayName(page: Page, displayName: string): Promise<void> {
+  const input = page.getByLabel("你的昵称");
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.getByRole("button", { name: /^编辑昵称/u }).click();
+  }
+  await input.fill(displayName);
+  await page.getByRole("button", { name: "保存昵称" }).click();
+  await expect(page.getByRole("button", {
+    name: `编辑昵称，当前为${displayName}`,
+  })).toBeVisible();
+}
+
 async function answerConfirmation(
   page: Page,
   trigger: Locator,
@@ -34,11 +46,13 @@ test("canceling Exit keeps the room, while both explicit exits retire it", async
 
   try {
     await creator.goto("/");
+    await setDisplayName(creator, "退出甲");
     await creator.getByRole("button", { name: "创建五子棋房" }).click();
     await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);
     const inviteUrl = creator.url();
 
     await invitee.goto(inviteUrl);
+    await setDisplayName(invitee, "退出乙");
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",
@@ -56,7 +70,7 @@ test("canceling Exit keeps the room, while both explicit exits retire it", async
     await answerConfirmation(creator, creatorExit, "accept", true);
     await expect(creator).toHaveURL("/");
     await expect(creator.getByRole("heading", { level: 1 })).toContainText(
-      "一条链接",
+      "想下哪一局？",
     );
     await expect(
       invitee.locator(".seat-card").filter({ hasText: "暂时离线" }),
@@ -66,7 +80,7 @@ test("canceling Exit keeps the room, while both explicit exits retire it", async
     await answerConfirmation(invitee, inviteeExit, "accept");
     await expect(invitee).toHaveURL("/");
     await expect(invitee.getByRole("heading", { level: 1 })).toContainText(
-      "一条链接",
+      "想下哪一局？",
     );
 
     await verifier.goto(inviteUrl);
@@ -92,6 +106,7 @@ test("Exit returns home locally even while the browser is offline", async ({
 
   try {
     await page.goto("/");
+    await setDisplayName(page, "离线退出者");
     await page.getByRole("button", { name: "创建五子棋房" }).click();
     await expect(page).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);
     const exit = page.getByRole("button", { name: "退出房间" });
@@ -103,7 +118,7 @@ test("Exit returns home locally even while the browser is offline", async ({
 
     await expect(page).toHaveURL("/");
     await expect(page.getByRole("heading", { level: 1 })).toContainText(
-      "一条链接",
+      "想下哪一局？",
     );
   } finally {
     await context.setOffline(false);

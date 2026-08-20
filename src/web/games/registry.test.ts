@@ -15,6 +15,19 @@ describe("game outcome presentation", () => {
     }
   });
 
+  it("supports the three independent-board minesweeper race rules", () => {
+    for (const ruleSetId of [
+      "minesweeper.race.9x9x10.v1",
+      "minesweeper.race.16x16x40.v1",
+      "minesweeper.race.30x16x99.v1",
+    ]) {
+      expect(getGameAdapter("minesweeper", ruleSetId)).toMatchObject({
+        gameType: "minesweeper",
+        ruleSetId,
+      });
+    }
+  });
+
   it("names a Xiangqi checkmate from both players' perspectives", () => {
     const adapter = getGameAdapter("xiangqi", "xiangqi.casual.v1");
     const outcome = {

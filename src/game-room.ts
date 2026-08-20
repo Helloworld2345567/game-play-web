@@ -28,10 +28,8 @@ import {
   type ServerError,
 } from "./shared/protocol";
 
-export interface WorkerEnv {
-  ROOMS: DurableObjectNamespace<GameRoom>;
+export interface GameRoomEnv {
   ROOM_DIRECTORY: DurableObjectNamespace<RoomDirectory>;
-  SESSION_SECRET: string;
 }
 
 interface SocketAttachment {
@@ -171,7 +169,7 @@ function isHttpCommandEnvelope(value: unknown): value is HttpCommandEnvelope {
   return isHttpConnectionEnvelope(value) && "command" in value;
 }
 
-export class GameRoom extends DurableObject<WorkerEnv> {
+export class GameRoom extends DurableObject<GameRoomEnv> {
   private room: StoredRoom | null = null;
   private httpLeases: HttpLeases = {};
   private httpRateBuckets: HttpRateBuckets = {};
@@ -183,7 +181,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   private discarding = false;
   private roomEventTail: Promise<void> = Promise.resolve();
 
-  constructor(ctx: DurableObjectState, env: WorkerEnv) {
+  constructor(ctx: DurableObjectState, env: GameRoomEnv) {
     super(ctx, env);
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong"),

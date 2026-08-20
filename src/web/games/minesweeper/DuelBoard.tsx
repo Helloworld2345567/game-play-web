@@ -4,6 +4,7 @@ import {
   readPublicDuelPosition,
   type PublicMinesweeperDuelData,
 } from "../../../games/minesweeper/duel-rules";
+import { getMinesweeperRuleSetId } from "../../../games/minesweeper/presets";
 import type {
   PublicMinefieldCell,
   PublicMinefieldView,
@@ -204,19 +205,19 @@ function adapter(
 
 export const minesweeperDuelAdapters = [
   adapter(
-    "minesweeper.duel.9x9x10.v1",
+    getMinesweeperRuleSetId("duel", "small"),
     "双人扫雷 · 小型",
     "双人扫雷 · 小型",
     "9×9 · 10 雷 · 双方同时操作",
   ),
   adapter(
-    "minesweeper.duel.16x16x40.v1",
+    getMinesweeperRuleSetId("duel", "medium"),
     "双人扫雷 · 中型",
     "双人扫雷 · 中型",
     "16×16 · 40 雷 · 双方同时操作",
   ),
   adapter(
-    "minesweeper.duel.30x16x99.v1",
+    getMinesweeperRuleSetId("duel", "large"),
     "双人扫雷 · 大型",
     "双人扫雷 · 大型",
     "30×16 · 99 雷 · 可拖动大地图",

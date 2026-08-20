@@ -1,10 +1,10 @@
 # ym0v0 棋局
 
-一个部署在 Cloudflare 上的极简实时棋类对战平台。当前支持 15×15 自由五子棋、休闲中国象棋、井字棋、单人扫雷与双人同时扫雷：无需注册，创建房间后把邀请链接发给朋友即可开始。
+一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋和扫雷四个入口；扫雷入口内可选单人或双人竞速及三种难度。无需注册，创建房间后把邀请链接发给朋友即可开始。
 
 - 线上地址：<https://play.ym0v0.com>
 - 服务端权威裁决：严格棋类拒绝旧修订；并发棋类始终按最新权威局面验证动作
-- 匿名签名 Cookie 恢复席位与游客昵称
+- 匿名签名 Cookie 恢复席位与游客昵称；昵称设置后收起为右上角 Chip
 - 首页实时显示按游客去重的在线人数和当前已创建房间数
 - 每个房间一个 SQLite-backed Durable Object
 - 前两位游客对战，之后进入的游客可实时观战且不能执行玩家操作
@@ -13,14 +13,17 @@
 - 可主动退出房间；玩家全部关页后保留 60 秒重连窗口，随后自动废弃旧链接
 - 双方确认复赛并自动交换先手
 - 中国象棋支持标准棋子走法、九宫、河界、将军/将死、困毙、飞将、三次重复与连续 60 回合无进展自动和棋；不含竞赛规则的长将/长捉责任裁定
-- 扫雷支持 9×9/10 雷、16×16/40 雷、30×16/99 雷；单人模式完全在浏览器运行，不占房间名额
-- 双人扫雷采用服务端顺序裁决、双秘密安全起点、私有旗帜、动作幂等和逐格并发，不向浏览器泄露未揭雷区
+- 扫雷支持 9×9/10 雷、16×16/40 雷、30×16/99 雷；单人模式不占房间名额
+- 双人扫雷竞速使用同一权威雷区和共同中央安全起点，双方的已揭格与旗帜完全独立；只公开进度，先完成者获胜，踩雷者失败
+- 单人扫雷按难度显示个人最佳和全站 Top 10，记录签名 Guest 的昵称与最快用时
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的 HTTP、WebSocket、断连和闹钟事件，持久化权威状态并按观看者投影公开快照；单例 `RoomDirectory` Durable Object 原子管理 10 个房间的全局容量，并通过按 Guest 去重的短期 Presence 租约生成匿名平台统计。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；单例 SQLite-backed `MinesweeperLeaderboard` 按 Guest 和难度原子保存最佳成绩。排行榜 DO 不计入房间上限。棋种规则通过 `GameRules` 注册表隔离，增加棋类不需要修改房间、会话或重连核心。
 
-五子棋、中国象棋和井字棋继续使用严格 revision。双人扫雷使用 `actionId + clientSeq + baseRevision` 的并发幂等通道，WebSocket 为首选，受限网络下每个操作仍会立即通过 HTTPS 兼容连接提交。单人和双人扫雷复用同一个纯函数 `MinefieldEngine` 与响应式 `MinesweeperBoard`。
+五子棋、中国象棋和井字棋继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道；旧 `minesweeper.duel.*.v1` 只保留协议兼容，不再从首页创建。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
+
+单人榜以签名 Guest 作为匿名身份，昵称从签名会话取得。它是客户端运行的休闲榜，已做输入校验和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。
 
 初始架构设计、当前扩展说明与调研证据见 [`docs/GOMOKU_PLATFORM_PLAN.md`](docs/GOMOKU_PLATFORM_PLAN.md) 和 [`docs/research/GITHUB_SURVEY.md`](docs/research/GITHUB_SURVEY.md)。
 
@@ -58,7 +61,7 @@ npm run build
 
 ## 部署
 
-`wrangler.jsonc` 已配置 Worker、静态资源、两个 SQLite Durable Object 类和 Custom Domain `play.ym0v0.com`。
+`wrangler.jsonc` 已配置 Worker、静态资源、`GameRoom`、`RoomDirectory` 和 `MinesweeperLeaderboard` 三个 SQLite Durable Object 类，以及 Custom Domain `play.ym0v0.com`。
 
 推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
 

@@ -33,9 +33,16 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 }
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
-  await page.getByLabel("你的昵称").fill(displayName);
+  const input = page.getByLabel("你的昵称");
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.getByRole("button", { name: /^编辑昵称/u }).click();
+  }
+  await input.fill(displayName);
   await page.getByRole("button", { name: "保存昵称" }).click();
   await expect(page.getByText("昵称已保存", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", {
+    name: `编辑昵称，当前为${displayName}`,
+  })).toBeVisible();
 }
 
 test("two Guests recover, finish, and rematch a Chinese chess room", async ({ browser }) => {

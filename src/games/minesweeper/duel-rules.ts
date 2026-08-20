@@ -14,6 +14,7 @@ import {
   generateMinefield,
 } from "./engine";
 import {
+  getMinesweeperRuleSetId,
   MINEFIELD_PRESETS,
   type MinefieldConfig,
   type MinefieldPresetId,
@@ -163,8 +164,7 @@ function completedOutcome(
 
 function createRules(presetId: MinefieldPresetId): GameRules {
   const config = MINEFIELD_PRESETS[presetId];
-  const ruleSetId =
-    `minesweeper.duel.${config.width}x${config.height}x${config.mineCount}.v1`;
+  const ruleSetId = getMinesweeperRuleSetId("duel", presetId);
 
   return {
     definition: {

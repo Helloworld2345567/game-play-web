@@ -16,4 +16,21 @@ describe("game rules registry", () => {
       });
     }
   });
+
+  it("registers every standard minesweeper race preset without replacing duel", () => {
+    for (const ruleSetId of [
+      "minesweeper.race.9x9x10.v1",
+      "minesweeper.race.16x16x40.v1",
+      "minesweeper.race.30x16x99.v1",
+    ]) {
+      expect(isSupportedGame("minesweeper", ruleSetId)).toBe(true);
+      expect(getGameRules(ruleSetId)?.definition).toEqual({
+        gameType: "minesweeper",
+        ruleSetId,
+        actionConsistency: "concurrent_idempotent",
+      });
+    }
+
+    expect(getGameRules("minesweeper.duel.9x9x10.v1")).not.toBeNull();
+  });
 });

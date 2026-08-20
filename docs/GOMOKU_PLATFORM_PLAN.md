@@ -7,13 +7,14 @@
 
 ## 1. 一句话结论
 
-将 `https://play.ym0v0.com` 部署为一个 Cloudflare Worker：它同时提供前端静态资源、少量 HTTP API 和 WebSocket；每个房间对应一个 SQLite-backed `GameRoom` Durable Object，串行裁决并保存完整棋局；另有一个单例 `RoomDirectory` Durable Object 原子管理全站房间容量和匿名 Presence 聚合。除此之外不启用其他 Cloudflare 数据服务。
+将 `https://play.ym0v0.com` 部署为一个 Cloudflare Worker：它同时提供前端静态资源、少量 HTTP API 和 WebSocket；每个房间对应一个 SQLite-backed `GameRoom` Durable Object；单例 `RoomDirectory` 管理房间容量和 Presence；单例 SQLite-backed `MinesweeperLeaderboard` 按难度保存单人扫雷最佳成绩。除此之外不启用其他 Cloudflare 数据服务。
 
 ```mermaid
 flowchart LR
     B[浏览器] <-->|静态资源 / HTTP / WebSocket| W[一个 Cloudflare Worker]
     W <-->|按 roomId 路由| R[每房一个 GameRoom Durable Object]
     W <-->|建房预留 / Presence| D[单例 RoomDirectory Durable Object]
+    W <-->|单人成绩 / Top 10| L[单例 MinesweeperLeaderboard Durable Object]
     R <-->|激活 / 释放| D
 ```
 
@@ -21,18 +22,18 @@ flowchart LR
 
 ## 2. MVP 做什么
 
-- 游客先选择保存在浏览器中的显示昵称，再创建五子棋或中国象棋房间并复制私密邀请链接；另一位游客打开链接加入。
+- 首页保留五子棋、中国象棋、井字棋、扫雷四个入口；扫雷点击后再选单人/双人竞速和难度。昵称设置后收起为右上角 Chip。
 - 前两个不同身份占据两个席位；第三位及之后的游客作为只读观众实时接收完整局面。
 - `15×15` 自由五子棋：黑先，横竖斜连续 `>=5` 获胜，无禁手，满盘和棋。
 - 休闲中国象棋：红先，支持九宫/河界、所有基础棋子走法、飞将、将死、困毙、三次重复与连续 60 回合无进展自动和棋；暂不实现竞赛规则的长将/长捉责任裁定。
 - 经典 `3×3` 井字棋：X 先，三连获胜，支持观战和复赛换先。
-- 单人扫雷：三种标准难度、延迟布雷与首点 3×3 保护，在浏览器本机运行。
-- 双人同时扫雷：双秘密安全起点、服务端顺序裁决、私有旗帜、计分和幂等并发动作。
+- 单人扫雷：三种标准难度、延迟布雷与首点 3×3 保护；按难度记录签名 Guest 的个人最佳和全站 Top 10。
+- 双人扫雷竞速：同一权威雷区与共同中央安全起点，双方使用独立 revealed/flags，只公开进度，先完成获胜，踩雷失败。
 - 服务端权威校验落子、回合、胜负；支持认输和双方确认后再来一局。
 - 刷新、短暂断网、Worker/DO 休眠后自动重连并恢复完整局面。
 - 手机优先棋盘、落点预览、最近一手、胜利连线、连接状态和明确错误提示。
 
-明确延后：账号、D1、永久棋谱、回放、排位、Elo、排行榜、赛季、快速匹配、棋钟、AI、聊天、举报、管理后台、PWA、KV、R2、Queues 和支付。当前没有账号与历史，因此浏览器数据清除后不承诺恢复旧席位。
+明确延后：账号、D1、永久棋谱、回放、排位、Elo、赛季、快速匹配、棋钟、AI、聊天、举报、管理后台、PWA、KV、R2、Queues 和支付。当前单人扫雷榜为匿名休闲榜，不具备完整服务端回放校验，不宣称强反作弊。
 
 ## 3. GitHub 调研后的选择
 
@@ -52,9 +53,9 @@ flowchart LR
 ## 4. 最小技术栈与目录
 
 - TypeScript + Preact + Vite：小型前端，不引入 UI 组件库。
-- 原生 Cloudflare Worker 路由：仅提供会话、平台统计、建房与房间连接入口，不引入 Hono。
+- 原生 Cloudflare Worker 路由：提供会话、平台统计、建房、房间连接与扫雷榜接口，不引入 Hono。
 - 原生 Durable Objects WebSocket Hibernation API：不引入 PartyServer。
-- DO Storage 的 `get/put` 保存一个 `room` 对象；底层使用 SQLite-backed DO，但应用不写 SQL。
+- `GameRoom` 通过 DO Storage 的对象 `get/put` 保存 `room` 状态，不直接写 SQL；`MinesweeperLeaderboard` 则使用自己的 SQLite 表与唯一键，以便原子更新个人最佳并按用时排序 Top 10。
 - Vitest 做纯规则单测；Cloudflare Workers 测试工具做 DO 集成测试；Playwright 做双浏览器 E2E。
 - 单一 `package.json`、单一 Wrangler 项目，不做 monorepo。
 
@@ -62,22 +63,25 @@ flowchart LR
 src/
 ├─ worker.ts                    # 静态资源、会话、建房、WS 路由
 ├─ game-room.ts                 # Durable Object、席位、持久化、广播
+├─ minesweeper-leaderboard.ts   # 单例 SQLite DO、个人最佳与 Top 10
 ├─ core/
 │  └─ game-rules.ts             # 唯一棋类规则接口
 ├─ games/
 │  ├─ gomoku/
 │  │  ├─ rules.ts
 │  │  └─ rules.test.ts
-│  └─ xiangqi/
-│     ├─ rules.ts
-│     └─ rules.test.ts
+│  ├─ xiangqi/
+│  │  ├─ rules.ts
+│  │  └─ rules.test.ts
+│  └─ minesweeper/              # 共享引擎、单人控制器、duel 兼容与 race 规则
 ├─ shared/
 │  └─ protocol.ts
 └─ web/
    ├─ App.tsx
    └─ games/
       ├─ gomoku/Board.tsx
-      └─ xiangqi/Board.tsx
+      ├─ xiangqi/Board.tsx
+      └─ minesweeper/           # 共享棋盘、单人页、竞速 renderer、榜单客户端
 ```
 
 ## 5. 棋类扩展缝
@@ -111,7 +115,7 @@ interface RulePosition {
 
 约束同样属于接口：`create/apply/project` 必须对相同输入与 `RuleContext` 产生相同结果、无 I/O、不修改输入；时间和随机种子只能由平台显式注入。所有状态可 JSON 序列化；规则升级发布新的不可变 `ruleSetId`。平台绝不读取 `position.data.board` 或雷区内容，也不出现棋种专用判断。
 
-前端按 `ruleSetId` 从 adapter Map 生成首页入口并选择棋盘，再用 `gameType` 做一致性校验。中国象棋、井字棋和扫雷已经通过同一扩展缝接入；以后增加棋类只需新增对应规则、测试和 renderer，再在规则 Map 与 adapter 列表各注册一次；Worker、GameRoom、席位和重连核心无需按棋种名称改变。
+前端按 `ruleSetId` 从 adapter Map 选择棋盘，再用 `gameType` 做一致性校验；首页的普通双人棋类入口由已注册 adapter 自动投影，扫雷因需先选单人/双人竞速与难度而保留一个聚合入口。以后增加普通棋类只需新增对应规则、测试和 renderer，再在规则 Map 与 adapter 列表各注册一次；具有多玩法选择层的游戏还需增加自己的聚合入口。Worker、GameRoom、席位和重连核心无需按棋种名称改变。
 
 不提前设计通用棋盘、棋子、坐标、吃子或将军接口。当前接口承诺两席位、确定性规则，并通过 `project` 同时支持完全信息与隐藏信息游戏。
 
@@ -139,7 +143,7 @@ interface RulePosition {
 
 客户端 envelope 中的 `gameType/ruleSetId` 只用于版本一致性检查；服务端始终使用房间初始化时持久化的不可变 `ruleSetId` 选择规则模块，不一致立即拒绝，绝不按客户端字段切换规则。
 
-每个改变持久状态的命令令 `revision + 1`。DO 逐条执行：校验消息 → 校验身份、规则 ID 与一致性策略 → 调用房间已绑定的规则模块 → `storage.put("room", nextState)` → 广播观看者专属 snapshot。必须先持久化再广播。五子棋、象棋和井字棋继续严格拒绝旧 revision；双人扫雷携带 `actionId + clientSeq + baseRevision`，允许基于旧 revision 的不同格动作按服务端收到顺序依次生效，并用有限 receipt 缓存幂等去重。
+每个改变持久状态的命令令 `revision + 1`。DO 逐条执行：校验消息 → 校验身份、规则 ID 与一致性策略 → 调用房间已绑定的规则模块 → `storage.put("room", nextState)` → 广播观看者专属 snapshot。必须先持久化再广播。五子棋、象棋和井字棋继续严格拒绝旧 revision；扫雷竞速携带 `actionId + clientSeq + baseRevision`，允许基于旧 revision 的不同格动作按服务端收到顺序依次生效，并用有限 receipt 缓存幂等去重。
 
 五子棋完整快照通常只有几 KB；当前小规模房间中，全量同步比 delta、事件日志、补包和命令去重缓存更简单可靠。客户端断线后指数退避重连，离线时禁用操作，重连以服务端 snapshot 覆盖本地状态。
 
@@ -157,6 +161,10 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 
 中国象棋使用 9×10 交叉点数组；首局 Seat A 为红方先行、Seat B 为黑方，复赛继续沿用平台的先后手交换机制。`apply` 验证将/帅、士、象/相、马、车、炮、兵/卒的基础走法、宫界、河界、炮架、蹩马腿、塞象眼、飞将和自将。对手没有合法着法时，根据是否被将判定将死或困毙；同一完整局面（棋盘加行动方）第三次出现时自动判和。为限制快照与存储增长，吃子或兵卒向前移动会重置重复历史；连续 120 个半回合（60 个完整回合）没有吃子或兵卒前进时自动判和，因此重复表最多保留 121 项。前端 renderer 只负责选择和预览，最终裁决仍来自服务端。
 
+### 扫雷
+
+单人与双人复用确定性的 `MinefieldEngine` 和同一套 `MinesweeperBoard`。新建双人房绑定 `minesweeper.race.*.v1`：服务端只生成一张雷区，双方从共同中央安全区开始，各自独立保存揭格和旗帜；公开投影只向玩家发送自己的格子，并向所有观看者发送双方进度。旧 `minesweeper.duel.*.v1` 继续注册以兼容既有房间，但首页不再创建。单人成绩按难度写入 `MinesweeperLeaderboard`，每个签名 Guest 只保留最快一条并返回全站 Top 10。
+
 ## 8. 性能与体验
 
 - 静态资源、API 和 WebSocket 同源，减少 DNS/TLS、CORS 和 Cookie 问题。
@@ -164,7 +172,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 交叉点棋盘使用 Canvas 2D，按设备像素比绘制但 DPR 上限为 2；井字棋和扫雷使用语义化 DOM Grid。
 - 手机棋盘占满可用宽度；大扫雷地图在自身 viewport 内拖动/缩放，不造成页面横向溢出。严格棋类确认前不画实子，双人扫雷按格显示 pending。
 - 所有棋盘提供可访问名称与文本状态；桌面扫雷支持右键插旗，手机支持长按插旗。
-- 正常落子只执行一次 GameRoom 小对象写入和一次房间广播，不跨 DO 续租；`RoomDirectory` 另行处理建房、旧房登记、废弃释放和每页面 10 秒一次的 Presence 心跳。两个 DO 都使用 `locationHint: "apac"`。
+- 正常落子只执行一次 GameRoom 小对象写入和一次房间广播，不跨 DO 续租；`RoomDirectory` 另行处理建房、旧房登记、废弃释放和 Presence 心跳；`MinesweeperLeaderboard` 只在打开单人页或完成单人局时访问。DO 路由均使用 `locationHint: "apac"`。
 - 目标：规则计算 `<1 ms`；同区域落子确认 p95 `<200 ms`；重连恢复 p95 `<1 s`。大陆网络延迟主要受运营商到 Cloudflare 的链路影响，必须用移动、联通、电信实测，普通全球网络不能承诺稳定低延迟。
 
 ## 9. 最小安全基线
@@ -198,6 +206,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 
 - 纯规则单测覆盖全部合法性和胜负边界。
 - DO 集成测试覆盖严格棋类旧 revision、扫雷并发旧 revision、重复 `actionId`、私有投影、伪造席位、错误 payload、存储后广播和休眠恢复。
+- 排行榜测试覆盖分难度个人最佳、严格更快更新、稳定 Top 10、签名昵称、输入边界和持久化重启。
 - Playwright 使用两个独立浏览器 context 完成整局，并覆盖刷新、断网和 360 px 手机视口。
 - 容量测试并发创建 11 个房间时必须严格得到 10 个成功与 1 个容量拒绝；同时覆盖初始化幂等重试、提交结果未知、旧房登记、租约防 ABA 与废弃释放重试。
 - 生产只记录错误、房间生命周期、重连次数和 ACK 延迟，不记录 Cookie、昵称或完整棋谱。
@@ -211,7 +220,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 | --- | --- |
 | 100+ 人或更多房间 | 实时架构不变；每房 DO 已天然分片 |
 | 随机匹配 | 一个 MatchQueue DO |
-| 账号、跨设备历史、排行榜 | D1 |
+| 账号、跨设备历史、跨游戏正式排行榜 | D1 |
 | 赛后异步结算或通知 | Queue |
 | 大量永久棋谱/导出 | R2，D1 只存索引 |
 | 单房大量观众 | SpectatorRelay DO |
@@ -226,7 +235,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 第 5–7 天：认输/复赛、安全限制、E2E、容量测试、域名部署和运营商实测。
 - 一名熟悉 TypeScript 的开发者约 4–7 天可交付基础 MVP；中国象棋已通过既有扩展缝作为第二棋种接入。
 
-验收结果必须是：两个新浏览器只凭邀请链接能完成一局；任何并发、刷新、休眠或短暂断网都不会产生双落子或丢失已确认局面；360 px 手机可准确操作；新增棋类时不修改 GameRoom 核心。
+验收结果必须是：两个新浏览器只凭邀请链接能完成一局；任何并发、刷新、休眠或短暂断网都不会产生双落子或丢失已确认局面；扫雷竞速双方只看到自己的独立棋盘且产生唯一终局；单人榜返回个人最佳和 Top 10；360 px 手机可准确操作；新增棋类时不修改 GameRoom 核心。
 
 ## 14. 主要官方资料
 

@@ -181,6 +181,19 @@
     max(18px, env(safe-area-inset-left));
 }
 
+.minesweeper-solo-topbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: clamp(30px, 7vw, 58px);
+}
+
+.minesweeper-solo-topbar .profile-menu {
+  margin-left: auto;
+}
+
 .minesweeper-solo-header {
   display: flex;
   min-width: 0;
@@ -272,7 +285,88 @@
   line-height: 1.55;
 }
 
-.minesweeper-duel {
+.minesweeper-record-notice {
+  margin: 12px 0 0;
+  color: #efb45b;
+  font-weight: 700;
+  text-align: center;
+}
+
+.minesweeper-leaderboard {
+  max-width: 760px;
+  margin: 34px auto 0;
+  padding: clamp(18px, 4vw, 28px);
+  border: 1px solid #3f3931;
+  border-radius: 22px;
+  background:
+    linear-gradient(145deg, rgba(239, 180, 91, 0.06), transparent 45%),
+    rgba(33, 31, 27, 0.86);
+}
+
+.minesweeper-leaderboard > header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.minesweeper-leaderboard h2 {
+  margin: 0;
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: clamp(1.25rem, 4vw, 1.7rem);
+  font-weight: 500;
+}
+
+.minesweeper-leaderboard > header > span,
+.leaderboard-empty {
+  color: #938b80;
+  font-size: 0.78rem;
+}
+
+.minesweeper-leaderboard ol {
+  display: grid;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.minesweeper-leaderboard li {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  padding: 11px 4px;
+  border-top: 1px solid rgba(76, 70, 61, 0.6);
+  gap: 10px;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+}
+
+.minesweeper-leaderboard li strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard-rank {
+  color: #efb45b;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 700;
+}
+
+.minesweeper-leaderboard time {
+  color: #f3efe6;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.leaderboard-empty {
+  margin: 22px 0 0;
+  padding: 20px 0;
+  border-top: 1px solid rgba(76, 70, 61, 0.6);
+  text-align: center;
+}
+
+.minesweeper-duel,
+.minesweeper-race {
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -319,6 +413,96 @@
   color: #f3efe6;
 }
 
+.minesweeper-race-progress {
+  display: grid;
+  flex: 1 1 360px;
+  min-width: min(100%, 280px);
+  gap: 7px;
+}
+
+.race-progress-row {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  grid-template-columns: minmax(78px, auto) minmax(72px, 1fr) 42px;
+}
+
+.race-progress-row > span {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.race-progress-row strong {
+  overflow: hidden;
+  color: #c8c0b4;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.race-progress-row.is-self strong {
+  color: #efb45b;
+}
+
+.race-progress-row small,
+.race-progress-row b {
+  color: #938b80;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.67rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.race-progress-row b {
+  color: #d8d1c6;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.race-progress-row progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  color: #78a9c3;
+  background: #171512;
+  accent-color: #78a9c3;
+}
+
+.race-progress-row.is-self progress {
+  color: #efb45b;
+  accent-color: #efb45b;
+}
+
+.race-progress-row progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: #171512;
+}
+
+.race-progress-row progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.race-progress-row progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.minesweeper-race-toolbar .race-winning-time {
+  flex: 1 0 100%;
+  color: #efb45b;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 @keyframes minesweeper-pending-pulse {
   50% {
     opacity: 0.42;
@@ -344,6 +528,21 @@
     padding-inline:
       max(12px, env(safe-area-inset-left))
       max(12px, env(safe-area-inset-right));
+  }
+
+  .minesweeper-leaderboard > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .minesweeper-solo-topbar {
+    margin-bottom: 32px;
+  }
+
+  .minesweeper-race-progress {
+    flex-basis: 100%;
+    min-width: 100%;
   }
 }
 

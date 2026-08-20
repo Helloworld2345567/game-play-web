@@ -23,9 +23,16 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 }
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
-  await page.getByLabel("你的昵称").fill(displayName);
+  const input = page.getByLabel("你的昵称");
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.getByRole("button", { name: /^编辑昵称/u }).click();
+  }
+  await input.fill(displayName);
   await page.getByRole("button", { name: "保存昵称" }).click();
   await expect(page.getByText("昵称已保存", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", {
+    name: `编辑昵称，当前为${displayName}`,
+  })).toBeVisible();
 }
 
 test("two Guests recover, finish a Game, and swap first move in a rematch", async ({ browser }) => {
@@ -44,7 +51,7 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
     await creator.goto("/");
     await setDisplayName(creator, "甲方");
     await expect(creator.getByRole("heading", { level: 1 })).toContainText(
-      "一条链接",
+      "想下哪一局？",
     );
     await creator.getByRole("button", { name: "创建五子棋房" }).click();
     await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);

@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import {
+  getMinesweeperRuleSetId,
+  type MinefieldPresetId,
+} from "../games/minesweeper/presets";
 import { normalizeDisplayName } from "../shared/display-name";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
@@ -16,14 +20,62 @@ import {
   type ConnectionPhase,
   type RoomTransport,
 } from "./room-client";
+import { ProfileMenu } from "./ProfileMenu";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
 const DISPLAY_NAME_STORAGE_KEY = "ym0v0.display-name";
+const DISPLAY_NAME_CONFIRMED_STORAGE_KEY = "ym0v0.display-name-confirmed";
 let memoryDisplayName: string | null = null;
+let displayNameNeedsPrompt = false;
 
 interface PlatformStats {
   onlineGuests: number;
   activeRooms: number;
+}
+
+const LANDING_ROOM_ENTRIES = availableGameAdapters
+  .filter((adapter) => adapter.gameType !== "minesweeper")
+  .map((adapter) => ({
+    id: adapter.gameType,
+    label: adapter.landingLabel ?? adapter.displayName,
+    ariaLabel: adapter.createRoomLabel,
+    description: adapter.landingDescription,
+    launch: {
+      kind: "room" as const,
+      gameType: adapter.gameType,
+      ruleSetId: adapter.ruleSetId,
+    },
+  }));
+
+export const LANDING_GAME_CATALOG = [
+  ...LANDING_ROOM_ENTRIES,
+  {
+    id: "minesweeper",
+    label: "扫雷",
+    ariaLabel: "扫雷，选择玩法和难度",
+    description: "单人计时 · 双人竞速",
+    launch: { kind: "picker" as const },
+  },
+] as const;
+
+export type MinesweeperLaunchMode = "solo" | "race";
+export type MinesweeperPreset = MinefieldPresetId;
+
+export function resolveMinesweeperLaunch(
+  mode: MinesweeperLaunchMode,
+  preset: MinesweeperPreset,
+) {
+  if (mode === "solo") {
+    return {
+      kind: "navigate" as const,
+      href: `/minesweeper?preset=${preset}`,
+    };
+  }
+  return {
+    kind: "room" as const,
+    gameType: "minesweeper",
+    ruleSetId: getMinesweeperRuleSetId("race", preset),
+  };
 }
 
 function isPlatformStats(value: unknown): value is PlatformStats {
@@ -150,6 +202,13 @@ function randomDisplayName(): string {
   return `棋友${String(random % 10_000).padStart(4, "0")}`;
 }
 
+export function shouldPromptForDisplayName(
+  storedName: unknown,
+  confirmationFlag: string | null,
+): boolean {
+  return normalizeDisplayName(storedName) === null || confirmationFlag !== "1";
+}
+
 function storeDisplayName(displayName: string): void {
   memoryDisplayName = displayName;
   try {
@@ -159,83 +218,36 @@ function storeDisplayName(displayName: string): void {
   }
 }
 
+function confirmDisplayName(displayName: string): void {
+  storeDisplayName(displayName);
+  try {
+    localStorage.setItem(DISPLAY_NAME_CONFIRMED_STORAGE_KEY, "1");
+  } catch {
+    // Some privacy modes disable localStorage; the current page still remembers it.
+  }
+}
+
 function loadDisplayName(): string {
   if (memoryDisplayName !== null) return memoryDisplayName;
   try {
-    const stored = normalizeDisplayName(
-      localStorage.getItem(DISPLAY_NAME_STORAGE_KEY),
-    );
+    const rawStored = localStorage.getItem(DISPLAY_NAME_STORAGE_KEY);
+    const stored = normalizeDisplayName(rawStored);
     if (stored !== null) {
+      displayNameNeedsPrompt = shouldPromptForDisplayName(
+        rawStored,
+        localStorage.getItem(DISPLAY_NAME_CONFIRMED_STORAGE_KEY),
+      );
       storeDisplayName(stored);
       return stored;
     }
+    localStorage.removeItem(DISPLAY_NAME_CONFIRMED_STORAGE_KEY);
   } catch {
     // Fall through to a page-local default when storage is unavailable.
   }
   const generated = randomDisplayName();
+  displayNameNeedsPrompt = true;
   storeDisplayName(generated);
   return generated;
-}
-
-function DisplayNameEditor({
-  displayName,
-  onSave,
-}: {
-  displayName: string;
-  onSave(displayName: string): void;
-}) {
-  const [draft, setDraft] = useState(displayName);
-  const [feedback, setFeedback] = useState<string | null>(null);
-
-  useEffect(() => {
-    setDraft(displayName);
-  }, [displayName]);
-
-  return (
-    <form
-      class="display-name-editor"
-      aria-label="设置游客昵称"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const normalized = normalizeDisplayName(draft);
-        if (normalized === null) {
-          setFeedback("昵称需为 1–16 个字符，且不能包含控制字符。");
-          return;
-        }
-        setDraft(normalized);
-        setFeedback("昵称已保存");
-        onSave(normalized);
-      }}
-    >
-      <label for="guest-display-name">你的昵称</label>
-      <div class="display-name-controls">
-        <input
-          id="guest-display-name"
-          name="displayName"
-          value={draft}
-          autocomplete="nickname"
-          aria-describedby="display-name-help display-name-feedback"
-          onInput={(event) => {
-            setDraft(event.currentTarget.value);
-            setFeedback(null);
-          }}
-        />
-        <button class="secondary-button" type="submit">保存昵称</button>
-      </div>
-      <small id="display-name-help">1–16 个字符，保存在此浏览器</small>
-      <span
-        id="display-name-feedback"
-        class={
-          feedback?.startsWith("昵称已")
-            ? "display-name-feedback is-success"
-            : "display-name-feedback"
-        }
-        aria-live="polite"
-      >
-        {feedback}
-      </span>
-    </form>
-  );
 }
 
 function Brand() {
@@ -244,6 +256,165 @@ function Brand() {
       <span class="brand-mark" aria-hidden="true">棋</span>
       <span>ym0v0 棋局</span>
     </a>
+  );
+}
+
+const MINESWEEPER_PRESET_OPTIONS: ReadonlyArray<{
+  id: MinesweeperPreset;
+  label: string;
+  detail: string;
+}> = [
+  { id: "small", label: "小型", detail: "9×9 · 10 雷" },
+  { id: "medium", label: "中型", detail: "16×16 · 40 雷" },
+  { id: "large", label: "大型", detail: "30×16 · 99 雷" },
+];
+
+function MinesweeperPicker({
+  mode,
+  preset,
+  creating,
+  error,
+  onModeChange,
+  onPresetChange,
+  onStart,
+  onClose,
+}: {
+  mode: MinesweeperLaunchMode;
+  preset: MinesweeperPreset;
+  creating: boolean;
+  error: string | null;
+  onModeChange(mode: MinesweeperLaunchMode): void;
+  onPresetChange(preset: MinesweeperPreset): void;
+  onStart(): void;
+  onClose(): void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog !== null && !dialog.open) dialog.showModal();
+  }, []);
+
+  const close = () => {
+    if (creating) return;
+    const dialog = dialogRef.current;
+    if (dialog?.open) dialog.close();
+    else onClose();
+  };
+
+  const selectedPreset = MINESWEEPER_PRESET_OPTIONS.find(
+    (option) => option.id === preset,
+  );
+
+  return (
+    <dialog
+      ref={dialogRef}
+      class="minesweeper-picker"
+      aria-labelledby="minesweeper-picker-title"
+      aria-describedby="minesweeper-picker-summary"
+      onCancel={(event) => {
+        if (creating) event.preventDefault();
+      }}
+      onClose={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <header class="dialog-heading">
+        <div>
+          <p class="eyebrow">选择玩法</p>
+          <h2 id="minesweeper-picker-title">扫雷</h2>
+        </div>
+        <button
+          class="dialog-close"
+          type="button"
+          aria-label="关闭扫雷玩法选择"
+          disabled={creating}
+          onClick={close}
+        >
+          <span aria-hidden="true">×</span>
+        </button>
+      </header>
+
+      <form
+        class="minesweeper-picker-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onStart();
+        }}
+      >
+        <fieldset disabled={creating}>
+          <legend>玩法</legend>
+          <div class="choice-segments mode-segments">
+            <label class="choice-segment">
+              <input
+                type="radio"
+                name="minesweeper-mode"
+                value="solo"
+                checked={mode === "solo"}
+                autofocus={mode === "solo"}
+                onChange={() => onModeChange("solo")}
+              />
+              <span>
+                <strong>单人</strong>
+                <small>计时闯关</small>
+              </span>
+            </label>
+            <label class="choice-segment">
+              <input
+                type="radio"
+                name="minesweeper-mode"
+                value="race"
+                checked={mode === "race"}
+                autofocus={mode === "race"}
+                onChange={() => onModeChange("race")}
+              />
+              <span>
+                <strong>双人竞速</strong>
+                <small>同图独立对战</small>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset disabled={creating}>
+          <legend>难度</legend>
+          <div class="choice-segments preset-segments">
+            {MINESWEEPER_PRESET_OPTIONS.map((option) => (
+              <label class="choice-segment" key={option.id}>
+                <input
+                  type="radio"
+                  name="minesweeper-preset"
+                  value={option.id}
+                  checked={preset === option.id}
+                  onChange={() => onPresetChange(option.id)}
+                />
+                <span><strong>{option.label}</strong></span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <p id="minesweeper-picker-summary" class="picker-summary">
+          <strong>{selectedPreset?.detail}</strong>
+          <span>
+            {mode === "solo"
+              ? "本机计时，完成后记录个人最佳与排行榜。"
+              : "双方各扫一张相同布局的独立棋盘，先完成者获胜。"}
+          </span>
+        </p>
+
+        {error && <p class="inline-error picker-error" role="alert">{error}</p>}
+
+        <button class="primary-button picker-submit" type="submit" disabled={creating}>
+          {creating
+            ? "正在创建…"
+            : mode === "solo"
+              ? "开始单人扫雷"
+              : "创建竞速房间"}
+        </button>
+      </form>
+    </dialog>
   );
 }
 
@@ -258,6 +429,12 @@ function LandingPage({
 }) {
   const [creating, setCreating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [minesweeperPickerOpen, setMinesweeperPickerOpen] = useState(false);
+  const [minesweeperMode, setMinesweeperMode] =
+    useState<MinesweeperLaunchMode>("solo");
+  const [minesweeperPreset, setMinesweeperPreset] =
+    useState<MinesweeperPreset>("small");
+  const minesweeperTriggerRef = useRef<HTMLButtonElement>(null);
 
   const createRoom = async (gameType: string, ruleSetId: string) => {
     if (creating !== null) return;
@@ -293,6 +470,24 @@ function LandingPage({
     }
   };
 
+  const startMinesweeper = () => {
+    const launch = resolveMinesweeperLaunch(
+      minesweeperMode,
+      minesweeperPreset,
+    );
+    if (launch.kind === "navigate") {
+      location.assign(launch.href);
+      return;
+    }
+    void createRoom(launch.gameType, launch.ruleSetId);
+  };
+
+  const closeMinesweeperPicker = () => {
+    setMinesweeperPickerOpen(false);
+    setError(null);
+    requestAnimationFrame(() => minesweeperTriggerRef.current?.focus());
+  };
+
   return (
     <main class="landing">
       <nav class="topbar">
@@ -306,63 +501,78 @@ function LandingPage({
           <span aria-hidden="true">·</span>
           <span>房间 {stats?.activeRooms ?? "—"} 个</span>
         </div>
-      </nav>
-      <section class="hero">
-        <p class="eyebrow">轻量 · 实时 · 无需注册</p>
-        <h1>一条链接，<br />马上下一局。</h1>
-        <p class="hero-copy">
-          创建私人棋局，把邀请链接发给朋友。没有账号、广告和复杂大厅。
-        </p>
-        <DisplayNameEditor
+        <ProfileMenu
           displayName={displayName}
+          initiallyOpen={displayNameNeedsPrompt}
           onSave={onDisplayNameChange}
         />
+      </nav>
+      <section class="hero">
+        <h1>想下哪一局？</h1>
+        <p class="hero-copy">
+          创建房间，把邀请链接发给朋友。
+        </p>
         <div class="game-choice-grid" aria-label="选择棋种">
-          <a
-            href="/minesweeper"
-            class="secondary-button hero-button game-choice link-button"
-          >
-            <strong>单人扫雷</strong>
-            <small>本机运行 · 三种难度 · 不占房间名额</small>
-          </a>
-          {availableGameAdapters.map((game, index) => (
+          {LANDING_GAME_CATALOG.map((game) => (
             <button
-              key={game.ruleSetId}
-              class={`${index === 0 ? "primary-button" : "secondary-button"} hero-button game-choice`}
-              onClick={() => void createRoom(game.gameType, game.ruleSetId)}
+              key={game.id}
+              ref={game.launch.kind === "picker"
+                ? minesweeperTriggerRef
+                : undefined}
+              class="secondary-button hero-button game-choice"
+              type="button"
+              aria-label={game.ariaLabel}
+              aria-haspopup={game.launch.kind === "picker" ? "dialog" : undefined}
+              onClick={() => {
+                if (game.launch.kind === "picker") {
+                  setError(null);
+                  setMinesweeperPickerOpen(true);
+                } else {
+                  void createRoom(
+                    game.launch.gameType,
+                    game.launch.ruleSetId,
+                  );
+                }
+              }}
               disabled={creating !== null}
             >
-              <strong>
-                {creating === game.ruleSetId
-                  ? "正在创建…"
-                  : game.createRoomLabel}
-              </strong>
-              <small>{game.landingDescription}</small>
+              <span class="game-choice-heading">
+                <strong>
+                  {game.launch.kind === "room" &&
+                      creating === game.launch.ruleSetId
+                    ? "正在创建…"
+                    : game.label}
+                </strong>
+                {game.launch.kind === "picker" && (
+                  <span class="game-choice-chevron" aria-hidden="true">›</span>
+                )}
+              </span>
+              <small>{game.description}</small>
             </button>
           ))}
         </div>
-        {error && <p class="inline-error" role="alert">{error}</p>}
+        {error && !minesweeperPickerOpen && (
+          <p class="inline-error" role="alert">{error}</p>
+        )}
       </section>
-      <section class="feature-grid" aria-label="产品特点">
-        <article>
-          <span class="feature-number">01</span>
-          <h2>服务端裁决</h2>
-          <p>每一步先由房间确认，再显示为实子。并发操作不会打乱棋局。</p>
-        </article>
-        <article>
-          <span class="feature-number">02</span>
-          <h2>断线恢复</h2>
-          <p>刷新或短暂断网后自动同步完整局面，不靠浏览器猜测状态。</p>
-        </article>
-        <article>
-          <span class="feature-number">03</span>
-          <h2>手机优先</h2>
-          <p>落点自动吸附，按下可预览，松开才提交，也支持键盘操作。</p>
-        </article>
-      </section>
-      <footer class="site-footer">
-        五子棋、中国象棋、井字棋与扫雷 · 一条邀请链接，一局私人对战
-      </footer>
+      {minesweeperPickerOpen && (
+        <MinesweeperPicker
+          mode={minesweeperMode}
+          preset={minesweeperPreset}
+          creating={creating !== null}
+          error={error}
+          onModeChange={(mode) => {
+            setMinesweeperMode(mode);
+            setError(null);
+          }}
+          onPresetChange={(preset) => {
+            setMinesweeperPreset(preset);
+            setError(null);
+          }}
+          onStart={startMinesweeper}
+          onClose={closeMinesweeperPicker}
+        />
+      )}
     </main>
   );
 }
@@ -530,6 +740,11 @@ function RoomPage({
           <span aria-hidden="true" />
           {phaseText(client.phase, client.transport)}
         </span>
+        <ProfileMenu
+          displayName={displayName}
+          initiallyOpen={displayNameNeedsPrompt}
+          onSave={onDisplayNameChange}
+        />
       </nav>
 
       <section class="game-layout">
@@ -546,11 +761,6 @@ function RoomPage({
                 )}
           </h1>
         </header>
-
-        <DisplayNameEditor
-          displayName={displayName}
-          onSave={onDisplayNameChange}
-        />
 
         <div class="seat-strip">
           {(["seat-a", "seat-b"] as const).map((seatId) => {
@@ -707,7 +917,8 @@ export function App() {
   const [displayName, setDisplayName] = useState(loadDisplayName);
   const stats = usePlatformStats(displayName);
   const saveDisplayName = (nextDisplayName: string) => {
-    storeDisplayName(nextDisplayName);
+    displayNameNeedsPrompt = false;
+    confirmDisplayName(nextDisplayName);
     setDisplayName(nextDisplayName);
   };
   useEffect(() => {
@@ -726,7 +937,13 @@ export function App() {
     );
   }
   if (path === "/minesweeper" || path === "/minesweeper/") {
-    return <SoloPage />;
+    return (
+      <SoloPage
+        displayName={displayName}
+        initiallyOpenProfile={displayNameNeedsPrompt}
+        onDisplayNameChange={saveDisplayName}
+      />
+    );
   }
   const match = path.match(ROOM_PATH);
   if (match?.[1]) {

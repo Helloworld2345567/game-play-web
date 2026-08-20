@@ -664,4 +664,104 @@ describe("Worker request boundary", () => {
 
     expect(statuses).toEqual([201, 201, 201, 201, 201, 429]);
   });
+
+  it("records and reads a Minesweeper score using only the signed session nickname", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "签名昵称" }),
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const recorded = await app.default.fetch(
+      apiRequest(origin, "/api/minesweeper/leaderboard/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          presetId: "small",
+          elapsedMs: 12_345,
+          displayName: "伪造昵称",
+        }),
+      }),
+    );
+    expect(recorded.status).toBe(200);
+    expect(recorded.headers.get("Cache-Control")).toBe("no-store");
+    await expect(recorded.json()).resolves.toEqual({
+      presetId: "small",
+      personalBestMs: 12_345,
+      top: [{ rank: 1, displayName: "签名昵称", elapsedMs: 12_345 }],
+    });
+
+    const snapshot = await app.default.fetch(
+      apiRequest(origin, "/api/minesweeper/leaderboard", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ presetId: "small" }),
+      }),
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("Cache-Control")).toBe("no-store");
+    await expect(snapshot.json()).resolves.toEqual({
+      presetId: "small",
+      personalBestMs: 12_345,
+      top: [{ rank: 1, displayName: "签名昵称", elapsedMs: 12_345 }],
+    });
+  });
+
+  it.each([
+    ["/api/minesweeper/leaderboard", { presetId: "small" }],
+    [
+      "/api/minesweeper/leaderboard/record",
+      { presetId: "small", elapsedMs: 1_000 },
+    ],
+  ])("requires a signed session for %s", async (path, body) => {
+    const origin = "http://localhost:5173";
+    const response = await app.default.fetch(
+      apiRequest(origin, path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "session.required",
+    });
+  });
+
+  it.each([
+    ["/api/minesweeper/leaderboard", {}],
+    ["/api/minesweeper/leaderboard", { presetId: "expert" }],
+    [
+      "/api/minesweeper/leaderboard/record",
+      { presetId: "small", elapsedMs: 0 },
+    ],
+    [
+      "/api/minesweeper/leaderboard/record",
+      { presetId: "large", elapsedMs: 24 * 60 * 60_000 + 1 },
+    ],
+  ])("rejects an invalid leaderboard body for %s", async (path, body) => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const response = await app.default.fetch(
+      apiRequest(origin, path, {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({
+      error: "leaderboard.invalid_request",
+    });
+  });
 });

@@ -1,6 +1,7 @@
 import type { GameRules } from "../core/game-rules";
 import { gomokuRules } from "./gomoku/rules";
 import { minesweeperDuelRules } from "./minesweeper/duel-rules";
+import { minesweeperRaceRules } from "./minesweeper/race-rules";
 import { ticTacToeRules } from "./tictactoe/rules";
 import { xiangqiRules } from "./xiangqi/rules";
 
@@ -9,6 +10,9 @@ const rulesById = new Map<string, GameRules>([
   [xiangqiRules.definition.ruleSetId, xiangqiRules],
   [ticTacToeRules.definition.ruleSetId, ticTacToeRules],
   ...Object.values(minesweeperDuelRules).map(
+    (rules) => [rules.definition.ruleSetId, rules] as const,
+  ),
+  ...Object.values(minesweeperRaceRules).map(
     (rules) => [rules.definition.ruleSetId, rules] as const,
   ),
 ]);

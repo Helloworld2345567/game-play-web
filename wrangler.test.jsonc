@@ -12,6 +12,10 @@
       {
         "name": "ROOM_DIRECTORY",
         "class_name": "RoomDirectory"
+      },
+      {
+        "name": "MINESWEEPER_LEADERBOARD",
+        "class_name": "MinesweeperLeaderboard"
       }
     ]
   },
@@ -21,6 +25,10 @@
       "storage": "sqlite"
     },
     "RoomDirectory": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "MinesweeperLeaderboard": {
       "type": "durable-object",
       "storage": "sqlite"
     }

@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { generateMinefield } from "../../src/games/minesweeper/engine";
+import { MINEFIELD_PRESETS } from "../../src/games/minesweeper/presets";
 
 const PRESETS = [
   { value: "small", columns: "9", rows: "9", cells: 81 },
@@ -99,4 +101,101 @@ test("mobile long press flags and the large board stays inside its viewport", as
   } finally {
     await context.close();
   }
+});
+
+test("opens a selected difficulty and shows personal and top-10 records", async ({
+  page,
+}) => {
+  const requestedPresets: string[] = [];
+  await page.route("**/api/minesweeper/leaderboard", async (route) => {
+    const body = route.request().postDataJSON() as { presetId: string };
+    requestedPresets.push(body.presetId);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        presetId: body.presetId,
+        personalBestMs: 42_340,
+        top: [
+          { rank: 1, displayName: "扫雷高手", elapsedMs: 31_250 },
+          { rank: 2, displayName: "棋友0001", elapsedMs: 42_340 },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("/minesweeper?preset=medium");
+
+  await expect(page.getByLabel("难度")).toHaveValue("medium");
+  await expect(board(page)).toHaveAttribute("aria-colcount", "16");
+  await expect(page.getByLabel("个人最佳纪录").locator("strong")).toHaveText(
+    "00:42.34",
+  );
+  const leaderboard = page.getByRole("region", { name: "扫雷排行榜" });
+  await expect(leaderboard).toContainText("中型 · 16×16 · 40 雷 · 前 10");
+  await expect(leaderboard).toContainText("扫雷高手");
+  await expect(leaderboard).toContainText("00:31.25");
+  expect(requestedPresets).toEqual(["medium"]);
+});
+
+test("submits one leaderboard result after a completed solo game", async ({
+  context,
+  page,
+}) => {
+  const fixedSeed = "00000000-0000-4000-8000-000000000001";
+  await context.addInitScript((seed) => {
+    Object.defineProperty(crypto, "randomUUID", {
+      configurable: true,
+      value: () => seed,
+    });
+  }, fixedSeed);
+  const recorded: Array<{ presetId: string; elapsedMs: number }> = [];
+  await page.route("**/api/minesweeper/leaderboard**", async (route) => {
+    const body = route.request().postDataJSON() as {
+      presetId: string;
+      elapsedMs?: number;
+    };
+    if (new URL(route.request().url()).pathname.endsWith("/record")) {
+      recorded.push({ presetId: body.presetId, elapsedMs: body.elapsedMs! });
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        presetId: body.presetId,
+        personalBestMs: body.elapsedMs ?? null,
+        top: body.elapsedMs === undefined
+          ? []
+          : [{
+              rank: 1,
+              displayName: "棋友0001",
+              elapsedMs: body.elapsedMs,
+            }],
+      }),
+    });
+  });
+
+  await page.goto("/minesweeper?preset=small");
+  const start = { x: 4, y: 4 };
+  const field = generateMinefield(MINEFIELD_PRESETS.small, fixedSeed, [start]);
+  await cell(page, start.x, start.y).click();
+  for (const [index, minefieldCell] of field.cells.entries()) {
+    if (minefieldCell.mine) continue;
+    const target = cell(
+      page,
+      index % field.width,
+      Math.floor(index / field.width),
+    );
+    if (await target.getAttribute("data-state") === "hidden") {
+      await target.click();
+    }
+  }
+
+  await expect(page.getByText("全部安全格已揭开，你赢了", { exact: true }))
+    .toBeVisible();
+  await expect.poll(() => recorded.length).toBe(1);
+  expect(recorded[0]?.presetId).toBe("small");
+  expect(recorded[0]?.elapsedMs).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect(recorded).toHaveLength(1);
 });

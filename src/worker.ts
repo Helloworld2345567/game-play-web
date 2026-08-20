@@ -1,4 +1,9 @@
-import { GameRoom, type WorkerEnv } from "./game-room";
+import { GameRoom, type GameRoomEnv } from "./game-room";
+import type { MinefieldPresetId } from "./games/minesweeper/presets";
+import {
+  MINESWEEPER_LEADERBOARD_NAME,
+  MinesweeperLeaderboard,
+} from "./minesweeper-leaderboard";
 import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
 import { isSupportedGame } from "./games/registry";
 import { normalizeDisplayName } from "./shared/display-name";
@@ -8,7 +13,13 @@ import {
   type GuestSession,
 } from "./worker/session";
 
-export { GameRoom, RoomDirectory };
+export { GameRoom, MinesweeperLeaderboard, RoomDirectory };
+
+export interface WorkerEnv extends GameRoomEnv {
+  ROOMS: DurableObjectNamespace<GameRoom>;
+  MINESWEEPER_LEADERBOARD: DurableObjectNamespace<MinesweeperLeaderboard>;
+  SESSION_SECRET: string;
+}
 
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
@@ -17,6 +28,7 @@ const PRESENCE_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
 const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
+const MAX_LEADERBOARD_ELAPSED_MS = 24 * 60 * 60_000;
 const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
 const creationBuckets = new Map<
   string,
@@ -161,6 +173,41 @@ async function readPresenceCommand(
       (clientSeq as number) >= 1
     ? { presenceId, clientSeq: clientSeq as number }
     : null;
+}
+
+function isMinefieldPresetId(value: unknown): value is MinefieldPresetId {
+  return value === "small" || value === "medium" || value === "large";
+}
+
+async function readLeaderboardCommand(
+  request: Request,
+  includeElapsedMs: boolean,
+): Promise<{ presetId: MinefieldPresetId; elapsedMs?: number } | null> {
+  const value = await readSmallJson(request);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const body = value as Record<string, unknown>;
+  if (!isMinefieldPresetId(body.presetId)) return null;
+  if (!includeElapsedMs) return { presetId: body.presetId };
+  const elapsedMs = body.elapsedMs;
+  if (
+    !Number.isSafeInteger(elapsedMs) ||
+    (elapsedMs as number) < 1 ||
+    (elapsedMs as number) > MAX_LEADERBOARD_ELAPSED_MS
+  ) {
+    return null;
+  }
+  return { presetId: body.presetId, elapsedMs: elapsedMs as number };
+}
+
+function minesweeperLeaderboard(
+  env: WorkerEnv,
+): DurableObjectStub<MinesweeperLeaderboard> {
+  return env.MINESWEEPER_LEADERBOARD.getByName(
+    MINESWEEPER_LEADERBOARD_NAME,
+    { locationHint: "apac" },
+  );
 }
 
 function setInternalGuestHeaders(headers: Headers, guest: GuestSession): void {
@@ -359,6 +406,44 @@ export default {
     const guest = await readGuestSession(request, env.SESSION_SECRET);
     if (guest === null) {
       return json({ error: "session.required" }, { status: 401 });
+    }
+    if (
+      url.pathname === "/api/minesweeper/leaderboard" &&
+      request.method === "POST"
+    ) {
+      const command = await readLeaderboardCommand(request, false);
+      if (command === null) {
+        return json(
+          { error: "leaderboard.invalid_request" },
+          { status: 400 },
+        );
+      }
+      return json(
+        await minesweeperLeaderboard(env).snapshot(
+          command.presetId,
+          guest.guestId,
+        ),
+      );
+    }
+    if (
+      url.pathname === "/api/minesweeper/leaderboard/record" &&
+      request.method === "POST"
+    ) {
+      const command = await readLeaderboardCommand(request, true);
+      if (command === null || command.elapsedMs === undefined) {
+        return json(
+          { error: "leaderboard.invalid_request" },
+          { status: 400 },
+        );
+      }
+      return json(
+        await minesweeperLeaderboard(env).recordWin(
+          command.presetId,
+          guest.guestId,
+          guest.displayName,
+          command.elapsedMs,
+        ),
+      );
     }
     if (url.pathname === "/api/stats" && request.method === "POST") {
       const presence = await readPresenceCommand(request);
