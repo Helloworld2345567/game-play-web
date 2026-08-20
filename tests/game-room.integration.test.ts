@@ -104,6 +104,8 @@ async function closeSocket(socket: WebSocket): Promise<void> {
 async function initializeRoom(
   roomId: string,
   creatorGuestId = "guest-creator",
+  gameType = "gomoku",
+  ruleSetId = "gomoku.freestyle15.v1",
 ): Promise<DurableObjectStub<GameRoom>> {
   const testEnv = env as unknown as TestEnv;
   const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
@@ -116,8 +118,8 @@ async function initializeRoom(
       },
       body: JSON.stringify({
         roomId,
-        gameType: "gomoku",
-        ruleSetId: "gomoku.freestyle15.v1",
+        gameType,
+        ruleSetId,
       }),
     }),
   );
@@ -149,6 +151,23 @@ function placeCommand(expectedRevision: number, x: number, y: number) {
     ruleSetId: "gomoku.freestyle15.v1",
     expectedRevision,
     payload: { type: "place", x, y },
+  };
+}
+
+function xiangqiMoveCommand(
+  expectedRevision: number,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+) {
+  return {
+    v: 1,
+    type: "game_action",
+    gameType: "xiangqi",
+    ruleSetId: "xiangqi.casual.v1",
+    expectedRevision,
+    payload: { type: "move", fromX, fromY, toX, toY },
   };
 }
 
@@ -454,5 +473,69 @@ describe("GameRoom Durable Object", () => {
 
     creatorAfterReconnect.socket.close(1000, "test complete");
     inviteeAfterReconnect.socket.close(1000, "test complete");
+  });
+
+  it("runs a Chinese chess room through the same authoritative protocol", async () => {
+    const stub = await initializeRoom(
+      "room-xiangqi",
+      "guest-xiangqi-creator",
+      "xiangqi",
+      "xiangqi.casual.v1",
+    );
+    const creator = await connect(stub, "guest-xiangqi-creator");
+    const invitee = await connect(stub, "guest-xiangqi-invitee");
+    await creator.inbox.next();
+
+    expect(invitee.firstMessage).toMatchObject({
+      type: "snapshot",
+      gameType: "xiangqi",
+      ruleSetId: "xiangqi.casual.v1",
+      revision: 1,
+      position: {
+        turn: "seat-a",
+        data: {
+          redSeat: "seat-a",
+          blackSeat: "seat-b",
+          moveCount: 0,
+          board: expect.arrayContaining([
+            { side: "red", kind: "pawn" },
+            { side: "black", kind: "general" },
+          ]),
+        },
+      },
+    });
+
+    const creatorAck = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    const inviteeAck = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    creator.socket.send(
+      JSON.stringify(xiangqiMoveCommand(1, 4, 6, 4, 5)),
+    );
+
+    await expect(creatorAck).resolves.toMatchObject({
+      gameType: "xiangqi",
+      ruleSetId: "xiangqi.casual.v1",
+      revision: 2,
+      position: {
+        turn: "seat-b",
+        data: {
+          moveCount: 1,
+          lastMove: {
+            fromX: 4,
+            fromY: 6,
+            toX: 4,
+            toY: 5,
+            piece: { side: "red", kind: "pawn" },
+          },
+        },
+      },
+    });
+    await expect(inviteeAck).resolves.toMatchObject({ revision: 2 });
+
+    creator.socket.close(1000, "test complete");
+    invitee.socket.close(1000, "test complete");
   });
 });

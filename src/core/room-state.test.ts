@@ -117,7 +117,7 @@ describe("room state", () => {
         v: 1,
         type: "game_action",
         gameType: "xiangqi",
-        ruleSetId: "xiangqi.standard.v1",
+        ruleSetId: "xiangqi.casual.v1",
         expectedRevision: 1,
         payload: { type: "place", x: 7, y: 7 },
       },

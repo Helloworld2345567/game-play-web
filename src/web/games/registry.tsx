@@ -1,6 +1,7 @@
 import type { FunctionComponent } from "preact";
 import type { JsonValue, RulePosition } from "../../core/game-rules";
 import { gomokuAdapter } from "./gomoku/Board";
+import { xiangqiAdapter } from "./xiangqi/Board";
 
 export type PlatformSeatId = "seat-a" | "seat-b";
 
@@ -25,6 +26,8 @@ export interface GameAdapter {
   readonly gameType: string;
   readonly ruleSetId: string;
   readonly displayName: string;
+  readonly createRoomLabel: string;
+  readonly landingDescription: string;
   readonly Renderer: FunctionComponent<GameRendererProps>;
   getSeatPresentations(position: RulePosition | null): SeatPresentations;
   getErrorMessage(code: string): string | null;
@@ -35,9 +38,14 @@ export const unknownSeatPresentations: SeatPresentations = {
   "seat-b": { label: "席位 B", swatchClassName: "neutral" },
 };
 
-const adaptersByRuleSetId = new Map<string, GameAdapter>([
-  [gomokuAdapter.ruleSetId, gomokuAdapter],
-]);
+export const availableGameAdapters = [
+  gomokuAdapter,
+  xiangqiAdapter,
+] as const satisfies readonly GameAdapter[];
+
+const adaptersByRuleSetId = new Map<string, GameAdapter>(
+  availableGameAdapters.map((adapter) => [adapter.ruleSetId, adapter]),
+);
 
 export function getGameAdapter(
   gameType: string,

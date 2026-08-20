@@ -17,9 +17,10 @@ flowchart LR
 
 ## 2. MVP 做什么
 
-- 游客创建五子棋房间，复制私密邀请链接；另一位游客打开链接加入。
+- 游客创建五子棋或中国象棋房间，复制私密邀请链接；另一位游客打开链接加入。
 - 两个席位，第三个不同身份进入时提示房间已满；暂不观战。
 - `15×15` 自由五子棋：黑先，横竖斜连续 `>=5` 获胜，无禁手，满盘和棋。
+- 休闲中国象棋：红先，支持九宫/河界、所有基础棋子走法、飞将、将死、困毙、三次重复与连续 60 回合无进展自动和棋；暂不实现竞赛规则的长将/长捉责任裁定。
 - 服务端权威校验落子、回合、胜负；支持认输和双方确认后再来一局。
 - 刷新、短暂断网、Worker/DO 休眠后自动重连并恢复完整局面。
 - 手机优先棋盘、落点预览、最近一手、胜利连线、连接状态和明确错误提示。
@@ -57,18 +58,22 @@ src/
 ├─ core/
 │  └─ game-rules.ts             # 唯一棋类规则接口
 ├─ games/
-│  └─ gomoku/
-│     ├─ model.ts
+│  ├─ gomoku/
+│  │  ├─ rules.ts
+│  │  └─ rules.test.ts
+│  └─ xiangqi/
 │     ├─ rules.ts
 │     └─ rules.test.ts
 ├─ shared/
 │  └─ protocol.ts
 └─ web/
    ├─ App.tsx
-   └─ games/gomoku/Board.tsx
+   └─ games/
+      ├─ gomoku/Board.tsx
+      └─ xiangqi/Board.tsx
 ```
 
-## 5. 为象棋保留的唯一扩展缝
+## 5. 棋类扩展缝
 
 平台只认识房间、连接、匿名身份、席位、`revision`、持久化和广播；棋类模块负责初始局面、轮次、动作合法性、局面变化和规则终局。接口保持两个同步纯方法：
 
@@ -76,7 +81,7 @@ src/
 interface GameRules {
   readonly definition: {
     gameType: string;
-    ruleSetId: string; // 例如 gomoku.freestyle15.v1
+    ruleSetId: string; // 例如 gomoku.freestyle15.v1 / xiangqi.casual.v1
   };
   create(seats: readonly [SeatId, SeatId]): RulePosition;
   apply(
@@ -96,7 +101,7 @@ interface RulePosition {
 
 约束同样属于接口：`create/apply` 必须确定、无 I/O、无时间和随机数、不修改输入；所有状态可 JSON 序列化；规则升级发布新的不可变 `ruleSetId`。平台绝不读取 `position.data.board`，也不出现象棋专用判断。
 
-前端按 `gameType` 从 renderer Map 选择棋盘。以后增加象棋只需新增 `games/xiangqi/{model,rules,rules.test}.ts` 和 `web/games/xiangqi/Board.tsx`，再在规则 Map 与 renderer Map 各注册一次；Worker、GameRoom、席位、重连和存储无需改变。
+前端按 `ruleSetId` 从 adapter Map 生成首页入口并选择棋盘，再用 `gameType` 做一致性校验。当前中国象棋已经通过同一扩展缝接入；以后增加第三种棋类只需新增对应 `games/<game>/rules.ts`、测试和 `web/games/<game>/Board.tsx`，再在规则 Map 与 adapter 列表各注册一次；Worker、GameRoom、首页、席位、重连和存储无需改变。
 
 不提前设计通用棋盘、棋子、坐标、吃子或将军接口。当前接口只承诺两席位、确定性、完全信息棋类；真正出现第三类需求时再扩接口。
 
@@ -120,7 +125,7 @@ interface RulePosition {
 }
 ```
 
-服务端返回 `snapshot`，包含 `gameType`、`ruleSetId`、最新 `revision`、自己的席位、双方状态和完整 `RulePosition`。认输、准备复赛和离开是平台命令；复赛必须双方确认，并交换先后手。
+服务端返回 `snapshot`，包含 `gameType`、`ruleSetId`、最新 `revision`、自己的席位、双方状态和完整 `RulePosition`。认输和准备复赛是平台命令；复赛必须双方确认，并交换先后手。
 
 客户端 envelope 中的 `gameType/ruleSetId` 只用于版本一致性检查；服务端始终使用房间初始化时持久化的不可变 `ruleSetId` 选择规则模块，不一致立即拒绝，绝不按客户端字段切换规则。
 
@@ -130,11 +135,17 @@ interface RulePosition {
 
 DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后可恢复连接上下文。一个简单 alarm 清理过期房间：等待房 1 小时无活动、结束房 24 小时、进行中房 7 天无活动；到期前若有新活动则重新安排。
 
-## 7. 五子棋实现
+## 7. 棋种实现
+
+### 五子棋
 
 棋盘用长度 225 的数组，值为 `empty/black/white`。`apply` 只接受 `{type:"place", x, y}`，依次验证局未结束、行动席位、坐标范围和空位；落子后只沿横、竖、两条斜线从最新落点向两边计数，复杂度为 `O(15)`，不需要 WASM、位棋盘或 AI 引擎。
 
 必须覆盖的规则测试：四个方向、边角落子、五连与长连、占位、越界、非当前席位、终局后落子和满盘和棋。规则函数在浏览器中只用于落点提示，最终裁决始终来自服务端。
+
+### 中国象棋
+
+中国象棋使用 9×10 交叉点数组；首局 Seat A 为红方先行、Seat B 为黑方，复赛继续沿用平台的先后手交换机制。`apply` 验证将/帅、士、象/相、马、车、炮、兵/卒的基础走法、宫界、河界、炮架、蹩马腿、塞象眼、飞将和自将。对手没有合法着法时，根据是否被将判定将死或困毙；同一完整局面（棋盘加行动方）第三次出现时自动判和。为限制快照与存储增长，吃子或兵卒向前移动会重置重复历史；连续 120 个半回合（60 个完整回合）没有吃子或兵卒前进时自动判和，因此重复表最多保留 121 项。前端 renderer 只负责选择和预览，最终裁决仍来自服务端。
 
 ## 8. 性能与体验
 
@@ -192,7 +203,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 | 赛后异步结算或通知 | Queue |
 | 大量永久棋谱/导出 | R2，D1 只存索引 |
 | 单房大量观众 | SpectatorRelay DO |
-| 象棋 | 新规则模块 + 新 renderer，不改基础设施 |
+| 更多棋类 | 新规则模块 + 新 renderer，不改基础设施 |
 
 不要因为“以后可能需要”提前启用服务；每项都有清晰触发条件。
 
@@ -201,9 +212,9 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 第 1 天：单项目脚手架、规则接口、五子棋规则和测试、DO 状态读写。
 - 第 2–4 天：匿名会话、邀请房、WebSocket 权威落子、完整 snapshot 重连、移动端棋盘。
 - 第 5–7 天：认输/复赛、安全限制、E2E、容量测试、域名部署和运营商实测。
-- 一名熟悉 TypeScript 的开发者约 4–7 天可交付 MVP。以后增加完整象棋规则和独立棋盘，预计另需 3–7 天。
+- 一名熟悉 TypeScript 的开发者约 4–7 天可交付基础 MVP；中国象棋已通过既有扩展缝作为第二棋种接入。
 
-验收结果必须是：两个新浏览器只凭邀请链接能完成一局；任何并发、刷新、休眠或短暂断网都不会产生双落子或丢失已确认局面；360 px 手机可准确操作；新增象棋时不修改 GameRoom 核心。
+验收结果必须是：两个新浏览器只凭邀请链接能完成一局；任何并发、刷新、休眠或短暂断网都不会产生双落子或丢失已确认局面；360 px 手机可准确操作；新增棋类时不修改 GameRoom 核心。
 
 ## 14. 主要官方资料
 

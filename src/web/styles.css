@@ -170,6 +170,31 @@ button:disabled {
   font-size: 1.05rem;
 }
 
+.game-choice-grid {
+  display: grid;
+  max-width: 560px;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.game-choice {
+  display: flex;
+  min-height: 74px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 18px;
+  text-align: left;
+}
+
+.game-choice small {
+  color: inherit;
+  font-size: 0.73rem;
+  font-weight: 500;
+  opacity: 0.72;
+}
+
 .inline-error {
   color: #f0a39c;
 }
@@ -353,6 +378,31 @@ button:disabled {
   cursor: crosshair;
 }
 
+.xiangqi-board-shell {
+  /* Nine files span eight intervals; ten ranks span nine intervals. */
+  aspect-ratio: 8 / 9;
+}
+
+.xiangqi-board {
+  display: block;
+  max-width: 100%;
+  touch-action: none;
+}
+
+.xiangqi-board.is-interactive {
+  cursor: crosshair;
+}
+
+.stone-swatch.xiangqi-red {
+  border: 1px solid #8e2824;
+  background: radial-gradient(circle at 35% 30%, #f06a5d, #9f2824 72%);
+}
+
+.stone-swatch.xiangqi-black {
+  border: 1px solid #000;
+  background: radial-gradient(circle at 35% 30%, #555, #090909 70%);
+}
+
 .board-last-move {
   margin: 10px 4px 0;
   color: #a9a195;
@@ -469,6 +519,10 @@ button:disabled {
 }
 
 @media (max-width: 680px) {
+  .game-choice-grid {
+    grid-template-columns: 1fr;
+  }
+
   .feature-grid {
     grid-template-columns: 1fr;
   }

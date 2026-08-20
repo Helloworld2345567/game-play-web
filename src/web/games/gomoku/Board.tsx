@@ -314,6 +314,8 @@ export const gomokuAdapter = {
   gameType: "gomoku",
   ruleSetId: "gomoku.freestyle15.v1",
   displayName: "自由五子棋",
+  createRoomLabel: "创建五子棋房",
+  landingDescription: "15×15 · 黑先 · 连五获胜",
   Renderer: GomokuBoard,
   getSeatPresentations(position) {
     const blackSeat =

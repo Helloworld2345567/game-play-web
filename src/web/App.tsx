@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
+  availableGameAdapters,
   GameRenderer,
   getGameAdapter,
   UnsupportedGame,
@@ -13,19 +14,19 @@ const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
 function Brand() {
   return (
     <a class="brand" href="/" aria-label="ym0v0 棋局首页">
-      <span class="brand-mark" aria-hidden="true">五</span>
+      <span class="brand-mark" aria-hidden="true">棋</span>
       <span>ym0v0 棋局</span>
     </a>
   );
 }
 
 function LandingPage() {
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const createRoom = async () => {
-    if (creating) return;
-    setCreating(true);
+  const createRoom = async (gameType: string, ruleSetId: string) => {
+    if (creating !== null) return;
+    setCreating(ruleSetId);
     setError(null);
     try {
       await ensureBrowserSession();
@@ -36,8 +37,8 @@ function LandingPage() {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          gameType: "gomoku",
-          ruleSetId: "gomoku.freestyle15.v1",
+          gameType,
+          ruleSetId,
         }),
       });
       const body = (await response.json()) as {
@@ -47,7 +48,7 @@ function LandingPage() {
       if (!response.ok || !body.roomId) throw new Error(body.error);
       location.assign(`/r/${body.roomId}`);
     } catch {
-      setCreating(false);
+      setCreating(null);
       setError("建房失败，请检查网络后重试。");
     }
   };
@@ -59,11 +60,25 @@ function LandingPage() {
         <p class="eyebrow">轻量 · 实时 · 无需注册</p>
         <h1>一条链接，<br />马上下一局。</h1>
         <p class="hero-copy">
-          创建私人五子棋房间，把邀请链接发给朋友。没有账号、广告和复杂大厅。
+          创建私人棋局，把邀请链接发给朋友。没有账号、广告和复杂大厅。
         </p>
-        <button class="primary-button hero-button" onClick={createRoom} disabled={creating}>
-          {creating ? "正在创建…" : "创建五子棋房"}
-        </button>
+        <div class="game-choice-grid" aria-label="选择棋种">
+          {availableGameAdapters.map((game, index) => (
+            <button
+              key={game.ruleSetId}
+              class={`${index === 0 ? "primary-button" : "secondary-button"} hero-button game-choice`}
+              onClick={() => void createRoom(game.gameType, game.ruleSetId)}
+              disabled={creating !== null}
+            >
+              <strong>
+                {creating === game.ruleSetId
+                  ? "正在创建…"
+                  : game.createRoomLabel}
+              </strong>
+              <small>{game.landingDescription}</small>
+            </button>
+          ))}
+        </div>
         {error && <p class="inline-error" role="alert">{error}</p>}
       </section>
       <section class="feature-grid" aria-label="产品特点">
@@ -84,7 +99,7 @@ function LandingPage() {
         </article>
       </section>
       <footer class="site-footer">
-        15×15 自由五子棋 · 黑先 · 连续五子或以上获胜
+        五子棋与中国象棋 · 一条邀请链接，一局私人对战
       </footer>
     </main>
   );
