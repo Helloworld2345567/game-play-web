@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import {
   reset,
@@ -131,6 +131,28 @@ async function initializeRoom(
   return stub;
 }
 
+async function postRoomHttp(
+  stub: DurableObjectStub<GameRoom>,
+  path: "sync" | "command" | "leave",
+  guestId: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; message: JsonMessage }> {
+  const response = await stub.fetch(
+    new Request(`https://room.internal/${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Guest-Id": guestId,
+      },
+      body: JSON.stringify(body),
+    }),
+  );
+  return {
+    status: response.status,
+    message: (await response.json()) as JsonMessage,
+  };
+}
+
 async function startRoom(
   roomId: string,
   creatorGuestId = "guest-creator",
@@ -189,6 +211,396 @@ afterEach(async () => {
 });
 
 describe("GameRoom Durable Object", () => {
+  it("lets the creator enter through HTTP sync when WebSockets are unavailable", async () => {
+    const stub = await initializeRoom("room-http-sync");
+
+    const response = await postRoomHttp(
+      stub,
+      "sync",
+      "guest-creator",
+      { v: 1, connectionId: "http-client-creator-0001" },
+    );
+
+    expect(response).toMatchObject({
+      status: 200,
+      message: {
+        v: 1,
+        type: "snapshot",
+        roomId: "room-http-sync",
+        revision: 0,
+        selfSeat: "seat-a",
+        seats: { "seat-a": { occupied: true, online: true } },
+      },
+    });
+  });
+
+  it("applies an HTTP command and returns its authoritative snapshot", async () => {
+    const stub = await initializeRoom("room-http-command");
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-command-creator-01",
+    });
+    const joined = await postRoomHttp(stub, "sync", "guest-invitee", {
+      v: 1,
+      connectionId: "http-command-invitee-01",
+    });
+    expect(joined.message).toMatchObject({ revision: 1, selfSeat: "seat-b" });
+
+    const response = await postRoomHttp(
+      stub,
+      "command",
+      "guest-creator",
+      {
+        v: 1,
+        connectionId: "http-command-creator-01",
+        command: placeCommand(1, 7, 7),
+      },
+    );
+
+    expect(response).toMatchObject({
+      status: 200,
+      message: {
+        type: "snapshot",
+        revision: 2,
+        selfSeat: "seat-a",
+        position: {
+          turn: "seat-b",
+          data: { moveCount: 1, lastMove: { x: 7, y: 7, stone: 1 } },
+        },
+      },
+    });
+    const inviteeView = await postRoomHttp(
+      stub,
+      "sync",
+      "guest-invitee",
+      { v: 1, connectionId: "http-command-invitee-01" },
+    );
+    expect(inviteeView.message).toMatchObject({
+      revision: 2,
+      position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
+    });
+  });
+
+  it("discards the Room when its last HTTP client explicitly leaves", async () => {
+    const stub = await initializeRoom("room-http-last-leave");
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-last-leave-client",
+    });
+
+    const response = await postRoomHttp(stub, "leave", "guest-creator", {
+      v: 1,
+      connectionId: "http-last-leave-client",
+    });
+
+    expect(response).toEqual({
+      status: 200,
+      message: { v: 1, type: "left" },
+    });
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get("room"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).resolves.toEqual({ room: undefined, alarm: null });
+  });
+
+  it("keeps the Room when a WebSocket leaves but an HTTP client remains", async () => {
+    const stub = await initializeRoom("room-ws-leave-http-remains");
+    const creator = await connect(stub, "guest-creator");
+    const inviteeOnline = creator.inbox.nextMatching(
+      (message) =>
+        message.type === "snapshot" &&
+        (message.seats as Record<string, { online?: boolean }>)["seat-b"]
+          ?.online === true,
+    );
+    await postRoomHttp(stub, "sync", "guest-invitee", {
+      v: 1,
+      connectionId: "http-remains-after-ws-leave",
+    });
+    await inviteeOnline;
+    const left = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+
+    creator.socket.send(JSON.stringify(leaveCommand()));
+    await left;
+
+    const stillConnected = await postRoomHttp(
+      stub,
+      "sync",
+      "guest-invitee",
+      { v: 1, connectionId: "http-remains-after-ws-leave" },
+    );
+    expect(stillConnected.message).toMatchObject({
+      type: "snapshot",
+      roomId: "room-ws-leave-http-remains",
+      selfSeat: "seat-b",
+    });
+  });
+
+  it("does not mark the Room vacant when a WebSocket drops but HTTP remains", async () => {
+    const stub = await initializeRoom("room-ws-drops-http-remains");
+    const creator = await connect(stub, "guest-creator");
+    await postRoomHttp(stub, "sync", "guest-invitee", {
+      v: 1,
+      connectionId: "http-remains-after-ws-drop",
+    });
+
+    await closeSocket(creator.socket);
+
+    await expect.poll(() =>
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        vacantSince: await state.storage.get("vacantSince"),
+      })),
+    ).toMatchObject({
+      room: { roomId: "room-ws-drops-http-remains" },
+      vacantSince: undefined,
+    });
+  });
+
+  it("keeps an HTTP Seat online when only one of its browser tabs leaves", async () => {
+    const stub = await initializeRoom("room-http-multiple-tabs");
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-creator-tab-one",
+    });
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-creator-tab-two",
+    });
+
+    await postRoomHttp(stub, "leave", "guest-creator", {
+      v: 1,
+      connectionId: "http-creator-tab-one",
+    });
+
+    const remainingTab = await postRoomHttp(
+      stub,
+      "sync",
+      "guest-creator",
+      { v: 1, connectionId: "http-creator-tab-two" },
+    );
+    expect(remainingTab.message).toMatchObject({
+      type: "snapshot",
+      roomId: "room-http-multiple-tabs",
+      seats: { "seat-a": { online: true } },
+    });
+  });
+
+  it("limits one Guest to four HTTP browser leases", async () => {
+    const stub = await initializeRoom("room-http-lease-cap");
+    for (let index = 1; index <= 4; index += 1) {
+      const response = await postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: `http-cap-client-000${index}`,
+      });
+      expect(response.message).toMatchObject({ type: "snapshot" });
+    }
+
+    const rejected = await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-cap-client-0005",
+    });
+
+    expect(rejected.message).toEqual({
+      v: 1,
+      type: "error",
+      code: "room.too_many_connections",
+    });
+  });
+
+  it("caps one Room at eight active HTTP browser leases", async () => {
+    const stub = await initializeRoom("room-http-room-lease-cap");
+    for (const guestId of ["guest-creator", "guest-invitee"]) {
+      for (let index = 1; index <= 4; index += 1) {
+        const response = await postRoomHttp(stub, "sync", guestId, {
+          v: 1,
+          connectionId: `${guestId}-http-cap-000${index}`,
+        });
+        expect(response.message).toMatchObject({ type: "snapshot" });
+      }
+    }
+
+    const leaseCount = await runInDurableObject(
+      stub,
+      async (_instance, state) =>
+        Object.keys(
+          (await state.storage.get<Record<string, unknown>>("httpLeases")) ??
+            {},
+        ).length,
+    );
+    expect(leaseCount).toBe(8);
+  });
+
+  it("rate limits HTTP commands across all connections of one Guest", async () => {
+    const stub = await initializeRoom("room-http-guest-rate-limit");
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-rate-client-one",
+    });
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-rate-client-two",
+    });
+    await postRoomHttp(stub, "sync", "guest-invitee", {
+      v: 1,
+      connectionId: "http-rate-invitee",
+    });
+    vi.setSystemTime(Date.now());
+    try {
+      for (let index = 0; index < 20; index += 1) {
+        const response = await postRoomHttp(
+          stub,
+          "command",
+          "guest-creator",
+          {
+            v: 1,
+            connectionId: "http-rate-client-one",
+            command: placeCommand(0, 7, 7),
+          },
+        );
+        expect(response.message).toMatchObject({
+          type: "error",
+          code: "room.revision_mismatch",
+        });
+      }
+
+      const rateLimited = await postRoomHttp(
+        stub,
+        "command",
+        "guest-creator",
+        {
+          v: 1,
+          connectionId: "http-rate-client-two",
+          command: placeCommand(0, 7, 7),
+        },
+      );
+      expect(rateLimited.message).toMatchObject({
+        type: "error",
+        code: "protocol.rate_limited",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("schedules the next alarm for the earliest HTTP presence expiry", async () => {
+    const stub = await initializeRoom("room-http-lease-alarm");
+    const syncedAt = Date.now();
+
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-lease-alarm-client",
+    });
+
+    const alarm = await runInDurableObject(stub, (_instance, state) =>
+      state.storage.getAlarm(),
+    );
+    expect(alarm).toBeGreaterThanOrEqual(syncedAt + 14_000);
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 16_000);
+  });
+
+  it("rejects a late HTTP reconnect even when the vacancy alarm is delayed", async () => {
+    const stub = await initializeRoom("room-http-late-reconnect");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("vacantSince", Date.now() - 61_000);
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    const response = await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-late-reconnect-client",
+    });
+
+    expect(response).toEqual({
+      status: 200,
+      message: { v: 1, type: "error", code: "room.expired" },
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("uses the last persisted HTTP heartbeat when its expiry alarm is delayed", async () => {
+    const stub = await initializeRoom("room-http-delayed-lease-alarm");
+    const heartbeatAt = Date.now();
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-delayed-alarm-client",
+    });
+    vi.setSystemTime(heartbeatAt + 61_000);
+    try {
+      const response = await postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: "http-delayed-alarm-client",
+      });
+
+      expect(response.message).toEqual({
+        v: 1,
+        type: "error",
+        code: "room.expired",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves the Room when HTTP reconnects within the 60-second grace", async () => {
+    const stub = await initializeRoom("room-http-grace-reconnect");
+    const heartbeatAt = Date.now();
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-grace-reconnect-client",
+    });
+    vi.setSystemTime(heartbeatAt + 30_000);
+    try {
+      const response = await postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: "http-grace-reconnect-client",
+      });
+
+      expect(response.message).toMatchObject({
+        type: "snapshot",
+        roomId: "room-http-grace-reconnect",
+        selfSeat: "seat-a",
+      });
+      await expect(
+        runInDurableObject(stub, (_instance, state) =>
+          state.storage.get("vacantSince"),
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("discards a Room 60 seconds after the last persisted HTTP heartbeat", async () => {
+    const stub = await initializeRoom("room-http-heartbeat-expired");
+    const heartbeatAt = Date.now();
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: "http-expired-heartbeat-client",
+    });
+    vi.setSystemTime(heartbeatAt + 61_000);
+    try {
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+      await expect(
+        runInDurableObject(stub, async (_instance, state) => ({
+          room: await state.storage.get("room"),
+          leases: await state.storage.get("httpLeases"),
+          alarm: await state.storage.getAlarm(),
+        })),
+      ).resolves.toEqual({ room: undefined, leases: undefined, alarm: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("schedules cleanup when a newly created Room never connects", async () => {
     const createdAt = Date.now();
     const stub = await initializeRoom("room-never-connected");

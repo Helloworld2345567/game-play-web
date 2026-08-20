@@ -46,6 +46,47 @@ describe("Worker request boundary", () => {
     },
   );
 
+  it("forwards an authenticated HTTP sync to the authoritative Room", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    expect(cookie).toBeTruthy();
+    const created = await app.default.fetch(
+      apiRequest(origin, "/api/rooms", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+    const { roomId } = (await created.json()) as { roomId: string };
+
+    const response = await app.default.fetch(
+      apiRequest(origin, `/api/rooms/${roomId}/sync`, {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          v: 1,
+          connectionId: "http-worker-client-0001",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      v: 1,
+      type: "snapshot",
+      roomId,
+      selfSeat: "seat-a",
+      seats: { "seat-a": { online: true } },
+    });
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
   it("coarsely limits room creation by Cloudflare client IP across identities", async () => {
     const origin = "http://localhost:5173";
     const statuses: number[] = [];

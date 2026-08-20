@@ -37,9 +37,39 @@ interface InitializePayload {
   ruleSetId: string;
 }
 
+interface HttpConnectionEnvelope {
+  v: typeof PROTOCOL_VERSION;
+  connectionId: string;
+}
+
+interface HttpCommandEnvelope extends HttpConnectionEnvelope {
+  command: unknown;
+}
+
+interface HttpLease {
+  guestId: string;
+  seat: PlatformSeatId;
+  lastSeenAt: number;
+  expiresAt: number;
+}
+
+type HttpLeases = Record<string, HttpLease>;
+
+interface HttpRateBucket {
+  tokens: number;
+  lastRefillAt: number;
+}
+
+type HttpRateBuckets = Record<string, HttpRateBucket>;
+
 const ROOM_STORAGE_KEY = "room";
 const VACANT_SINCE_KEY = "vacantSince";
+const HTTP_LEASES_KEY = "httpLeases";
+const HTTP_RATE_BUCKETS_KEY = "httpRateBuckets";
 const VACANT_ROOM_GRACE_MS = 60_000;
+const HTTP_LEASE_MS = 15_000;
+const MAX_HTTP_LEASES_PER_GUEST = 4;
+const MAX_HTTP_LEASES_PER_ROOM = 8;
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const MAX_MESSAGE_BYTES = 4_096;
 const RATE_CAPACITY = 20;
@@ -66,8 +96,28 @@ function validGuestId(value: string | null): value is string {
   );
 }
 
+function isHttpConnectionEnvelope(
+  value: unknown,
+): value is HttpConnectionEnvelope {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const envelope = value as Record<string, unknown>;
+  return (
+    envelope.v === PROTOCOL_VERSION &&
+    typeof envelope.connectionId === "string" &&
+    /^[A-Za-z0-9_-]{16,64}$/u.test(envelope.connectionId)
+  );
+}
+
+function isHttpCommandEnvelope(value: unknown): value is HttpCommandEnvelope {
+  return isHttpConnectionEnvelope(value) && "command" in value;
+}
+
 export class GameRoom extends DurableObject<WorkerEnv> {
   private room: StoredRoom | null = null;
+  private httpLeases: HttpLeases = {};
+  private httpRateBuckets: HttpRateBuckets = {};
   private discarding = false;
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
@@ -78,6 +128,11 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     void this.ctx.blockConcurrencyWhile(async () => {
       this.room =
         (await this.ctx.storage.get<StoredRoom>(ROOM_STORAGE_KEY)) ?? null;
+      this.httpLeases =
+        (await this.ctx.storage.get<HttpLeases>(HTTP_LEASES_KEY)) ?? {};
+      this.httpRateBuckets =
+        (await this.ctx.storage.get<HttpRateBuckets>(HTTP_RATE_BUCKETS_KEY)) ??
+        {};
     });
   }
 
@@ -94,7 +149,233 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (url.pathname === "/websocket") {
       return this.handleWebSocket(request, guestId);
     }
+    if (url.pathname === "/sync" && request.method === "POST") {
+      return this.handleHttpSync(request, guestId);
+    }
+    if (url.pathname === "/command" && request.method === "POST") {
+      return this.handleHttpCommand(request, guestId);
+    }
+    if (url.pathname === "/leave" && request.method === "POST") {
+      return this.handleHttpLeave(request, guestId);
+    }
     return new Response("Not found", { status: 404 });
+  }
+
+  private async handleHttpSync(
+    request: Request,
+    guestId: string,
+  ): Promise<Response> {
+    const value = await this.readHttpJson(request);
+    if (!isHttpConnectionEnvelope(value)) {
+      return this.httpError("protocol.invalid_message");
+    }
+    if (this.room === null || this.discarding) {
+      return this.httpError("room.expired");
+    }
+    const now = Date.now();
+    if (now >= this.room.expiresAt) {
+      await this.discardRoom();
+      return this.httpError("room.expired");
+    }
+    if (await this.isVacancyExpired(now)) {
+      return this.httpError("room.expired");
+    }
+    await this.pruneExpiredHttpLeases(now);
+    const existing = this.httpLeases[value.connectionId];
+    if (existing !== undefined && existing.guestId !== guestId) {
+      return this.httpError("room.connection_conflict");
+    }
+    if (existing === undefined) {
+      const guestLeaseCount = Object.values(this.httpLeases).filter(
+        (lease) => lease.guestId === guestId,
+      ).length;
+      if (
+        guestLeaseCount >= MAX_HTTP_LEASES_PER_GUEST ||
+        Object.keys(this.httpLeases).length >= MAX_HTTP_LEASES_PER_ROOM
+      ) {
+        return this.httpError("room.too_many_connections");
+      }
+    }
+    let room = this.room;
+    if (existing === undefined) {
+      const rules = getGameRules(room.ruleSetId);
+      if (rules === null) return this.httpError("room.rule_mismatch");
+      const joined = joinRoom(room, guestId, rules, now);
+      if (!joined.ok) return this.httpError(joined.code);
+      room = joined.room;
+      if (joined.changed) await this.persist(room);
+    }
+    const seat = getGuestSeat(room, guestId);
+    if (seat === null) return this.httpError("room.not_a_seat");
+
+    this.httpLeases[value.connectionId] = {
+      guestId,
+      seat,
+      lastSeenAt: now,
+      expiresAt: now + HTTP_LEASE_MS,
+    };
+    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    await this.markOccupied();
+    this.broadcastSnapshots();
+    return Response.json(this.snapshotFor(guestId));
+  }
+
+  private async handleHttpCommand(
+    request: Request,
+    guestId: string,
+  ): Promise<Response> {
+    const value = await this.readHttpJson(request);
+    if (!isHttpCommandEnvelope(value)) {
+      return this.httpError("protocol.invalid_message");
+    }
+    const command = parseClientCommand(value.command);
+    if (command === null || command.type === "leave") {
+      return this.httpError("protocol.invalid_message");
+    }
+    if (this.room === null || this.discarding) {
+      return this.httpError("room.expired");
+    }
+    const now = Date.now();
+    if (now >= this.room.expiresAt) {
+      await this.discardRoom();
+      return this.httpError("room.expired");
+    }
+    if (await this.isVacancyExpired(now)) {
+      return this.httpError("room.expired");
+    }
+    const lease = this.httpLeases[value.connectionId];
+    if (
+      lease === undefined ||
+      lease.guestId !== guestId ||
+      getGuestSeat(this.room, guestId) !== lease.seat
+    ) {
+      return this.httpError("room.connection_required", guestId);
+    }
+    const bucket = this.httpRateBuckets[guestId] ?? {
+      tokens: RATE_CAPACITY,
+      lastRefillAt: now,
+    };
+    const replenished = Math.min(
+      RATE_CAPACITY,
+      bucket.tokens + (now - bucket.lastRefillAt) * RATE_REFILL_PER_MS,
+    );
+    this.httpLeases[value.connectionId] = {
+      ...lease,
+      lastSeenAt: now,
+      expiresAt: now + HTTP_LEASE_MS,
+    };
+    this.httpRateBuckets[guestId] = {
+      tokens: replenished >= 1 ? replenished - 1 : replenished,
+      lastRefillAt: now,
+    };
+    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    await this.ctx.storage.put(HTTP_RATE_BUCKETS_KEY, this.httpRateBuckets);
+    await this.markOccupied();
+    if (replenished < 1) {
+      return this.httpError("protocol.rate_limited", guestId);
+    }
+    const rules = getGameRules(this.room.ruleSetId);
+    if (rules === null) return this.httpError("room.rule_mismatch", guestId);
+    const decision = applyRoomCommand(
+      this.room,
+      guestId,
+      command,
+      rules,
+      now,
+    );
+    if (!decision.ok) return this.httpError(decision.code, guestId);
+    await this.persist(decision.room);
+    this.broadcastSnapshots();
+    return Response.json(this.snapshotFor(guestId));
+  }
+
+  private async handleHttpLeave(
+    request: Request,
+    guestId: string,
+  ): Promise<Response> {
+    const value = await this.readHttpJson(request);
+    if (!isHttpConnectionEnvelope(value)) {
+      return this.httpError("protocol.invalid_message");
+    }
+    const lease = this.httpLeases[value.connectionId];
+    const ownsLease = lease !== undefined && lease.guestId === guestId;
+    if (ownsLease) {
+      delete this.httpLeases[value.connectionId];
+      await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+      if (
+        this.room !== null &&
+        this.livePlayerSockets().length === 0 &&
+        this.activeHttpLeases(Date.now()).length === 0
+      ) {
+        await this.discardRoom();
+      } else {
+        await this.markOccupied();
+        this.broadcastSnapshots();
+      }
+    }
+    const acknowledgement: LeftMessage = {
+      v: PROTOCOL_VERSION,
+      type: "left",
+    };
+    return Response.json(acknowledgement);
+  }
+
+  private async readHttpJson(request: Request): Promise<unknown | null> {
+    const text = await request.text();
+    if (new TextEncoder().encode(text).byteLength > MAX_MESSAGE_BYTES) {
+      return null;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  private async isVacancyExpired(now: number): Promise<boolean> {
+    if (this.room === null || this.discarding) return true;
+    if (
+      this.livePlayerSockets().length > 0 ||
+      this.activeHttpLeases(now).length > 0
+    ) {
+      return false;
+    }
+    let vacantSince = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
+    if (vacantSince === undefined) {
+      const lastHttpSeenAt = Object.values(this.httpLeases).reduce(
+        (latest, lease) => Math.max(latest, lease.lastSeenAt),
+        0,
+      );
+      if (lastHttpSeenAt === 0) return false;
+      vacantSince = lastHttpSeenAt;
+      await this.ctx.storage.put(VACANT_SINCE_KEY, vacantSince);
+    }
+    if (now < vacantSince + VACANT_ROOM_GRACE_MS) return false;
+    await this.discardRoom();
+    return true;
+  }
+
+  private async pruneExpiredHttpLeases(now: number): Promise<void> {
+    const expiredConnectionIds = Object.entries(this.httpLeases)
+      .filter(([, lease]) => lease.expiresAt <= now)
+      .map(([connectionId]) => connectionId);
+    if (expiredConnectionIds.length === 0) return;
+    for (const connectionId of expiredConnectionIds) {
+      delete this.httpLeases[connectionId];
+    }
+    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+  }
+
+  private httpError(code: string, guestId?: string): Response {
+    const error: ServerError = {
+      v: PROTOCOL_VERSION,
+      type: "error",
+      code,
+      ...(guestId !== undefined && this.room !== null
+        ? { snapshot: this.snapshotFor(guestId) }
+        : {}),
+    };
+    return Response.json(error);
   }
 
   private async initialize(
@@ -140,13 +421,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       await this.discardRoom();
       return this.rejectedSocket("room.expired");
     }
-    const vacantSince = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
-    if (
-      vacantSince !== undefined &&
-      this.livePlayerSockets().length === 0 &&
-      now >= vacantSince + VACANT_ROOM_GRACE_MS
-    ) {
-      await this.discardRoom();
+    if (await this.isVacancyExpired(now)) {
       return this.rejectedSocket("room.expired");
     }
     const rules = getGameRules(this.room.ruleSetId);
@@ -270,21 +545,40 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       await this.discardRoom();
       return;
     }
-    if (this.livePlayerSockets().length > 0) {
+    const expiredLeases = Object.entries(this.httpLeases).filter(
+      ([, lease]) => lease.expiresAt <= now,
+    );
+    const lastHttpSeenAt = expiredLeases.reduce(
+      (latest, [, lease]) => Math.max(latest, lease.lastSeenAt),
+      0,
+    );
+    if (expiredLeases.length > 0) {
+      for (const [connectionId] of expiredLeases) {
+        delete this.httpLeases[connectionId];
+      }
+      await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+      this.broadcastSnapshots();
+    }
+    if (
+      this.livePlayerSockets().length > 0 ||
+      this.activeHttpLeases(now).length > 0
+    ) {
       await this.markOccupied();
       return;
     }
-    const vacantSince = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
-    if (vacantSince === undefined) {
-      await this.markVacant(now);
-      return;
+    const storedVacantSince =
+      await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
+    const vacantSince =
+      storedVacantSince ?? (lastHttpSeenAt > 0 ? lastHttpSeenAt : now);
+    if (storedVacantSince === undefined) {
+      await this.ctx.storage.put(VACANT_SINCE_KEY, vacantSince);
     }
     const discardAt = Math.min(
       this.room.expiresAt,
       vacantSince + VACANT_ROOM_GRACE_MS,
     );
     if (now < discardAt) {
-      await this.ctx.storage.setAlarm(discardAt);
+      await this.scheduleNextAlarm(now);
       return;
     }
     await this.discardRoom();
@@ -301,6 +595,8 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       }
       await this.ctx.storage.deleteAll();
       this.room = null;
+      this.httpLeases = {};
+      this.httpRateBuckets = {};
     } catch (error) {
       this.discarding = false;
       await this.markVacant(Date.now());
@@ -334,7 +630,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
       type: "left",
     };
     socket.send(JSON.stringify(acknowledgement));
-    const hasOtherPlayers = this.livePlayerSockets(socket).length > 0;
+    const hasOtherPlayers = this.hasLivePlayers(Date.now(), socket);
     socket.close(1000, "left");
     if (!hasOtherPlayers) {
       await this.discardRoom();
@@ -347,7 +643,7 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   private async handleSocketGone(socket: WebSocket): Promise<void> {
     if (this.room === null || this.discarding) return;
     this.broadcastSnapshots();
-    if (this.livePlayerSockets(socket).length === 0) {
+    if (!this.hasLivePlayers(Date.now(), socket)) {
       await this.markVacant(Date.now());
       return;
     }
@@ -376,8 +672,8 @@ export class GameRoom extends DurableObject<WorkerEnv> {
   private async persist(room: StoredRoom): Promise<void> {
     if (this.discarding) throw new Error("Room is being discarded");
     await this.ctx.storage.put(ROOM_STORAGE_KEY, room);
-    await this.ctx.storage.setAlarm(room.expiresAt);
     this.room = room;
+    await this.scheduleNextAlarm();
   }
 
   private async markVacant(now: number): Promise<void> {
@@ -387,18 +683,34 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     if (existing === undefined) {
       await this.ctx.storage.put(VACANT_SINCE_KEY, vacantSince);
     }
-    await this.ctx.storage.setAlarm(
-      Math.min(
-        this.room.expiresAt,
-        vacantSince + VACANT_ROOM_GRACE_MS,
-      ),
-    );
+    await this.scheduleNextAlarm(now);
   }
 
   private async markOccupied(): Promise<void> {
     if (this.room === null || this.discarding) return;
     await this.ctx.storage.delete(VACANT_SINCE_KEY);
-    await this.ctx.storage.setAlarm(this.room.expiresAt);
+    await this.scheduleNextAlarm();
+  }
+
+  private async scheduleNextAlarm(now = Date.now()): Promise<void> {
+    if (this.room === null || this.discarding) return;
+    const candidates = [this.room.expiresAt];
+    const leaseExpiries = this.activeHttpLeases(now).map(
+      (lease) => lease.expiresAt,
+    );
+    if (leaseExpiries.length > 0) {
+      candidates.push(Math.min(...leaseExpiries));
+    }
+    if (
+      this.livePlayerSockets().length === 0 &&
+      this.activeHttpLeases(now).length === 0
+    ) {
+      const vacantSince = await this.ctx.storage.get<number>(VACANT_SINCE_KEY);
+      if (vacantSince !== undefined) {
+        candidates.push(vacantSince + VACANT_ROOM_GRACE_MS);
+      }
+    }
+    await this.ctx.storage.setAlarm(Math.min(...candidates));
   }
 
   private livePlayerSockets(except?: WebSocket): WebSocket[] {
@@ -418,16 +730,37 @@ export class GameRoom extends DurableObject<WorkerEnv> {
     });
   }
 
+  private activeHttpLeases(now: number): HttpLease[] {
+    if (this.room === null) return [];
+    return Object.values(this.httpLeases).filter(
+      (lease) =>
+        lease.expiresAt > now &&
+        getGuestSeat(this.room!, lease.guestId) === lease.seat,
+    );
+  }
+
+  private hasLivePlayers(now: number, exceptSocket?: WebSocket): boolean {
+    return (
+      this.livePlayerSockets(exceptSocket).length > 0 ||
+      this.activeHttpLeases(now).length > 0
+    );
+  }
+
   private snapshotFor(guestId: string): RoomSnapshot {
     const room = this.room!;
     const seatA = room.seats[SEAT_A];
     const seatB = room.seats[SEAT_B];
     const onlineGuests = new Set(
-      this.livePlayerSockets().flatMap((socket) => {
-        const attachment =
-          socket.deserializeAttachment() as SocketAttachment | null;
-        return attachment?.guestId ? [attachment.guestId] : [];
-      }),
+      [
+        ...this.livePlayerSockets().flatMap((socket) => {
+          const attachment =
+            socket.deserializeAttachment() as SocketAttachment | null;
+          return attachment?.guestId ? [attachment.guestId] : [];
+        }),
+        ...this.activeHttpLeases(Date.now()).flatMap((lease) =>
+          lease.guestId ? [lease.guestId] : [],
+        ),
+      ],
     );
     return {
       v: PROTOCOL_VERSION,

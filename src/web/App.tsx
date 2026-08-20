@@ -7,7 +7,12 @@ import {
   UnsupportedGame,
   unknownSeatPresentations,
 } from "./games/registry";
-import { ensureBrowserSession, useRoom, type ConnectionPhase } from "./room-client";
+import {
+  ensureBrowserSession,
+  useRoom,
+  type ConnectionPhase,
+  type RoomTransport,
+} from "./room-client";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
 
@@ -105,7 +110,17 @@ function LandingPage() {
   );
 }
 
-function phaseText(phase: ConnectionPhase): string {
+function phaseText(
+  phase: ConnectionPhase,
+  transport: RoomTransport = "websocket",
+): string {
+  if (transport === "http") {
+    if (phase === "online") return "兼容连接";
+    if (phase === "retrying") return "兼容连接中断，正在重试";
+    if (phase === "connecting" || phase === "syncing") {
+      return "正在建立兼容连接";
+    }
+  }
   const labels: Record<ConnectionPhase, string> = {
     connecting: "正在进入房间",
     syncing: "正在同步局面",
@@ -117,8 +132,14 @@ function phaseText(phase: ConnectionPhase): string {
   return labels[phase];
 }
 
-function mainStatus(snapshot: RoomSnapshot | null, phase: ConnectionPhase): string {
-  if (phase !== "online" || snapshot === null) return phaseText(phase);
+function mainStatus(
+  snapshot: RoomSnapshot | null,
+  phase: ConnectionPhase,
+  transport: RoomTransport,
+): string {
+  if (phase !== "online" || snapshot === null) {
+    return phaseText(phase, transport);
+  }
   if (snapshot.position === null) return "等待对手加入";
   const outcome = snapshot.position.outcome;
   if (outcome?.kind === "draw") return "本局和棋";
@@ -214,9 +235,16 @@ function RoomPage({
     <main class="room-page">
       <nav class="topbar room-topbar">
         <Brand />
-        <span class={`connection-pill phase-${client.phase}`}>
+        <span
+          class={`connection-pill phase-${client.phase}`}
+          title={
+            client.transport === "http"
+              ? "当前网络不支持 WebSocket，已通过 HTTPS 连接"
+              : undefined
+          }
+        >
           <span aria-hidden="true" />
-          {phaseText(client.phase)}
+          {phaseText(client.phase, client.transport)}
         </span>
       </nav>
 
@@ -226,7 +254,7 @@ function RoomPage({
           <h1>
             {unsupportedGame
               ? "暂不支持这个规则版本"
-              : mainStatus(snapshot, client.phase)}
+              : mainStatus(snapshot, client.phase, client.transport)}
           </h1>
         </header>
 

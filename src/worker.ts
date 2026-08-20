@@ -7,6 +7,7 @@ export { GameRoom };
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
+const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
 const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
 const creationBuckets = new Map<
   string,
@@ -168,6 +169,43 @@ async function forwardWebSocket(
   );
 }
 
+async function forwardRoomHttp(
+  request: Request,
+  env: WorkerEnv,
+  guestId: string,
+  roomId: string,
+  action: "sync" | "command" | "leave",
+): Promise<Response> {
+  if (request.method !== "POST" || !ROOM_ID_PATTERN.test(roomId)) {
+    return json({ error: "room.invalid_request" }, { status: 400 });
+  }
+  const body = await request.text();
+  if (new TextEncoder().encode(body).byteLength > MAX_ROOM_HTTP_BODY_BYTES) {
+    return json({ error: "protocol.message_too_large" }, { status: 413 });
+  }
+  const id = env.ROOMS.idFromName(roomId);
+  const stub = env.ROOMS.get(id, { locationHint: "apac" });
+  const response = await stub.fetch(
+    new Request(`https://room.internal/${action}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [INTERNAL_GUEST_HEADER]: guestId,
+      },
+      body,
+    }),
+  );
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "same-origin");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -201,6 +239,18 @@ export default {
     );
     if (match?.[1]) {
       return forwardWebSocket(request, env, guestId, match[1]);
+    }
+    const httpMatch = url.pathname.match(
+      /^\/api\/rooms\/([A-Za-z0-9_-]+)\/(sync|command|leave)$/u,
+    );
+    if (httpMatch?.[1] && httpMatch[2]) {
+      return forwardRoomHttp(
+        request,
+        env,
+        guestId,
+        httpMatch[1],
+        httpMatch[2] as "sync" | "command" | "leave",
+      );
     }
     return json({ error: "request.not_found" }, { status: 404 });
   },

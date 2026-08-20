@@ -17,8 +17,34 @@ export type ConnectionPhase =
   | "offline"
   | "fatal";
 
+export type RoomTransport = "websocket" | "http";
+
+const HTTP_REQUEST_TIMEOUT_MS = 8_000;
+const CONNECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/u;
+const CONNECTION_STORAGE_PREFIX = "ym0v0.room.connection.";
+const HTTP_COMPATIBILITY_NOTICE =
+  "当前网络不支持 WebSocket，已自动使用 HTTPS 兼容连接。";
+
+class HttpStatusError extends Error {
+  constructor(
+    readonly status: number,
+    readonly serverCode: string | null,
+  ) {
+    super(`http_status_${status}`);
+    this.name = "HttpStatusError";
+  }
+}
+
+class HttpProtocolError extends Error {
+  constructor() {
+    super("invalid_http_protocol");
+    this.name = "HttpProtocolError";
+  }
+}
+
 interface RoomClientView {
   phase: ConnectionPhase;
+  transport: RoomTransport;
   snapshot: RoomSnapshot | null;
   pending: boolean;
   leaving: boolean;
@@ -93,10 +119,11 @@ function humanizeError(
   return "操作未完成，请重试。";
 }
 
-export async function ensureBrowserSession(): Promise<void> {
+export async function ensureBrowserSession(signal?: AbortSignal): Promise<void> {
   const response = await fetch("/api/session", {
     method: "POST",
     headers: { Accept: "application/json" },
+    signal,
   });
   if (!response.ok) throw new Error("session_failed");
 }
@@ -110,8 +137,104 @@ function websocketUrl(roomId: string): string {
   return url.href;
 }
 
+function httpTransportUrl(
+  roomId: string,
+  operation: "sync" | "command" | "leave",
+): string {
+  return `/api/rooms/${encodeURIComponent(roomId)}/${operation}`;
+}
+
+function connectionStorageKey(roomId: string): string {
+  return `${CONNECTION_STORAGE_PREFIX}${roomId}`;
+}
+
+function browserConnection(roomId: string): {
+  id: string;
+  storageKey: string;
+} {
+  const storageKey = connectionStorageKey(roomId);
+  try {
+    const stored = sessionStorage.getItem(storageKey);
+    if (stored !== null && CONNECTION_ID_PATTERN.test(stored)) {
+      return { id: stored, storageKey };
+    }
+  } catch {
+    // Some privacy modes disable sessionStorage; a page-local ID still works.
+  }
+
+  const id = crypto.randomUUID();
+  try {
+    sessionStorage.setItem(storageKey, id);
+  } catch {
+    // Fall back to the page-local ID created above.
+  }
+  return { id, storageKey };
+}
+
+function boundaryErrorCode(value: unknown): string | null {
+  return isRecord(value) && typeof value.error === "string"
+    ? value.error
+    : null;
+}
+
+function isPermanentHttpFailure(error: unknown): boolean {
+  if (error instanceof HttpProtocolError) return true;
+  if (!(error instanceof HttpStatusError)) return false;
+  return (
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 425 &&
+    error.status !== 429
+  );
+}
+
+function permanentHttpFailureView(error: unknown): {
+  code: string;
+  message: string;
+} {
+  if (error instanceof HttpProtocolError) {
+    return {
+      code: "protocol.version_mismatch",
+      message: "服务器协议不兼容，请刷新页面后重试。",
+    };
+  }
+  const status = error instanceof HttpStatusError ? error.status : 0;
+  const serverCode =
+    error instanceof HttpStatusError ? error.serverCode : null;
+  if (status === 401) {
+    return {
+      code: serverCode ?? "session.required",
+      message: "匿名会话已经失效，请刷新页面后重新进入房间。",
+    };
+  }
+  if (status === 403) {
+    return {
+      code: serverCode ?? "request.bad_origin",
+      message: "当前网络或安全策略拒绝了兼容连接。",
+    };
+  }
+  if (status === 404) {
+    return {
+      code: serverCode ?? "request.not_found",
+      message: "服务器暂不支持兼容连接，请刷新页面后重试。",
+    };
+  }
+  if (status === 413) {
+    return {
+      code: serverCode ?? "protocol.message_too_large",
+      message: "兼容连接请求过大，请刷新页面后重试。",
+    };
+  }
+  return {
+    code: serverCode ?? `http.status_${status}`,
+    message: "兼容连接请求被服务器拒绝，请刷新页面后重试。",
+  };
+}
+
 export function useRoom(roomId: string): RoomClientView {
   const [phase, setPhase] = useState<ConnectionPhase>("connecting");
+  const [transport, setTransport] = useState<RoomTransport>("websocket");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [pending, setPending] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -122,24 +245,67 @@ export function useRoom(roomId: string): RoomClientView {
   const pendingRevisionRef = useRef<number | null>(null);
   const retryRef = useRef<() => void>(() => undefined);
   const leaveRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const sendRef = useRef<(command: RoomCommand) => boolean>(() => false);
+  const connectionRef = useRef<{
+    roomId: string;
+    id: string;
+    storageKey: string;
+  } | null>(null);
+  if (
+    connectionRef.current === null ||
+    connectionRef.current.roomId !== roomId
+  ) {
+    connectionRef.current = { roomId, ...browserConnection(roomId) };
+  }
 
   useEffect(() => {
     let disposed = false;
     let generation = 0;
-    let attempt = 0;
+    let webSocketAttempt = 0;
+    let httpAttempt = 0;
     let retryTimer: number | null = null;
     let heartbeatTimer: number | null = null;
     let connectTimer: number | null = null;
+    let pollTimer: number | null = null;
     let leaveTimer: number | null = null;
     let terminal = false;
+    let fallbackActive = false;
+    let httpSyncInFlight = false;
+    let httpReady = false;
+    let httpRecovering = false;
+    let httpNoticeShown = false;
+    let pendingNeedsReconciliation = false;
     let leaveRequested = false;
     let leavePromise: Promise<void> | null = null;
     let leaveTargetSocket: WebSocket | null = null;
     let resolveLeave: (() => void) | null = null;
     let lastServerMessageAt = Date.now();
-    const sessionReady = ensureBrowserSession();
+    let sessionReady: Promise<void> | null = null;
+    const httpControllers = new Set<AbortController>();
+    const connection = connectionRef.current!;
+    const connectionId = connection.id;
 
-    const clearTimers = () => {
+    const ensureSession = async (signal?: AbortSignal) => {
+      sessionReady ??= ensureBrowserSession(signal);
+      try {
+        await sessionReady;
+      } catch (error) {
+        sessionReady = null;
+        throw error;
+      }
+    };
+
+    const forgetConnection = () => {
+      try {
+        if (sessionStorage.getItem(connection.storageKey) === connectionId) {
+          sessionStorage.removeItem(connection.storageKey);
+        }
+      } catch {
+        // The connection was page-local when sessionStorage was unavailable.
+      }
+    };
+
+    const clearSocketTimers = () => {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
       if (connectTimer !== null) window.clearTimeout(connectTimer);
@@ -148,7 +314,18 @@ export function useRoom(roomId: string): RoomClientView {
       connectTimer = null;
     };
 
-    const completeLeave = () => {
+    const clearPollTimer = () => {
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
+      pollTimer = null;
+    };
+
+    const abortHttpRequests = () => {
+      for (const controller of httpControllers) controller.abort();
+      httpControllers.clear();
+    };
+
+    const completeLeave = (acknowledged = false) => {
+      if (acknowledged) forgetConnection();
       if (leaveTimer !== null) window.clearTimeout(leaveTimer);
       leaveTimer = null;
       const resolve = resolveLeave;
@@ -156,59 +333,264 @@ export function useRoom(roomId: string): RoomClientView {
       resolve?.();
     };
 
-    const closeForLeave = (socket: WebSocket, reason: string) => {
+    const closeSocket = (socket: WebSocket, reason = "switch transport") => {
       try {
         socket.close(1000, reason);
       } catch {
-        // Navigation must not depend on a partially opened socket closing cleanly.
+        // A proxy may leave the browser socket in a partially-open state.
       }
     };
 
-    const applySnapshot = (next: RoomSnapshot) => {
+    const setTransportMode = (next: RoomTransport) => {
+      setTransport(next);
+    };
+
+    const applySnapshot = (
+      next: RoomSnapshot,
+      source: RoomTransport,
+    ) => {
       const current = snapshotRef.current;
       if (current !== null && next.revision < current.revision) return;
+      let pendingResolution: "confirmed" | "retry" | null = null;
       snapshotRef.current = next;
       setSnapshot(next);
-      if (
-        pendingRevisionRef.current !== null &&
-        next.revision > pendingRevisionRef.current
-      ) {
-        pendingRevisionRef.current = null;
-        setPending(false);
+      const pendingRevision = pendingRevisionRef.current;
+      if (pendingRevision !== null) {
+        if (next.revision > pendingRevision) {
+          pendingResolution = "confirmed";
+          pendingRevisionRef.current = null;
+          pendingNeedsReconciliation = false;
+          setPending(false);
+        } else if (source === "http" && pendingNeedsReconciliation) {
+          pendingResolution = "retry";
+          pendingRevisionRef.current = null;
+          pendingNeedsReconciliation = false;
+          setPending(false);
+        }
       }
-      attempt = 0;
+      webSocketAttempt = 0;
+      httpAttempt = 0;
+      setTransportMode(source);
       setPhase("online");
+      if (source === "http") {
+        const recovered = httpRecovering;
+        httpReady = true;
+        httpRecovering = false;
+        if (pendingResolution === "retry") {
+          setNotice("连接已恢复，但刚才的操作未被确认，请重试。");
+        } else if (!httpNoticeShown || recovered) {
+          setNotice(HTTP_COMPATIBILITY_NOTICE);
+        }
+        httpNoticeShown = true;
+      }
     };
 
-    const scheduleReconnect = () => {
+    const handleServerMessage = (
+      message: RoomSnapshot | ServerError | LeftMessage,
+      source: RoomTransport,
+      sourceSocket?: WebSocket,
+    ) => {
+      if (message.type === "snapshot") {
+        applySnapshot(message, source);
+        return;
+      }
+      if (message.type === "left") {
+        if (source === "http" || leaveTargetSocket === sourceSocket) {
+          completeLeave(true);
+        }
+        return;
+      }
+      pendingRevisionRef.current = null;
+      pendingNeedsReconciliation = false;
+      setPending(false);
+      if (message.snapshot) applySnapshot(message.snapshot, source);
+      setNotice(
+        humanizeError(
+          message.code,
+          message.snapshot ?? snapshotRef.current,
+        ),
+      );
+      if (fatalCodes.has(message.code)) {
+        terminal = true;
+        httpReady = false;
+        clearPollTimer();
+        setFatalCode(message.code);
+        setPhase("fatal");
+        if (sourceSocket !== undefined) closeSocket(sourceSocket, "fatal");
+      }
+    };
+
+    const postHttp = async (
+      operation: "sync" | "command" | "leave",
+      command?: RoomCommand,
+      keepalive = false,
+    ): Promise<RoomSnapshot | ServerError | LeftMessage> => {
+      for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
+        const controller = keepalive ? null : new AbortController();
+        let timeout: number | null = null;
+        if (controller !== null) {
+          httpControllers.add(controller);
+          timeout = window.setTimeout(
+            () => controller.abort(),
+            HTTP_REQUEST_TIMEOUT_MS,
+          );
+        }
+        try {
+          await ensureSession(controller?.signal);
+          const response = await fetch(httpTransportUrl(roomId, operation), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              v: PROTOCOL_VERSION,
+              connectionId,
+              ...(command === undefined ? {} : { command }),
+            }),
+            cache: "no-store",
+            keepalive,
+            ...(controller === null ? {} : { signal: controller.signal }),
+          });
+          let raw: unknown = null;
+          try {
+            raw = await response.json();
+          } catch {
+            if (response.ok) throw new HttpProtocolError();
+          }
+          if (response.status === 401 && sessionAttempt === 0) {
+            sessionReady = null;
+            continue;
+          }
+          if (!response.ok) {
+            throw new HttpStatusError(
+              response.status,
+              boundaryErrorCode(raw),
+            );
+          }
+          const message = parseServerMessage(raw);
+          if (message === null) throw new HttpProtocolError();
+          return message;
+        } finally {
+          if (timeout !== null) window.clearTimeout(timeout);
+          if (controller !== null) httpControllers.delete(controller);
+        }
+      }
+      throw new HttpStatusError(401, "session.required");
+    };
+
+    const failPermanentlyForHttp = (error: unknown): boolean => {
+      if (!isPermanentHttpFailure(error)) return false;
+      const failure = permanentHttpFailureView(error);
+      terminal = true;
+      httpReady = false;
+      pendingNeedsReconciliation = false;
+      pendingRevisionRef.current = null;
+      clearSocketTimers();
+      clearPollTimer();
+      abortHttpRequests();
+      setPending(false);
+      setFatalCode(failure.code);
+      setNotice(failure.message);
+      setPhase("fatal");
+      return true;
+    };
+
+    const scheduleHttpSync = (delay: number) => {
+      if (disposed || terminal || !fallbackActive) return;
+      clearPollTimer();
+      pollTimer = window.setTimeout(() => void syncHttp(), delay);
+    };
+
+    async function syncHttp(): Promise<void> {
+      if (
+        disposed ||
+        terminal ||
+        !fallbackActive ||
+        httpSyncInFlight
+      ) {
+        return;
+      }
+      clearPollTimer();
+      if (!navigator.onLine) {
+        setPhase("offline");
+        return;
+      }
+      httpSyncInFlight = true;
+      const currentGeneration = generation;
+      if (snapshotRef.current === null) setPhase("connecting");
+      try {
+        const message = await postHttp("sync");
+        if (disposed || currentGeneration !== generation) return;
+        handleServerMessage(message, "http");
+        if (!terminal) {
+          scheduleHttpSync(document.hidden ? 2_500 : 1_000);
+        }
+      } catch (error) {
+        if (disposed || currentGeneration !== generation || terminal) return;
+        if (failPermanentlyForHttp(error)) return;
+        httpReady = false;
+        httpRecovering = true;
+        setPhase(navigator.onLine ? "retrying" : "offline");
+        setNotice("HTTPS 兼容连接暂时中断，正在重试。");
+        const delay = Math.min(8_000, 500 * 2 ** httpAttempt);
+        httpAttempt += 1;
+        scheduleHttpSync(delay);
+      } finally {
+        httpSyncInFlight = false;
+      }
+    }
+
+    const startHttpFallback = () => {
+      if (disposed || terminal || fallbackActive) return;
+      fallbackActive = true;
+      httpReady = false;
+      pendingNeedsReconciliation = pendingRevisionRef.current !== null;
+      generation += 1;
+      clearSocketTimers();
+      const socket = socketRef.current;
+      socketRef.current = null;
+      if (socket !== null) closeSocket(socket);
+      setTransportMode("http");
+      setPhase(snapshotRef.current === null ? "connecting" : "retrying");
+      void syncHttp();
+    };
+
+    const scheduleWebSocketReconnect = () => {
       if (disposed || terminal) return;
-      clearTimers();
+      if (fallbackActive) {
+        scheduleHttpSync(0);
+        return;
+      }
+      clearSocketTimers();
       setPending(false);
       pendingRevisionRef.current = null;
+      pendingNeedsReconciliation = false;
       if (!navigator.onLine) {
         setPhase("offline");
         return;
       }
       setPhase("retrying");
-      const delay = Math.min(8_000, 250 * 2 ** attempt);
-      attempt += 1;
+      const delay = Math.min(8_000, 250 * 2 ** webSocketAttempt);
+      webSocketAttempt += 1;
       retryTimer = window.setTimeout(
-        () => void connect(),
+        () => void connectWebSocket(),
         delay * (0.8 + Math.random() * 0.4),
       );
     };
 
-    const connect = async () => {
-      if (disposed || terminal) return;
-      clearTimers();
+    async function connectWebSocket(): Promise<void> {
+      if (disposed || terminal || fallbackActive) return;
+      clearSocketTimers();
       const currentGeneration = ++generation;
+      setTransportMode("websocket");
       setPhase(snapshotRef.current === null ? "connecting" : "retrying");
       try {
-        await sessionReady;
+        await ensureSession();
       } catch {
-        if (!disposed) {
+        if (!disposed && currentGeneration === generation) {
           setNotice("无法建立匿名会话，正在重试。");
-          scheduleReconnect();
+          scheduleWebSocketReconnect();
         }
         return;
       }
@@ -216,12 +598,14 @@ export function useRoom(roomId: string): RoomClientView {
 
       const socket = new WebSocket(websocketUrl(roomId));
       socketRef.current = socket;
-      connectTimer = window.setTimeout(() => socket.close(), 8_000);
+      connectTimer = window.setTimeout(() => {
+        if (currentGeneration !== generation || terminal) return;
+        closeSocket(socket, "WebSocket handshake timeout");
+        startHttpFallback();
+      }, 4_000);
 
       socket.addEventListener("open", () => {
         if (disposed || currentGeneration !== generation) return;
-        if (connectTimer !== null) window.clearTimeout(connectTimer);
-        connectTimer = null;
         setPhase("syncing");
         lastServerMessageAt = Date.now();
         heartbeatTimer = window.setInterval(() => {
@@ -245,49 +629,105 @@ export function useRoom(roomId: string): RoomClientView {
           setNotice("收到无法识别的服务器消息。");
           return;
         }
+        if (isRecord(raw) && "v" in raw && raw.v !== PROTOCOL_VERSION) {
+          terminal = true;
+          clearSocketTimers();
+          pendingRevisionRef.current = null;
+          pendingNeedsReconciliation = false;
+          setPending(false);
+          setFatalCode("protocol.version_mismatch");
+          setNotice("服务器协议不兼容，请刷新页面后重试。");
+          setPhase("fatal");
+          closeSocket(socket, "protocol version mismatch");
+          return;
+        }
         const message = parseServerMessage(raw);
         if (message === null) {
           setNotice("服务器协议不兼容，请刷新页面。");
           return;
         }
-        if (message.type === "snapshot") {
-          applySnapshot(message);
-          return;
-        }
-        if (message.type === "left") {
-          if (leaveTargetSocket === socket) completeLeave();
-          return;
-        }
-        pendingRevisionRef.current = null;
-        setPending(false);
-        if (message.snapshot) applySnapshot(message.snapshot);
-        setNotice(
-          humanizeError(
-            message.code,
-            message.snapshot ?? snapshotRef.current,
-          ),
-        );
-        if (fatalCodes.has(message.code)) {
-          terminal = true;
-          setFatalCode(message.code);
-          setPhase("fatal");
-          socket.close();
-        }
+        if (connectTimer !== null) window.clearTimeout(connectTimer);
+        connectTimer = null;
+        handleServerMessage(message, "websocket", socket);
       });
 
       socket.addEventListener("close", () => {
         if (socketRef.current === socket) socketRef.current = null;
         if (leaveRequested && leaveTargetSocket === socket) completeLeave();
-        if (currentGeneration === generation) scheduleReconnect();
+        if (currentGeneration !== generation || terminal) return;
+        clearSocketTimers();
+        if (navigator.onLine) startHttpFallback();
+        else scheduleWebSocketReconnect();
       });
       socket.addEventListener("error", () => socket.close());
+    }
+
+    const sendHttpCommand = async (
+      command: RoomCommand,
+      currentGeneration: number,
+    ) => {
+      try {
+        const message = await postHttp("command", command);
+        if (disposed || terminal || currentGeneration !== generation) return;
+        handleServerMessage(message, "http");
+        scheduleHttpSync(0);
+      } catch (error) {
+        if (disposed || terminal || currentGeneration !== generation) return;
+        if (failPermanentlyForHttp(error)) return;
+        httpReady = false;
+        httpRecovering = true;
+        pendingNeedsReconciliation = pendingRevisionRef.current !== null;
+        setNotice("连接暂时中断，正在确认刚才的操作。");
+        setPhase(navigator.onLine ? "retrying" : "offline");
+        scheduleHttpSync(0);
+      }
     };
+
+    const sendRoomCommand = (command: RoomCommand): boolean => {
+      if (
+        disposed ||
+        terminal ||
+        pendingRevisionRef.current !== null
+      ) {
+        return false;
+      }
+      if (fallbackActive) {
+        if (!navigator.onLine || !httpReady) return false;
+        pendingRevisionRef.current = command.expectedRevision;
+        pendingNeedsReconciliation = false;
+        setPending(true);
+        setNotice(null);
+        void sendHttpCommand(command, generation);
+        return true;
+      }
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) return false;
+      pendingRevisionRef.current = command.expectedRevision;
+      pendingNeedsReconciliation = false;
+      setPending(true);
+      setNotice(null);
+      try {
+        socket.send(JSON.stringify(command));
+      } catch {
+        pendingNeedsReconciliation = true;
+        startHttpFallback();
+      }
+      return true;
+    };
+    sendRef.current = sendRoomCommand;
 
     const retryNow = () => {
       if (terminal) return;
+      if (fallbackActive) {
+        httpAttempt = 0;
+        scheduleHttpSync(0);
+        return;
+      }
       generation += 1;
-      socketRef.current?.close();
-      void connect();
+      const socket = socketRef.current;
+      socketRef.current = null;
+      if (socket !== null) closeSocket(socket, "retry");
+      void connectWebSocket();
     };
     retryRef.current = retryNow;
 
@@ -295,32 +735,47 @@ export function useRoom(roomId: string): RoomClientView {
       if (leavePromise !== null) return leavePromise;
       leaveRequested = true;
       terminal = true;
-      clearTimers();
+      httpReady = false;
+      clearSocketTimers();
+      clearPollTimer();
+      abortHttpRequests();
       setLeaving(true);
       setPending(false);
       pendingRevisionRef.current = null;
+      pendingNeedsReconciliation = false;
       setNotice(null);
 
-      const socket = socketRef.current;
-      if (socket?.readyState !== WebSocket.OPEN) {
-        if (socket !== null) closeForLeave(socket, "left");
-        leavePromise = Promise.resolve();
-        return leavePromise;
-      }
-
-      leaveTargetSocket = socket;
       leavePromise = new Promise<void>((resolve) => {
         resolveLeave = resolve;
       });
-      leaveTimer = window.setTimeout(() => {
-        closeForLeave(socket, "leave timeout");
-        completeLeave();
-      }, 1_500);
+      leaveTimer = window.setTimeout(() => completeLeave(false), 1_500);
+
+      if (fallbackActive) {
+        void (async () => {
+          try {
+            const message = await postHttp("leave", undefined, true);
+            if (!disposed || message.type === "left") {
+              handleServerMessage(message, "http");
+            }
+          } catch {
+            completeLeave(false);
+          }
+        })();
+        return leavePromise;
+      }
+
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        if (socket !== null) closeSocket(socket, "left");
+        completeLeave(false);
+        return leavePromise;
+      }
+      leaveTargetSocket = socket;
       try {
         socket.send(JSON.stringify({ v: PROTOCOL_VERSION, type: "leave" }));
       } catch {
-        closeForLeave(socket, "leave failed");
-        completeLeave();
+        closeSocket(socket, "leave failed");
+        completeLeave(false);
       }
       return leavePromise;
     };
@@ -328,14 +783,29 @@ export function useRoom(roomId: string): RoomClientView {
 
     const handleOffline = () => {
       setPhase("offline");
-      socketRef.current?.close();
+      if (fallbackActive) {
+        httpReady = false;
+        httpRecovering = true;
+        clearPollTimer();
+        abortHttpRequests();
+        return;
+      }
+      const socket = socketRef.current;
+      if (socket !== null) closeSocket(socket, "offline");
     };
-    const handleOnline = () => retryNow();
+    const handleOnline = () => {
+      if (fallbackActive) scheduleHttpSync(0);
+      else retryNow();
+    };
     const handleVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      if (fallbackActive) {
+        scheduleHttpSync(0);
+        return;
+      }
       if (
-        document.visibilityState === "visible" &&
-        (socketRef.current?.readyState !== WebSocket.OPEN ||
-          Date.now() - lastServerMessageAt > 60_000)
+        socketRef.current?.readyState !== WebSocket.OPEN ||
+        Date.now() - lastServerMessageAt > 60_000
       ) {
         retryNow();
       }
@@ -344,17 +814,21 @@ export function useRoom(roomId: string): RoomClientView {
     window.addEventListener("offline", handleOffline);
     window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibility);
-    void connect();
+    void connectWebSocket();
 
     return () => {
       disposed = true;
       generation += 1;
-      clearTimers();
+      clearSocketTimers();
+      clearPollTimer();
+      abortHttpRequests();
       if (leaveTimer !== null) window.clearTimeout(leaveTimer);
       leaveTimer = null;
-      completeLeave();
-      socketRef.current?.close();
+      completeLeave(false);
+      const socket = socketRef.current;
+      if (socket !== null) closeSocket(socket, "unmount");
       socketRef.current = null;
+      sendRef.current = () => false;
       retryRef.current = () => undefined;
       leaveRef.current = () => Promise.resolve();
       window.removeEventListener("offline", handleOffline);
@@ -363,20 +837,10 @@ export function useRoom(roomId: string): RoomClientView {
     };
   }, [roomId]);
 
-  const send = useCallback((command: RoomCommand): boolean => {
-    const socket = socketRef.current;
-    if (
-      socket?.readyState !== WebSocket.OPEN ||
-      pendingRevisionRef.current !== null
-    ) {
-      return false;
-    }
-    pendingRevisionRef.current = command.expectedRevision;
-    setPending(true);
-    setNotice(null);
-    socket.send(JSON.stringify(command));
-    return true;
-  }, []);
+  const send = useCallback(
+    (command: RoomCommand): boolean => sendRef.current(command),
+    [],
+  );
 
   const sendGameAction = useCallback(
     (payload: JsonValue): boolean => {
@@ -420,6 +884,7 @@ export function useRoom(roomId: string): RoomClientView {
 
   return {
     phase,
+    transport,
     snapshot,
     pending,
     leaving,
