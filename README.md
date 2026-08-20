@@ -4,8 +4,10 @@
 
 - 线上地址：<https://play.ym0v0.com>
 - 服务端权威裁决，旧修订和非法落子不会改变棋局
-- 匿名签名 Cookie 恢复席位
+- 匿名签名 Cookie 恢复席位与游客昵称
 - 每个房间一个 SQLite-backed Durable Object
+- 前两位游客对战，之后进入的游客可实时观战且不能执行玩家操作
+- 全站最多同时存在 10 个房间，废弃房间会立即释放容量
 - WebSocket Hibernation、完整快照重连、手机与键盘操作
 - 可主动退出房间；全部关页后保留 60 秒重连窗口，随后自动废弃旧链接
 - 双方确认复赛并自动交换先手
@@ -13,7 +15,7 @@
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的命令、持久化状态并广播快照。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理一个房间内的命令、持久化状态并向玩家和观众广播快照；单例 `RoomDirectory` Durable Object 原子管理 10 个房间的全局容量。棋种规则通过 `GameRules` 注册表隔离，前端通过对应的 `GameAdapter` 注册表生成首页入口并选择棋盘，因此增加更多棋类不需要修改房间、会话或重连核心。
 
 详细设计与调研见 [`docs/GOMOKU_PLATFORM_PLAN.md`](docs/GOMOKU_PLATFORM_PLAN.md) 和 [`docs/research/GITHUB_SURVEY.md`](docs/research/GITHUB_SURVEY.md)。
 
@@ -47,11 +49,11 @@ npm run test:e2e
 npm run build
 ```
 
-测试覆盖纯规则/房间状态、五子棋与中国象棋规则、真实 workerd Durable Object 与 WebSocket 集成，以及两个独立浏览器身份的邀请、退出与空房回收、断网恢复、完整胜局、复赛和第三人房满流程。
+测试覆盖纯规则/房间状态、五子棋与中国象棋规则、真实 workerd Durable Object、WebSocket/HTTPS 兼容连接、全局房间容量，以及多个独立浏览器身份的昵称、邀请、观战、退出与空房回收、断网恢复、完整胜局和复赛流程。
 
 ## 部署
 
-`wrangler.jsonc` 已配置 Worker、静态资源、SQLite Durable Object 和 Custom Domain `play.ym0v0.com`。
+`wrangler.jsonc` 已配置 Worker、静态资源、两个 SQLite Durable Object 类和 Custom Domain `play.ym0v0.com`。
 
 推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
 

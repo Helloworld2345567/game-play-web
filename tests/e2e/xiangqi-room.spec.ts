@@ -32,6 +32,12 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   expect(overflows).toBe(false);
 }
 
+async function setDisplayName(page: Page, displayName: string): Promise<void> {
+  await page.getByLabel("你的昵称").fill(displayName);
+  await page.getByRole("button", { name: "保存昵称" }).click();
+  await expect(page.getByText("昵称已保存", { exact: true })).toBeVisible();
+}
+
 test("two Guests recover, finish, and rematch a Chinese chess room", async ({ browser }) => {
   const creatorContext = await browser.newContext({
     viewport: { width: 360, height: 800 },
@@ -46,11 +52,13 @@ test("two Guests recover, finish, and rematch a Chinese chess room", async ({ br
 
   try {
     await creator.goto("/");
+    await setDisplayName(creator, "红方玩家");
     await creator.getByRole("button", { name: "创建中国象棋房" }).click();
     await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);
     const inviteUrl = creator.url();
 
     await invitee.goto(inviteUrl);
+    await setDisplayName(invitee, "黑方玩家");
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",
@@ -88,10 +96,13 @@ test("two Guests recover, finish, and rematch a Chinese chess room", async ({ br
     );
 
     await third.goto(inviteUrl);
-    await expect(third.getByRole("heading", { level: 1 })).toContainText(
-      "已经坐满",
+    await expect(third.getByRole("heading", { level: 1 })).toHaveText(
+      "正在观战",
     );
-    await expectNoHorizontalOverflow(creator);
+    await setDisplayName(third, "象棋观众");
+    await expect(third.locator(".xiangqi-board")).toBeVisible();
+    await expect(third.getByRole("button", { name: "认输" })).toHaveCount(0);
+    await expectNoHorizontalOverflow(third);
 
     creator.once("dialog", (dialog) => dialog.accept());
     await creator.getByRole("button", { name: "认输" }).click();
@@ -99,16 +110,25 @@ test("two Guests recover, finish, and rematch a Chinese chess room", async ({ br
       "对手获胜",
     );
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText("你赢了");
+    await expect(third.getByRole("heading", { level: 1 })).toHaveText(
+      "黑方玩家获胜",
+    );
+    await expect(third.getByRole("button", { name: "再来一局" })).toHaveCount(0);
 
     await creator.getByRole("button", { name: "再来一局" }).click();
-    await expect(invitee.getByText("在线 · 已准备", { exact: true })).toBeVisible();
+    await expect(
+      invitee.locator(".seat-card").filter({ hasText: "红方玩家" }),
+    ).toContainText("已准备");
     await invitee.getByRole("button", { name: "再来一局" }).click();
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",
     );
-    await expect(invitee.getByText("红方 · 你", { exact: true })).toBeVisible();
+    await expect(
+      invitee.locator(".seat-card").filter({ hasText: "黑方玩家" }),
+    ).toContainText("红方");
     await expect(invitee.getByText(/第 2 局/u)).toBeVisible();
+    await expect(third.getByText(/第 2 局/u)).toBeVisible();
   } finally {
     await thirdContext.close();
     await inviteeContext.close();

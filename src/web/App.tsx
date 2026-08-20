@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { normalizeDisplayName } from "../shared/display-name";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
   availableGameAdapters,
@@ -16,6 +17,101 @@ import {
 } from "./room-client";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
+const DISPLAY_NAME_STORAGE_KEY = "ym0v0.display-name";
+let memoryDisplayName: string | null = null;
+
+function randomDisplayName(): string {
+  const random = crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
+  return `棋友${String(random % 10_000).padStart(4, "0")}`;
+}
+
+function storeDisplayName(displayName: string): void {
+  memoryDisplayName = displayName;
+  try {
+    localStorage.setItem(DISPLAY_NAME_STORAGE_KEY, displayName);
+  } catch {
+    // Some privacy modes disable localStorage; keep the name for this page.
+  }
+}
+
+function loadDisplayName(): string {
+  if (memoryDisplayName !== null) return memoryDisplayName;
+  try {
+    const stored = normalizeDisplayName(
+      localStorage.getItem(DISPLAY_NAME_STORAGE_KEY),
+    );
+    if (stored !== null) {
+      storeDisplayName(stored);
+      return stored;
+    }
+  } catch {
+    // Fall through to a page-local default when storage is unavailable.
+  }
+  const generated = randomDisplayName();
+  storeDisplayName(generated);
+  return generated;
+}
+
+function DisplayNameEditor({
+  displayName,
+  onSave,
+}: {
+  displayName: string;
+  onSave(displayName: string): void;
+}) {
+  const [draft, setDraft] = useState(displayName);
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(displayName);
+  }, [displayName]);
+
+  return (
+    <form
+      class="display-name-editor"
+      aria-label="设置游客昵称"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const normalized = normalizeDisplayName(draft);
+        if (normalized === null) {
+          setFeedback("昵称需为 1–16 个字符，且不能包含控制字符。");
+          return;
+        }
+        setDraft(normalized);
+        setFeedback("昵称已保存");
+        onSave(normalized);
+      }}
+    >
+      <label for="guest-display-name">你的昵称</label>
+      <div class="display-name-controls">
+        <input
+          id="guest-display-name"
+          name="displayName"
+          value={draft}
+          autocomplete="nickname"
+          aria-describedby="display-name-help display-name-feedback"
+          onInput={(event) => {
+            setDraft(event.currentTarget.value);
+            setFeedback(null);
+          }}
+        />
+        <button class="secondary-button" type="submit">保存昵称</button>
+      </div>
+      <small id="display-name-help">1–16 个字符，保存在此浏览器</small>
+      <span
+        id="display-name-feedback"
+        class={
+          feedback?.startsWith("昵称已")
+            ? "display-name-feedback is-success"
+            : "display-name-feedback"
+        }
+        aria-live="polite"
+      >
+        {feedback}
+      </span>
+    </form>
+  );
+}
 
 function Brand() {
   return (
@@ -26,7 +122,13 @@ function Brand() {
   );
 }
 
-function LandingPage() {
+function LandingPage({
+  displayName,
+  onDisplayNameChange,
+}: {
+  displayName: string;
+  onDisplayNameChange(displayName: string): void;
+}) {
   const [creating, setCreating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,7 +137,7 @@ function LandingPage() {
     setCreating(ruleSetId);
     setError(null);
     try {
-      await ensureBrowserSession();
+      await ensureBrowserSession(displayName);
       const response = await fetch("/api/rooms", {
         method: "POST",
         headers: {
@@ -53,9 +155,14 @@ function LandingPage() {
       };
       if (!response.ok || !body.roomId) throw new Error(body.error);
       location.assign(`/r/${body.roomId}`);
-    } catch {
+    } catch (failure) {
       setCreating(null);
-      setError("建房失败，请检查网络后重试。");
+      setError(
+        failure instanceof Error &&
+          failure.message === "room.capacity_reached"
+          ? "当前已有 10 个房间，请稍后再试。"
+          : "建房失败，请检查网络后重试。",
+      );
     }
   };
 
@@ -68,6 +175,10 @@ function LandingPage() {
         <p class="hero-copy">
           创建私人棋局，把邀请链接发给朋友。没有账号、广告和复杂大厅。
         </p>
+        <DisplayNameEditor
+          displayName={displayName}
+          onSave={onDisplayNameChange}
+        />
         <div class="game-choice-grid" aria-label="选择棋种">
           {availableGameAdapters.map((game, index) => (
             <button
@@ -142,6 +253,18 @@ function mainStatus(
   if (phase !== "online" || snapshot === null) {
     return phaseText(phase, transport);
   }
+  if (snapshot.selfSeat === null) {
+    const outcome = snapshot.position?.outcome ?? null;
+    if (outcome === null) return "正在观战";
+    if (outcome.kind === "draw") return "本局和棋";
+    const winnerName = snapshot.seats[outcome.winner]?.displayName;
+    if (winnerName === null || winnerName === undefined) {
+      return outcome.reason === "checkmate" ? "本局以绝杀结束" : "本局已分胜负";
+    }
+    return outcome.reason === "checkmate"
+      ? `${winnerName}绝杀获胜`
+      : `${winnerName}获胜`;
+  }
   if (snapshot.position === null) return "等待对手加入";
   const outcome = snapshot.position.outcome;
   if (outcome !== null) {
@@ -160,12 +283,16 @@ function mainStatus(
 
 function RoomPage({
   roomId,
+  displayName,
+  onDisplayNameChange,
   onExit,
 }: {
   roomId: string;
+  displayName: string;
+  onDisplayNameChange(displayName: string): void;
   onExit(): void;
 }) {
-  const client = useRoom(roomId);
+  const client = useRoom(roomId, displayName);
   const snapshot = client.snapshot;
   const adapter =
     snapshot === null
@@ -182,18 +309,22 @@ function RoomPage({
     snapshot?.seats["seat-a"]?.occupied === true &&
     snapshot.seats["seat-b"]?.occupied === true;
   const outcome = snapshot?.position?.outcome ?? null;
+  const selfSeat = snapshot?.selfSeat ?? null;
+  const isPlayer = selfSeat !== null;
   const canPlace =
     client.phase === "online" &&
     !client.pending &&
     !client.leaving &&
     adapter !== null &&
+    isPlayer &&
     bothOccupied &&
-    snapshot?.position?.turn === snapshot.selfSeat &&
+    snapshot?.position?.turn === selfSeat &&
     outcome === null;
   const ownReady =
-    snapshot?.selfSeat !== null &&
-    snapshot?.selfSeat !== undefined &&
-    snapshot.seats[snapshot.selfSeat]?.rematchReady === true;
+    snapshot !== null &&
+    selfSeat !== null &&
+    snapshot.seats[selfSeat]?.rematchReady === true;
+  const spectators = snapshot?.spectators ?? [];
 
   const share = async () => {
     const shareData = {
@@ -272,6 +403,11 @@ function RoomPage({
           </h1>
         </header>
 
+        <DisplayNameEditor
+          displayName={displayName}
+          onSave={onDisplayNameChange}
+        />
+
         <div class="seat-strip">
           {(["seat-a", "seat-b"] as const).map((seatId) => {
             const seat = snapshot?.seats[seatId];
@@ -284,9 +420,16 @@ function RoomPage({
                   aria-hidden="true"
                 />
                 <span>
-                  <strong>{presentation.label}{isSelf ? " · 你" : ""}</strong>
+                  <strong>
+                    {seat?.displayName ?? (seat?.occupied ? "棋友" : "等待加入")}
+                    {isSelf ? " · 你" : ""}
+                  </strong>
                   <small>
-                    {!seat?.occupied ? "等待加入" : seat.online ? "在线" : "暂时离线"}
+                    {presentation.label} · {seat?.occupied
+                      ? seat.online
+                        ? "在线"
+                        : "暂时离线"
+                      : "等待加入"}
                     {seat?.rematchReady ? " · 已准备" : ""}
                   </small>
                 </span>
@@ -294,6 +437,25 @@ function RoomPage({
             );
           })}
         </div>
+
+        <section
+          class="spectator-panel"
+          aria-label={`观众，共 ${spectators.length} 人`}
+        >
+          <strong>观战 {spectators.length}</strong>
+          <div class="spectator-list">
+            {spectators.length === 0 ? (
+              <span class="spectator-empty">暂无观众</span>
+            ) : spectators.map((spectator, index) => (
+              <span
+                class={`spectator-chip ${spectator.isSelf ? "is-self" : ""}`}
+                key={`${spectator.displayName}-${index}`}
+              >
+                {spectator.displayName}{spectator.isSelf ? " · 你" : ""}
+              </span>
+            ))}
+          </div>
+        </section>
 
         {unsupportedGame ? (
           <UnsupportedGame
@@ -340,7 +502,11 @@ function RoomPage({
           >
             {client.leaving ? "正在退出…" : "退出房间"}
           </button>
-          {adapter && snapshot?.position && outcome === null && bothOccupied && (
+          {isPlayer &&
+            adapter &&
+            snapshot?.position &&
+            outcome === null &&
+            bothOccupied && (
             <button
               class="danger-button"
               disabled={
@@ -353,7 +519,7 @@ function RoomPage({
               认输
             </button>
           )}
-          {adapter && outcome && (
+          {isPlayer && adapter && outcome && (
             <button
               class="primary-button"
               disabled={
@@ -393,6 +559,11 @@ function NotFoundPage() {
 
 export function App() {
   const [path, setPath] = useState(location.pathname);
+  const [displayName, setDisplayName] = useState(loadDisplayName);
+  const saveDisplayName = (nextDisplayName: string) => {
+    storeDisplayName(nextDisplayName);
+    setDisplayName(nextDisplayName);
+  };
   useEffect(() => {
     const updatePath = () => setPath(location.pathname);
     window.addEventListener("popstate", updatePath);
@@ -400,13 +571,20 @@ export function App() {
   }, []);
 
   if (path === "/" || path === "") {
-    return <LandingPage />;
+    return (
+      <LandingPage
+        displayName={displayName}
+        onDisplayNameChange={saveDisplayName}
+      />
+    );
   }
   const match = path.match(ROOM_PATH);
   if (match?.[1]) {
     return (
       <RoomPage
         roomId={match[1]}
+        displayName={displayName}
+        onDisplayNameChange={saveDisplayName}
         onExit={() => {
           history.replaceState(null, "", "/");
           setPath("/");

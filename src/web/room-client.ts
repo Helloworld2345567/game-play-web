@@ -101,6 +101,7 @@ function humanizeError(
     "room.expired": "房间不存在或已经过期。",
     "room.revision_mismatch": "局面已更新，已为你重新同步。",
     "room.not_a_seat": "你没有这个房间的操作席位。",
+    "room.spectator_read_only": "观众只能观看棋局，不能执行玩家操作。",
     "room.waiting_for_opponent": "请等待对手加入。",
     "room.game_finished": "本局已经结束。",
     "room.game_in_progress": "对局结束后才能准备复赛。",
@@ -119,10 +120,17 @@ function humanizeError(
   return "操作未完成，请重试。";
 }
 
-export async function ensureBrowserSession(signal?: AbortSignal): Promise<void> {
+export async function ensureBrowserSession(
+  displayName: string,
+  signal?: AbortSignal,
+): Promise<void> {
   const response = await fetch("/api/session", {
     method: "POST",
-    headers: { Accept: "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ displayName }),
     signal,
   });
   if (!response.ok) throw new Error("session_failed");
@@ -232,7 +240,7 @@ function permanentHttpFailureView(error: unknown): {
   };
 }
 
-export function useRoom(roomId: string): RoomClientView {
+export function useRoom(roomId: string, displayName: string): RoomClientView {
   const [phase, setPhase] = useState<ConnectionPhase>("connecting");
   const [transport, setTransport] = useState<RoomTransport>("websocket");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
@@ -286,7 +294,7 @@ export function useRoom(roomId: string): RoomClientView {
     const connectionId = connection.id;
 
     const ensureSession = async (signal?: AbortSignal) => {
-      sessionReady ??= ensureBrowserSession(signal);
+      sessionReady ??= ensureBrowserSession(displayName, signal);
       try {
         await sessionReady;
       } catch (error) {
@@ -835,7 +843,7 @@ export function useRoom(roomId: string): RoomClientView {
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [roomId]);
+  }, [displayName, roomId]);
 
   const send = useCallback(
     (command: RoomCommand): boolean => sendRef.current(command),

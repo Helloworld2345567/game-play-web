@@ -22,6 +22,12 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   expect(overflows).toBe(false);
 }
 
+async function setDisplayName(page: Page, displayName: string): Promise<void> {
+  await page.getByLabel("你的昵称").fill(displayName);
+  await page.getByRole("button", { name: "保存昵称" }).click();
+  await expect(page.getByText("昵称已保存", { exact: true })).toBeVisible();
+}
+
 test("two Guests recover, finish a Game, and swap first move in a rematch", async ({ browser }) => {
   const creatorContext = await browser.newContext({
     viewport: { width: 360, height: 800 },
@@ -36,6 +42,7 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
 
   try {
     await creator.goto("/");
+    await setDisplayName(creator, "甲方");
     await expect(creator.getByRole("heading", { level: 1 })).toContainText(
       "一条链接",
     );
@@ -44,6 +51,7 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
     const inviteUrl = creator.url();
 
     await invitee.goto(inviteUrl);
+    await setDisplayName(invitee, "乙方");
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",
@@ -54,13 +62,19 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
     ]);
 
     await third.goto(inviteUrl);
-    await expect(third.getByRole("heading", { level: 1 })).toContainText(
-      "已经坐满",
+    await expect(third.getByRole("heading", { level: 1 })).toHaveText(
+      "正在观战",
     );
-    await thirdContext.close();
+    await setDisplayName(third, "观众丙");
+    await expect(creator.getByText("观众丙", { exact: true })).toBeVisible();
+    await expect(third.getByRole("button", { name: "认输" })).toHaveCount(0);
+    await expectNoHorizontalOverflow(third);
 
     await placeStone(creator, 3, 7);
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText("轮到你");
+    await expect(third.locator(".board-last-move")).toContainText(
+      "黑方落在第 4 列、第 8 行",
+    );
 
     await creatorContext.setOffline(true);
     await expect(creator.locator(".connection-pill")).toContainText("设备已离线");
@@ -94,13 +108,19 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "对手获胜",
     );
+    await expect(third.getByRole("heading", { level: 1 })).toHaveText(
+      "甲方获胜",
+    );
+    await expect(third.getByRole("button", { name: "再来一局" })).toHaveCount(0);
     await Promise.all([
       expectNoHorizontalOverflow(creator),
       expectNoHorizontalOverflow(invitee),
     ]);
 
     await creator.getByRole("button", { name: "再来一局" }).click();
-    await expect(invitee.getByText("在线 · 已准备", { exact: true })).toBeVisible();
+    await expect(
+      invitee.locator(".seat-card").filter({ hasText: "甲方" }),
+    ).toContainText("已准备");
     await invitee.getByRole("button", { name: "再来一局" }).click();
 
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText("轮到你");
@@ -108,6 +128,10 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
       "等待对手落子",
     );
     await expect(invitee.getByText(/第 2 局/u)).toBeVisible();
+    await expect(third.getByText(/第 2 局/u)).toBeVisible();
+    await expect(third.getByRole("heading", { level: 1 })).toHaveText(
+      "正在观战",
+    );
   } finally {
     if (thirdContext.pages().length > 0) await thirdContext.close();
     await inviteeContext.close();

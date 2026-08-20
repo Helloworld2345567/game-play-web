@@ -58,7 +58,9 @@ test("canceling Exit keeps the room, while both explicit exits retire it", async
     await expect(creator.getByRole("heading", { level: 1 })).toContainText(
       "一条链接",
     );
-    await expect(invitee.getByText("暂时离线", { exact: true })).toBeVisible();
+    await expect(
+      invitee.locator(".seat-card").filter({ hasText: "暂时离线" }),
+    ).toBeVisible();
 
     const inviteeExit = invitee.getByRole("button", { name: "退出房间" });
     await answerConfirmation(invitee, inviteeExit, "accept");

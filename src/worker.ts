@@ -1,10 +1,17 @@
 import { GameRoom, type WorkerEnv } from "./game-room";
+import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
 import { isSupportedGame } from "./games/registry";
-import { ensureGuestSession, readGuestId } from "./worker/session";
+import { normalizeDisplayName } from "./shared/display-name";
+import {
+  ensureGuestSession,
+  readGuestSession,
+  type GuestSession,
+} from "./worker/session";
 
-export { GameRoom };
+export { GameRoom, RoomDirectory };
 
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
+const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
 const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
@@ -99,12 +106,45 @@ async function readSmallJson(request: Request): Promise<unknown | null> {
   }
 }
 
+async function readRequestedDisplayName(
+  request: Request,
+): Promise<{ ok: true; displayName?: string } | { ok: false }> {
+  const text = await request.text();
+  if (text.length === 0) return { ok: true };
+  if (new TextEncoder().encode(text).byteLength > MAX_CREATE_BODY_BYTES) {
+    return { ok: false };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { ok: false };
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false };
+  }
+  const normalized = normalizeDisplayName(
+    (value as Record<string, unknown>).displayName,
+  );
+  return normalized === null
+    ? { ok: false }
+    : { ok: true, displayName: normalized };
+}
+
+function setInternalGuestHeaders(headers: Headers, guest: GuestSession): void {
+  headers.set(INTERNAL_GUEST_HEADER, guest.guestId);
+  headers.set(
+    INTERNAL_DISPLAY_NAME_HEADER,
+    encodeURIComponent(guest.displayName),
+  );
+}
+
 async function createRoom(
   request: Request,
   env: WorkerEnv,
-  guestId: string,
+  guest: GuestSession,
 ): Promise<Response> {
-  if (!allowRoomCreation(request, guestId)) {
+  if (!allowRoomCreation(request, guest.guestId)) {
     return json({ error: "room.rate_limited" }, { status: 429 });
   }
   const value = await readSmallJson(request);
@@ -122,26 +162,47 @@ async function createRoom(
     return json({ error: "room.unsupported_game" }, { status: 400 });
   }
 
+  const directory = env.ROOM_DIRECTORY.getByName(
+    ROOM_DIRECTORY_NAME,
+    { locationHint: "apac" },
+  );
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const roomId = randomRoomId();
+    const reservation = await directory.reserve(roomId);
+    if (!reservation.ok) {
+      if (reservation.reason === "capacity") {
+        return json({ error: "room.capacity_reached" }, { status: 409 });
+      }
+      continue;
+    }
     const id = env.ROOMS.idFromName(roomId);
     const stub = env.ROOMS.get(id, { locationHint: "apac" });
-    const initialized = await stub.fetch(
-      new Request("https://room.internal/initialize", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_GUEST_HEADER]: guestId,
-        },
-        body: JSON.stringify({ roomId, gameType, ruleSetId }),
-      }),
-    );
+    const headers = new Headers({ "Content-Type": "application/json" });
+    setInternalGuestHeaders(headers, guest);
+    let initialized: Response;
+    try {
+      initialized = await stub.fetch(
+        new Request("https://room.internal/initialize", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            roomId,
+            gameType,
+            ruleSetId,
+            capacityLeaseId: reservation.leaseId,
+          }),
+        }),
+      );
+    } catch {
+      return json({ error: "room.create_failed" }, { status: 500 });
+    }
     if (initialized.ok) {
       return json(
         { roomId, joinUrl: `${new URL(request.url).origin}/r/${roomId}` },
         { status: 201 },
       );
     }
+    await directory.release(roomId, reservation.leaseId);
     if (initialized.status !== 409) break;
   }
   return json({ error: "room.create_failed" }, { status: 500 });
@@ -150,7 +211,7 @@ async function createRoom(
 async function forwardWebSocket(
   request: Request,
   env: WorkerEnv,
-  guestId: string,
+  guest: GuestSession,
   roomId: string,
 ): Promise<Response> {
   if (
@@ -161,7 +222,7 @@ async function forwardWebSocket(
   }
   const headers = new Headers();
   headers.set("Upgrade", "websocket");
-  headers.set(INTERNAL_GUEST_HEADER, guestId);
+  setInternalGuestHeaders(headers, guest);
   const id = env.ROOMS.idFromName(roomId);
   const stub = env.ROOMS.get(id, { locationHint: "apac" });
   return stub.fetch(
@@ -172,7 +233,7 @@ async function forwardWebSocket(
 async function forwardRoomHttp(
   request: Request,
   env: WorkerEnv,
-  guestId: string,
+  guest: GuestSession,
   roomId: string,
   action: "sync" | "command" | "leave",
 ): Promise<Response> {
@@ -185,13 +246,14 @@ async function forwardRoomHttp(
   }
   const id = env.ROOMS.idFromName(roomId);
   const stub = env.ROOMS.get(id, { locationHint: "apac" });
+  const internalHeaders = new Headers({
+    "Content-Type": "application/json",
+  });
+  setInternalGuestHeaders(internalHeaders, guest);
   const response = await stub.fetch(
     new Request(`https://room.internal/${action}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        [INTERNAL_GUEST_HEADER]: guestId,
-      },
+      headers: internalHeaders,
       body,
     }),
   );
@@ -220,25 +282,36 @@ export default {
     }
 
     if (url.pathname === "/api/session" && request.method === "POST") {
-      const session = await ensureGuestSession(request, env.SESSION_SECRET);
+      const requested = await readRequestedDisplayName(request);
+      if (!requested.ok) {
+        return json(
+          { error: "profile.invalid_display_name" },
+          { status: 400 },
+        );
+      }
+      const session = await ensureGuestSession(
+        request,
+        env.SESSION_SECRET,
+        requested.displayName,
+      );
       return json(
-        { ok: true },
+        { ok: true, displayName: session.displayName },
         { headers: { "Set-Cookie": session.setCookie } },
       );
     }
 
-    const guestId = await readGuestId(request, env.SESSION_SECRET);
-    if (guestId === null) {
+    const guest = await readGuestSession(request, env.SESSION_SECRET);
+    if (guest === null) {
       return json({ error: "session.required" }, { status: 401 });
     }
     if (url.pathname === "/api/rooms" && request.method === "POST") {
-      return createRoom(request, env, guestId);
+      return createRoom(request, env, guest);
     }
     const match = url.pathname.match(
       /^\/api\/rooms\/([A-Za-z0-9_-]+)\/websocket$/u,
     );
     if (match?.[1]) {
-      return forwardWebSocket(request, env, guestId, match[1]);
+      return forwardWebSocket(request, env, guest, match[1]);
     }
     const httpMatch = url.pathname.match(
       /^\/api\/rooms\/([A-Za-z0-9_-]+)\/(sync|command|leave)$/u,
@@ -247,7 +320,7 @@ export default {
       return forwardRoomHttp(
         request,
         env,
-        guestId,
+        guest,
         httpMatch[1],
         httpMatch[2] as "sync" | "command" | "leave",
       );

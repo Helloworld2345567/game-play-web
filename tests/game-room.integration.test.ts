@@ -81,13 +81,18 @@ const liveSockets = new Set<WebSocket>();
 async function connect(
   stub: DurableObjectStub<GameRoom>,
   guestId: string,
+  displayName?: string,
 ): Promise<TestConnection> {
+  const headers = new Headers({
+    Upgrade: "websocket",
+    "X-Internal-Guest-Id": guestId,
+  });
+  if (displayName !== undefined) {
+    headers.set("X-Internal-Display-Name", encodeURIComponent(displayName));
+  }
   const response = await stub.fetch(
     new Request("https://room.internal/websocket", {
-      headers: {
-        Upgrade: "websocket",
-        "X-Internal-Guest-Id": guestId,
-      },
+      headers,
     }),
   );
   expect(response.status).toBe(101);
@@ -110,16 +115,24 @@ async function initializeRoom(
   creatorGuestId = "guest-creator",
   gameType = "gomoku",
   ruleSetId = "gomoku.freestyle15.v1",
+  creatorDisplayName?: string,
 ): Promise<DurableObjectStub<GameRoom>> {
   const testEnv = env as unknown as TestEnv;
   const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "X-Internal-Guest-Id": creatorGuestId,
+  });
+  if (creatorDisplayName !== undefined) {
+    headers.set(
+      "X-Internal-Display-Name",
+      encodeURIComponent(creatorDisplayName),
+    );
+  }
   const initialized = await stub.fetch(
     new Request("https://room.internal/initialize", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Internal-Guest-Id": creatorGuestId,
-      },
+      headers,
       body: JSON.stringify({
         roomId,
         gameType,
@@ -279,6 +292,71 @@ describe("GameRoom Durable Object", () => {
       revision: 2,
       position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
     });
+  });
+
+  it("admits an HTTP client as a Spectator after both Seats are occupied", async () => {
+    const { stub, creator } = await startRoom("room-http-spectator");
+
+    const joined = await postRoomHttp(stub, "sync", "guest-spectator", {
+      v: 1,
+      connectionId: "http-spectator-client-01",
+    });
+
+    expect(joined).toMatchObject({
+      status: 200,
+      message: {
+        type: "snapshot",
+        revision: 1,
+        selfSeat: null,
+        seats: {
+          "seat-a": { occupied: true },
+          "seat-b": { occupied: true },
+        },
+      },
+    });
+
+    const accepted = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+    await accepted;
+    const observed = await postRoomHttp(stub, "sync", "guest-spectator", {
+      v: 1,
+      connectionId: "http-spectator-client-01",
+    });
+    expect(observed.message).toMatchObject({
+      revision: 2,
+      selfSeat: null,
+      position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
+    });
+  });
+
+  it("rejects every player-only HTTP command from a Spectator", async () => {
+    const { stub } = await startRoom("room-http-spectator-read-only");
+    const connectionId = "http-spectator-readonly";
+    await postRoomHttp(stub, "sync", "guest-spectator", {
+      v: 1,
+      connectionId,
+    });
+
+    const commands = [
+      placeCommand(1, 7, 7),
+      { v: 1, type: "resign", expectedRevision: 1 },
+      { v: 1, type: "rematch_ready", expectedRevision: 1, ready: true },
+    ];
+    for (const command of commands) {
+      const response = await postRoomHttp(
+        stub,
+        "command",
+        "guest-spectator",
+        { v: 1, connectionId, command },
+      );
+      expect(response.message).toMatchObject({
+        type: "error",
+        code: "room.spectator_read_only",
+        snapshot: { revision: 1, selfSeat: null },
+      });
+    }
   });
 
   it("discards the Room when its last HTTP client explicitly leaves", async () => {
@@ -725,6 +803,40 @@ describe("GameRoom Durable Object", () => {
     );
   });
 
+  it("does not let an HTTP Spectator keep a Room occupied", async () => {
+    const { stub, creator, invitee } = await startRoom(
+      "room-http-spectator-vacancy",
+    );
+    await postRoomHttp(stub, "sync", "guest-spectator", {
+      v: 1,
+      connectionId: "http-spectator-vacancy",
+    });
+
+    await Promise.all([
+      closeSocket(creator.socket),
+      closeSocket(invitee.socket),
+    ]);
+
+    await expect.poll(() =>
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<number>("vacantSince"),
+      ),
+    ).toBeTypeOf("number");
+    const vacantSince = await runInDurableObject(
+      stub,
+      (_instance, state) => state.storage.get<number>("vacantSince"),
+    );
+    await postRoomHttp(stub, "sync", "guest-spectator", {
+      v: 1,
+      connectionId: "http-spectator-vacancy",
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<number>("vacantSince"),
+      ),
+    ).resolves.toBe(vacantSince);
+  });
+
   it("preserves a vacant Room when a Guest reconnects during the grace period", async () => {
     const { stub, creator, invitee } = await startRoom("room-grace-reconnect");
     await Promise.all([
@@ -867,6 +979,159 @@ describe("GameRoom Durable Object", () => {
 
     creator.socket.close(1000, "test complete");
     invitee.socket.close(1000, "test complete");
+  });
+
+  it("admits a third Guest as a Spectator without changing either Seat", async () => {
+    const { stub } = await startRoom("room-spectator-third");
+
+    const spectator = await connect(stub, "guest-spectator");
+
+    expect(spectator.firstMessage).toMatchObject({
+      type: "snapshot",
+      revision: 1,
+      selfSeat: null,
+      seats: {
+        "seat-a": { occupied: true },
+        "seat-b": { occupied: true },
+      },
+      position: { turn: "seat-a", outcome: null },
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<StoredRoom>("room"),
+      ),
+    ).resolves.toMatchObject({
+      revision: 1,
+      seats: {
+        "seat-a": { guestId: "guest-creator" },
+        "seat-b": { guestId: "guest-invitee" },
+      },
+    });
+  });
+
+  it("shows each authenticated player's Display Name on their Seat", async () => {
+    const stub = await initializeRoom(
+      "room-display-names",
+      "guest-creator",
+      "gomoku",
+      "gomoku.freestyle15.v1",
+      "甲方",
+    );
+    const creator = await connect(stub, "guest-creator", "甲方");
+    const invitee = await connect(stub, "guest-invitee", "乙方");
+
+    expect(invitee.firstMessage).toMatchObject({
+      type: "snapshot",
+      seats: {
+        "seat-a": { displayName: "甲方" },
+        "seat-b": { displayName: "乙方" },
+      },
+    });
+    await expect(
+      creator.inbox.nextMatching(
+        (message) =>
+          message.type === "snapshot" &&
+          (message.seats as Record<string, { displayName?: string }>)[
+            "seat-b"
+          ]?.displayName === "乙方",
+      ),
+    ).resolves.toMatchObject({
+      seats: {
+        "seat-a": { displayName: "甲方" },
+        "seat-b": { displayName: "乙方" },
+      },
+    });
+  });
+
+  it("shows each online Spectator once without exposing their Guest ID", async () => {
+    const { stub, creator } = await startRoom("room-spectator-names");
+    const spectator = await connect(
+      stub,
+      "guest-private-spectator",
+      "观众丙",
+    );
+
+    expect(spectator.firstMessage).toMatchObject({
+      selfSeat: null,
+      spectators: [{ displayName: "观众丙", isSelf: true }],
+    });
+    expect(JSON.stringify(spectator.firstMessage)).not.toContain(
+      "guest-private-spectator",
+    );
+    await expect(
+      creator.inbox.nextMatching(
+        (message) =>
+          Array.isArray(message.spectators) &&
+          message.spectators.some(
+            (spectator) =>
+              typeof spectator === "object" &&
+              spectator !== null &&
+              (spectator as { displayName?: string }).displayName ===
+                "观众丙",
+          ),
+      ),
+    ).resolves.toMatchObject({
+      spectators: [{ displayName: "观众丙", isSelf: false }],
+    });
+
+    const secondTab = await connect(
+      stub,
+      "guest-private-spectator",
+      "观众丙",
+    );
+    expect(secondTab.firstMessage).toMatchObject({
+      spectators: [{ displayName: "观众丙", isSelf: true }],
+    });
+  });
+
+  it("rejects a game Action from a Spectator without changing the Game", async () => {
+    const { stub } = await startRoom("room-spectator-read-only");
+    const spectator = await connect(stub, "guest-spectator");
+    const rejection = spectator.inbox.nextMatching(
+      (message) => message.type === "error",
+    );
+
+    spectator.socket.send(
+      JSON.stringify({
+        ...placeCommand(1, 7, 7),
+        guestId: "guest-creator",
+        seat: "seat-a",
+      }),
+    );
+
+    await expect(rejection).resolves.toMatchObject({
+      type: "error",
+      code: "room.spectator_read_only",
+      snapshot: { revision: 1, selfSeat: null },
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<StoredRoom>("room"),
+      ),
+    ).resolves.toMatchObject({
+      revision: 1,
+      position: { data: { moveCount: 0 } },
+    });
+  });
+
+  it("broadcasts each accepted Action to connected Spectators", async () => {
+    const { stub, creator } = await startRoom("room-spectator-broadcast");
+    const spectator = await connect(stub, "guest-spectator");
+    const observed = spectator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+
+    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+
+    await expect(observed).resolves.toMatchObject({
+      type: "snapshot",
+      revision: 2,
+      selfSeat: null,
+      position: {
+        turn: "seat-b",
+        data: { moveCount: 1, lastMove: { x: 7, y: 7, stone: 1 } },
+      },
+    });
   });
 
   it("keeps each authenticated Guest and Seat in its hibernatable attachment", async () => {

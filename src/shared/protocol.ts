@@ -39,6 +39,12 @@ export interface RoomSeatView {
   occupied: boolean;
   online: boolean;
   rematchReady: boolean;
+  displayName: string | null;
+}
+
+export interface RoomSpectatorView {
+  displayName: string;
+  isSelf: boolean;
 }
 
 export interface RoomSnapshot {
@@ -51,6 +57,7 @@ export interface RoomSnapshot {
   round: number;
   selfSeat: string | null;
   seats: Record<string, RoomSeatView>;
+  spectators: RoomSpectatorView[];
   position: import("../core/game-rules").RulePosition | null;
 }
 

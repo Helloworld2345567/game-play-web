@@ -8,11 +8,19 @@
       {
         "name": "ROOMS",
         "class_name": "GameRoom"
+      },
+      {
+        "name": "ROOM_DIRECTORY",
+        "class_name": "RoomDirectory"
       }
     ]
   },
   "exports": {
     "GameRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "RoomDirectory": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -21,4 +29,3 @@
     "SESSION_SECRET": "integration-test-secret-with-enough-entropy"
   }
 }
-

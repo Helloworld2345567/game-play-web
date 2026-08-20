@@ -42,10 +42,21 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
   const inviteeContext = await browser.newContext({
     extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.101" },
   });
+  const spectatorContext = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.101" },
+  });
   const creator = await creatorContext.newPage();
   const invitee = await inviteeContext.newPage();
-  const [creatorWebSocketAttempts, inviteeWebSocketAttempts] =
-    await Promise.all([blockWebSockets(creator), blockWebSockets(invitee)]);
+  const spectator = await spectatorContext.newPage();
+  const [
+    creatorWebSocketAttempts,
+    inviteeWebSocketAttempts,
+    spectatorWebSocketAttempts,
+  ] = await Promise.all([
+    blockWebSockets(creator),
+    blockWebSockets(invitee),
+    blockWebSockets(spectator),
+  ]);
 
   try {
     await creator.goto("/");
@@ -54,6 +65,7 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
     const inviteUrl = creator.url();
 
     await invitee.goto(inviteUrl);
+    await spectator.goto(inviteUrl);
 
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
       "轮到你",
@@ -64,6 +76,13 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
     await expect(creator.locator(".connection-pill")).toContainText(
       "兼容连接",
     );
+    await expect(spectator.locator(".connection-pill")).toContainText(
+      "兼容连接",
+    );
+    await expect(spectator.getByRole("heading", { level: 1 })).toHaveText(
+      "正在观战",
+    );
+    await expect(spectator.getByRole("button", { name: "认输" })).toHaveCount(0);
 
     await placeStone(creator, 7, 7);
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
@@ -73,6 +92,9 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
       "轮到你",
     );
     await expect(invitee.locator(".board-last-move")).toContainText(
+      "黑方落在第 8 列、第 8 行",
+    );
+    await expect(spectator.locator(".board-last-move")).toContainText(
       "黑方落在第 8 列、第 8 行",
     );
 
@@ -92,7 +114,9 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
     await creator.waitForTimeout(3_000);
     expect(creatorWebSocketAttempts()).toBe(1);
     expect(inviteeWebSocketAttempts()).toBe(1);
+    expect(spectatorWebSocketAttempts()).toBe(1);
   } finally {
+    await spectatorContext.close();
     await inviteeContext.close();
     await creatorContext.close();
   }
