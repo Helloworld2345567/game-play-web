@@ -268,7 +268,148 @@ interface PendingBrowserSession {
   request: Promise<void>;
 }
 
+const BROWSER_SESSION_LOCK_NAME = "ym0v0.guest-session";
+const BROWSER_SESSION_TIMEOUT_MS = 15_000;
+const BROWSER_IDENTITY_DATABASE = "ym0v0-browser-identity-v1";
+const BROWSER_IDENTITY_STORE = "identity";
+const BROWSER_BOOTSTRAP_KEY = "bootstrap-id";
+const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
+const BROWSER_BOOTSTRAP_LIFETIME_MS = 60_000;
 let pendingBrowserSession: PendingBrowserSession | null = null;
+
+function browserBootstrapId(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(undefined);
+      return;
+    }
+    let finished = false;
+    let database: IDBDatabase | undefined;
+    const finish = (value?: string) => {
+      if (finished) return;
+      finished = true;
+      database?.close();
+      resolve(value);
+    };
+    const fallbackTimer = setTimeout(() => finish(), 2_000);
+    const finishAndClear = (value?: string) => {
+      clearTimeout(fallbackTimer);
+      finish(value);
+    };
+    let openRequest: IDBOpenDBRequest;
+    try {
+      openRequest = indexedDB.open(BROWSER_IDENTITY_DATABASE, 1);
+    } catch {
+      finishAndClear();
+      return;
+    }
+    openRequest.onupgradeneeded = () => {
+      const upgradeDatabase = openRequest.result;
+      if (!upgradeDatabase.objectStoreNames.contains(BROWSER_IDENTITY_STORE)) {
+        upgradeDatabase.createObjectStore(BROWSER_IDENTITY_STORE);
+      }
+    };
+    openRequest.onerror = () => finishAndClear();
+    openRequest.onblocked = () => finishAndClear();
+    openRequest.onsuccess = () => {
+      database = openRequest.result;
+      if (finished) {
+        database.close();
+        return;
+      }
+      let transaction: IDBTransaction;
+      try {
+        transaction = database.transaction(
+          BROWSER_IDENTITY_STORE,
+          "readwrite",
+        );
+      } catch {
+        finishAndClear();
+        return;
+      }
+      const store = transaction.objectStore(BROWSER_IDENTITY_STORE);
+      const readRequest = store.get(BROWSER_BOOTSTRAP_KEY);
+      let selectedId: string | undefined;
+      readRequest.onsuccess = () => {
+        const existing = readRequest.result;
+        const now = Date.now();
+        if (
+          isRecord(existing) &&
+          typeof existing.id === "string" &&
+          BROWSER_BOOTSTRAP_ID_PATTERN.test(existing.id) &&
+          typeof existing.expiresAt === "number" &&
+          Number.isSafeInteger(existing.expiresAt) &&
+          existing.expiresAt > now
+        ) {
+          selectedId = existing.id;
+        } else {
+          selectedId = crypto.randomUUID();
+          store.put(
+            {
+              id: selectedId,
+              expiresAt: now + BROWSER_BOOTSTRAP_LIFETIME_MS,
+            },
+            BROWSER_BOOTSTRAP_KEY,
+          );
+        }
+      };
+      transaction.oncomplete = () => finishAndClear(selectedId);
+      transaction.onerror = () => finishAndClear();
+      transaction.onabort = () => finishAndClear();
+    };
+  });
+}
+
+async function postBrowserSession(
+  displayName: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const requestController = new AbortController();
+  const abortRequest = () => requestController.abort(signal.reason);
+  if (signal.aborted) abortRequest();
+  else signal.addEventListener("abort", abortRequest, { once: true });
+  const timeout = setTimeout(
+    () =>
+      requestController.abort(
+        new DOMException("Session request timed out", "TimeoutError"),
+      ),
+    BROWSER_SESSION_TIMEOUT_MS,
+  );
+  const requestSignal = requestController.signal;
+  const bootstrapId = await browserBootstrapId();
+  const send = async () => {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        displayName,
+        ...(bootstrapId === undefined ? {} : { bootstrapId }),
+      }),
+      signal: requestSignal,
+    });
+    if (!response.ok) throw new Error("session_failed");
+  };
+  try {
+    const locks = typeof navigator === "undefined"
+      ? undefined
+      : navigator.locks;
+    if (locks === undefined) {
+      await send();
+      return;
+    }
+    await locks.request(
+      BROWSER_SESSION_LOCK_NAME,
+      { mode: "exclusive", signal: requestSignal },
+      send,
+    );
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", abortRequest);
+  }
+}
 
 function startBrowserSessionRequest(displayName: string): Promise<void> {
   if (pendingBrowserSession?.displayName === displayName) {
@@ -276,18 +417,7 @@ function startBrowserSessionRequest(displayName: string): Promise<void> {
   }
   pendingBrowserSession?.controller.abort();
   const controller = new AbortController();
-  const request = (async () => {
-    const response = await fetch("/api/session", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ displayName }),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error("session_failed");
-  })();
+  const request = postBrowserSession(displayName, controller.signal);
   const pending = { displayName, controller, request };
   pendingBrowserSession = pending;
   const clear = () => {

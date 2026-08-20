@@ -56,8 +56,8 @@ describe("RoomDirectory Durable Object", () => {
   it("counts one online Guest once across multiple browser presences", async () => {
     const stub = directory();
 
-    await stub.heartbeat("guest-one", crypto.randomUUID());
-    await stub.heartbeat("guest-one", crypto.randomUUID());
+    await stub.heartbeat("guest-one", crypto.randomUUID(), 1);
+    await stub.heartbeat("guest-one", crypto.randomUUID(), 1);
 
     await expect(stub.stats()).resolves.toEqual({
       onlineGuests: 1,
@@ -68,8 +68,8 @@ describe("RoomDirectory Durable Object", () => {
   it("counts different online Guests separately", async () => {
     const stub = directory();
 
-    await stub.heartbeat("guest-one", crypto.randomUUID());
-    await stub.heartbeat("guest-two", crypto.randomUUID());
+    await stub.heartbeat("guest-one", crypto.randomUUID(), 1);
+    await stub.heartbeat("guest-two", crypto.randomUUID(), 1);
 
     await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 2 });
   });
@@ -78,49 +78,77 @@ describe("RoomDirectory Durable Object", () => {
     const stub = directory();
     const firstPresenceId = crypto.randomUUID();
     const secondPresenceId = crypto.randomUUID();
-    await stub.heartbeat("guest-one", firstPresenceId);
-    await stub.heartbeat("guest-one", secondPresenceId);
+    await stub.heartbeat("guest-one", firstPresenceId, 1);
+    await stub.heartbeat("guest-one", secondPresenceId, 1);
 
-    await stub.leavePresence("guest-one", firstPresenceId);
+    await stub.leavePresence("guest-one", firstPresenceId, 2);
 
     await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 1 });
 
-    await stub.leavePresence("guest-one", secondPresenceId);
+    await stub.leavePresence("guest-one", secondPresenceId, 2);
 
     await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+  });
+
+  it("applies heartbeat and leave requests in page sequence order", async () => {
+    const stub = directory();
+    const presenceId = crypto.randomUUID();
+    await stub.heartbeat("guest-one", presenceId, 1);
+    await stub.leavePresence("guest-one", presenceId, 2);
+
+    await stub.heartbeat("guest-one", presenceId, 1);
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+
+    await stub.heartbeat("guest-one", presenceId, 3);
+    await stub.leavePresence("guest-one", presenceId, 2);
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 1 });
   });
 
   it("stops counting an expired Presence even when its alarm is delayed", async () => {
     const stub = directory();
     const presenceId = crypto.randomUUID();
-    await stub.heartbeat("guest-one", presenceId);
+    await stub.heartbeat("guest-one", presenceId, 1);
     await runInDurableObject(stub, async (_instance, state) => {
       const presences = await state.storage.get<
-        Record<string, Record<string, number>>
+        Record<
+          string,
+          Record<
+            string,
+            { clientSeq: number; active: boolean; expiresAt: number }
+          >
+        >
       >("presences");
       if (presences?.["guest-one"]?.[presenceId] === undefined) {
         throw new Error("Missing Presence lease");
       }
-      presences["guest-one"]![presenceId] = Date.now() - 1;
+      presences["guest-one"]![presenceId]!.expiresAt = Date.now() - 1;
       await state.storage.put("presences", presences);
     });
 
     await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+    await stub.heartbeat("guest-one", presenceId, 1);
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
     await expect(
       runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
-    ).resolves.toBeNull();
+    ).resolves.toBeGreaterThan(Date.now());
   });
 
   it("bounds abandoned browser Presences for one Guest", async () => {
     const stub = directory();
     const presenceIds = Array.from({ length: 9 }, () => crypto.randomUUID());
     for (const presenceId of presenceIds) {
-      await stub.heartbeat("guest-one", presenceId);
+      await stub.heartbeat("guest-one", presenceId, 1);
     }
 
     for (const presenceId of presenceIds.slice(1)) {
-      await stub.leavePresence("guest-one", presenceId);
+      await stub.leavePresence("guest-one", presenceId, 2);
     }
+
+    await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
+
+    await stub.heartbeat("guest-one", presenceIds[0]!, 1);
 
     await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
   });
@@ -133,10 +161,34 @@ describe("RoomDirectory Durable Object", () => {
       (_instance, state) => state.storage.getAlarm(),
     );
     const presenceId = crypto.randomUUID();
-    await stub.heartbeat("guest-one", presenceId);
+    await stub.heartbeat("guest-one", presenceId, 1);
 
-    await stub.leavePresence("guest-one", presenceId);
+    await stub.leavePresence("guest-one", presenceId, 2);
 
+    const tombstoneAlarm = await runInDurableObject(
+      stub,
+      (_instance, state) => state.storage.getAlarm(),
+    );
+    expect(tombstoneAlarm).not.toBeNull();
+    expect(tombstoneAlarm).toBe(provisionalAlarm);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const presences = await state.storage.get<
+        Record<
+          string,
+          Record<
+            string,
+            { clientSeq: number; active: boolean; expiresAt: number }
+          >
+        >
+      >("presences");
+      if (presences?.["guest-one"]?.[presenceId] === undefined) {
+        throw new Error("Missing Presence tombstone");
+      }
+      presences["guest-one"]![presenceId]!.expiresAt = Date.now() - 1;
+      await state.storage.put("presences", presences);
+    });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
     await expect(
       runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
     ).resolves.toBe(provisionalAlarm);

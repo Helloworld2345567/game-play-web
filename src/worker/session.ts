@@ -184,9 +184,10 @@ export async function ensureGuestSession(
   request: Request,
   secret: string,
   requestedDisplayName?: string,
+  newGuestId?: string,
 ): Promise<{ guestId: string; displayName: string; setCookie: string }> {
   const existing = await readGuestSession(request, secret);
-  const guestId = existing?.guestId ?? crypto.randomUUID();
+  const guestId = existing?.guestId ?? newGuestId ?? crypto.randomUUID();
   const displayName =
     requestedDisplayName === undefined
       ? existing?.displayName ?? defaultDisplayName(guestId)

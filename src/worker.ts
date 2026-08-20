@@ -14,6 +14,7 @@ const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const PRESENCE_ID_PATTERN = /^[0-9a-f-]{36}$/u;
+const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
 const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
 const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
@@ -109,7 +110,9 @@ async function readSmallJson(request: Request): Promise<unknown | null> {
 
 async function readRequestedDisplayName(
   request: Request,
-): Promise<{ ok: true; displayName?: string } | { ok: false }> {
+): Promise<
+  { ok: true; displayName?: string; bootstrapId?: string } | { ok: false }
+> {
   const text = await request.text();
   if (text.length === 0) return { ok: true };
   if (new TextEncoder().encode(text).byteLength > MAX_CREATE_BODY_BYTES) {
@@ -124,23 +127,39 @@ async function readRequestedDisplayName(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { ok: false };
   }
-  const normalized = normalizeDisplayName(
-    (value as Record<string, unknown>).displayName,
-  );
-  return normalized === null
-    ? { ok: false }
-    : { ok: true, displayName: normalized };
+  const body = value as Record<string, unknown>;
+  const normalized = normalizeDisplayName(body.displayName);
+  const bootstrapId = body.bootstrapId;
+  if (
+    normalized === null ||
+    (bootstrapId !== undefined &&
+      (typeof bootstrapId !== "string" ||
+        !BROWSER_BOOTSTRAP_ID_PATTERN.test(bootstrapId)))
+  ) {
+    return { ok: false };
+  }
+  return {
+    ok: true,
+    displayName: normalized,
+    ...(typeof bootstrapId === "string" ? { bootstrapId } : {}),
+  };
 }
 
-async function readPresenceId(request: Request): Promise<string | null> {
+async function readPresenceCommand(
+  request: Request,
+): Promise<{ presenceId: string; clientSeq: number } | null> {
   const value = await readSmallJson(request);
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
-  const presenceId = (value as Record<string, unknown>).presenceId;
+  const body = value as Record<string, unknown>;
+  const presenceId = body.presenceId;
+  const clientSeq = body.clientSeq;
   return typeof presenceId === "string" &&
-    PRESENCE_ID_PATTERN.test(presenceId)
-    ? presenceId
+      PRESENCE_ID_PATTERN.test(presenceId) &&
+      Number.isSafeInteger(clientSeq) &&
+      (clientSeq as number) >= 1
+    ? { presenceId, clientSeq: clientSeq as number }
     : null;
 }
 
@@ -317,10 +336,19 @@ export default {
           { status: 400 },
         );
       }
+      const existing = await readGuestSession(request, env.SESSION_SECRET);
+      const bootstrapGuestId =
+        existing === null && requested.bootstrapId !== undefined
+          ? await env.ROOM_DIRECTORY.getByName(
+            ROOM_DIRECTORY_NAME,
+            { locationHint: "apac" },
+          ).claimBrowserBootstrap(requested.bootstrapId)
+          : undefined;
       const session = await ensureGuestSession(
         request,
         env.SESSION_SECRET,
         requested.displayName,
+        bootstrapGuestId,
       );
       return json(
         { ok: true, displayName: session.displayName },
@@ -333,29 +361,41 @@ export default {
       return json({ error: "session.required" }, { status: 401 });
     }
     if (url.pathname === "/api/stats" && request.method === "POST") {
-      const presenceId = await readPresenceId(request);
-      if (presenceId === null) {
+      const presence = await readPresenceCommand(request);
+      if (presence === null) {
         return json({ error: "presence.invalid_request" }, { status: 400 });
       }
       const directory = env.ROOM_DIRECTORY.getByName(
         ROOM_DIRECTORY_NAME,
         { locationHint: "apac" },
       );
-      return json(await directory.heartbeat(guest.guestId, presenceId));
+      return json(
+        await directory.heartbeat(
+          guest.guestId,
+          presence.presenceId,
+          presence.clientSeq,
+        ),
+      );
     }
     if (
       url.pathname === "/api/presence/leave" &&
       request.method === "POST"
     ) {
-      const presenceId = await readPresenceId(request);
-      if (presenceId === null) {
+      const presence = await readPresenceCommand(request);
+      if (presence === null) {
         return json({ error: "presence.invalid_request" }, { status: 400 });
       }
       const directory = env.ROOM_DIRECTORY.getByName(
         ROOM_DIRECTORY_NAME,
         { locationHint: "apac" },
       );
-      return json(await directory.leavePresence(guest.guestId, presenceId));
+      return json(
+        await directory.leavePresence(
+          guest.guestId,
+          presence.presenceId,
+          presence.clientSeq,
+        ),
+      );
     }
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       return createRoom(request, env, guest);

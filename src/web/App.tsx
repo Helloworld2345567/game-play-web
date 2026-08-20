@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { normalizeDisplayName } from "../shared/display-name";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
@@ -41,6 +41,7 @@ function isPlatformStats(value: unknown): value is PlatformStats {
 
 function usePlatformStats(displayName: string): PlatformStats | null {
   const [presenceId] = useState(() => crypto.randomUUID());
+  const presenceSequence = useRef(0);
   const [stats, setStats] = useState<PlatformStats | null>(null);
 
   useEffect(() => {
@@ -73,7 +74,10 @@ function usePlatformStats(displayName: string): PlatformStats | null {
             "Content-Type": "application/json",
             Accept: "application/json",
           },
-          body: JSON.stringify({ presenceId }),
+          body: JSON.stringify({
+            presenceId,
+            clientSeq: ++presenceSequence.current,
+          }),
           signal: controller.signal,
         });
         const value: unknown = await response.json();
@@ -112,7 +116,10 @@ function usePlatformStats(displayName: string): PlatformStats | null {
 
   useEffect(() => {
     const leave = () => {
-      const body = JSON.stringify({ presenceId });
+      const body = JSON.stringify({
+        presenceId,
+        clientSeq: ++presenceSequence.current,
+      });
       let queued = false;
       try {
         queued = navigator.sendBeacon(

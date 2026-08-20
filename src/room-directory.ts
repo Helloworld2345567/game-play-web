@@ -17,24 +17,43 @@ interface RoomReservation {
 
 type RoomReservations = Record<string, RoomReservation>;
 
-type PresenceLeases = Record<string, Record<string, number>>;
+interface PresenceLease {
+  clientSeq: number;
+  active: boolean;
+  expiresAt: number;
+}
+
+type PresenceLeases = Record<string, Record<string, PresenceLease>>;
+
+interface BrowserBootstrapClaim {
+  guestId: string;
+  expiresAt: number;
+}
+
+type BrowserBootstrapClaims = Record<string, BrowserBootstrapClaim>;
 
 interface DirectoryState {
   reservations: RoomReservations;
   presences: PresenceLeases;
+  browserBootstraps: BrowserBootstrapClaims;
 }
 
 const RESERVATIONS_KEY = "reservations";
 const PRESENCES_KEY = "presences";
+const BROWSER_BOOTSTRAPS_KEY = "browserBootstraps";
 export const ROOM_DIRECTORY_NAME = "global-room-directory-v1";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const LEASE_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const GUEST_ID_PATTERN = /^(?:[0-9a-f-]{36}|guest-[\w-]{1,48})$/u;
 const PRESENCE_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_ACTIVE_ROOMS = 10;
-const MAX_PRESENCES_PER_GUEST = 8;
+const MAX_ACTIVE_PRESENCES_PER_GUEST = 8;
+const MAX_PRESENCE_RECORDS_PER_GUEST = 64;
+const MAX_BROWSER_BOOTSTRAP_CLAIMS = 256;
 const PROVISIONAL_LEASE_MS = 60_000;
 const PRESENCE_LEASE_MS = 45_000;
+const PRESENCE_TOMBSTONE_MS = 5 * 60_000;
+const BROWSER_BOOTSTRAP_LEASE_MS = 60_000;
 const ROLLBACK_COMPAT_ACTIVE_LEASE_MS = 30 * 24 * 60 * 60_000;
 
 async function readCurrentState(
@@ -45,6 +64,9 @@ async function readCurrentState(
     (await transaction.get<RoomReservations>(RESERVATIONS_KEY)) ?? {};
   const presences =
     (await transaction.get<PresenceLeases>(PRESENCES_KEY)) ?? {};
+  const browserBootstraps =
+    (await transaction.get<BrowserBootstrapClaims>(BROWSER_BOOTSTRAPS_KEY)) ??
+      {};
   for (const [roomId, reservation] of Object.entries(reservations)) {
     if (
       reservation.phase !== "active" &&
@@ -54,12 +76,21 @@ async function readCurrentState(
     }
   }
   for (const [guestId, guestPresences] of Object.entries(presences)) {
-    for (const [presenceId, expiresAt] of Object.entries(guestPresences)) {
-      if (expiresAt <= now) delete guestPresences[presenceId];
+    for (const [presenceId, lease] of Object.entries(guestPresences)) {
+      if (lease.active && lease.expiresAt <= now) {
+        lease.active = false;
+        lease.expiresAt += PRESENCE_TOMBSTONE_MS;
+      }
+      if (!lease.active && lease.expiresAt <= now) {
+        delete guestPresences[presenceId];
+      }
     }
     if (Object.keys(guestPresences).length === 0) delete presences[guestId];
   }
-  return { reservations, presences };
+  for (const [bootstrapId, claim] of Object.entries(browserBootstraps)) {
+    if (claim.expiresAt <= now) delete browserBootstraps[bootstrapId];
+  }
+  return { reservations, presences, browserBootstraps };
 }
 
 async function persistState(
@@ -77,6 +108,11 @@ async function persistState(
   } else {
     await transaction.put(PRESENCES_KEY, state.presences);
   }
+  if (Object.keys(state.browserBootstraps).length === 0) {
+    await transaction.delete(BROWSER_BOOTSTRAPS_KEY);
+  } else {
+    await transaction.put(BROWSER_BOOTSTRAPS_KEY, state.browserBootstraps);
+  }
 
   const provisionalExpiries = reservationEntries.flatMap((reservation) =>
     reservation.phase === "active" || reservation.expiresAt === undefined
@@ -84,9 +120,17 @@ async function persistState(
       : [reservation.expiresAt],
   );
   const presenceExpiries = Object.values(state.presences).flatMap(
-    (guestPresences) => Object.values(guestPresences),
+    (guestPresences) =>
+      Object.values(guestPresences).map((lease) => lease.expiresAt),
   );
-  const expiries = [...provisionalExpiries, ...presenceExpiries];
+  const bootstrapExpiries = Object.values(state.browserBootstraps).map(
+    (claim) => claim.expiresAt,
+  );
+  const expiries = [
+    ...provisionalExpiries,
+    ...presenceExpiries,
+    ...bootstrapExpiries,
+  ];
   if (expiries.length === 0) {
     await transaction.deleteAlarm();
   } else {
@@ -96,14 +140,72 @@ async function persistState(
 
 function currentStats(state: DirectoryState): PlatformStats {
   return {
-    onlineGuests: Object.keys(state.presences).length,
+    onlineGuests: Object.values(state.presences).filter((guestPresences) =>
+      Object.values(guestPresences).some((lease) => lease.active)
+    ).length,
     activeRooms: Object.values(state.reservations).filter(
       (reservation) => reservation.phase === "active",
     ).length,
   };
 }
 
+function preparePresenceActivation(
+  guestPresences: Record<string, PresenceLease>,
+  presenceId: string,
+  now: number,
+): boolean {
+  const existing = guestPresences[presenceId];
+  if (
+    existing === undefined &&
+    Object.keys(guestPresences).length >= MAX_PRESENCE_RECORDS_PER_GUEST
+  ) {
+    return false;
+  }
+  if (existing?.active === true) return true;
+
+  const activePresences = Object.entries(guestPresences).filter(
+    ([, lease]) => lease.active,
+  );
+  if (activePresences.length >= MAX_ACTIVE_PRESENCES_PER_GUEST) {
+    const oldest = activePresences.reduce((current, entry) =>
+      entry[1].expiresAt < current[1].expiresAt ? entry : current
+    );
+    oldest[1].active = false;
+    oldest[1].expiresAt = now + PRESENCE_TOMBSTONE_MS;
+  }
+  return true;
+}
+
 export class RoomDirectory extends DurableObject {
+  async claimBrowserBootstrap(bootstrapId: string): Promise<string> {
+    if (!PRESENCE_ID_PATTERN.test(bootstrapId)) {
+      throw new TypeError("Invalid browser bootstrap");
+    }
+
+    const now = Date.now();
+    return this.ctx.storage.transaction(async (transaction) => {
+      const state = await readCurrentState(transaction, now);
+      const existing = state.browserBootstraps[bootstrapId];
+      if (existing !== undefined) {
+        await persistState(transaction, state);
+        return existing.guestId;
+      }
+
+      const guestId = crypto.randomUUID();
+      if (
+        Object.keys(state.browserBootstraps).length <
+          MAX_BROWSER_BOOTSTRAP_CLAIMS
+      ) {
+        state.browserBootstraps[bootstrapId] = {
+          guestId,
+          expiresAt: now + BROWSER_BOOTSTRAP_LEASE_MS,
+        };
+      }
+      await persistState(transaction, state);
+      return guestId;
+    });
+  }
+
   async stats(): Promise<PlatformStats> {
     const now = Date.now();
     return this.ctx.storage.transaction(async (transaction) => {
@@ -116,10 +218,13 @@ export class RoomDirectory extends DurableObject {
   async heartbeat(
     guestId: string,
     presenceId: string,
+    clientSeq: number,
   ): Promise<PlatformStats> {
     if (
       !GUEST_ID_PATTERN.test(guestId) ||
-      !PRESENCE_ID_PATTERN.test(presenceId)
+      !PRESENCE_ID_PATTERN.test(presenceId) ||
+      !Number.isSafeInteger(clientSeq) ||
+      clientSeq < 1
     ) {
       throw new TypeError("Invalid Presence lease");
     }
@@ -128,16 +233,20 @@ export class RoomDirectory extends DurableObject {
     return this.ctx.storage.transaction(async (transaction) => {
       const state = await readCurrentState(transaction, now);
       const guestPresences = state.presences[guestId] ?? {};
-      if (
-        guestPresences[presenceId] === undefined &&
-        Object.keys(guestPresences).length >= MAX_PRESENCES_PER_GUEST
-      ) {
-        const oldestPresenceId = Object.entries(guestPresences).reduce(
-          (oldest, entry) => entry[1] < oldest[1] ? entry : oldest,
-        )[0];
-        delete guestPresences[oldestPresenceId];
+      const existing = guestPresences[presenceId];
+      if (existing !== undefined && clientSeq <= existing.clientSeq) {
+        await persistState(transaction, state);
+        return currentStats(state);
       }
-      guestPresences[presenceId] = now + PRESENCE_LEASE_MS;
+      if (!preparePresenceActivation(guestPresences, presenceId, now)) {
+        await persistState(transaction, state);
+        return currentStats(state);
+      }
+      guestPresences[presenceId] = {
+        clientSeq,
+        active: true,
+        expiresAt: now + PRESENCE_LEASE_MS,
+      };
       state.presences[guestId] = guestPresences;
       await persistState(transaction, state);
       return currentStats(state);
@@ -147,10 +256,13 @@ export class RoomDirectory extends DurableObject {
   async leavePresence(
     guestId: string,
     presenceId: string,
+    clientSeq: number,
   ): Promise<PlatformStats> {
     if (
       !GUEST_ID_PATTERN.test(guestId) ||
-      !PRESENCE_ID_PATTERN.test(presenceId)
+      !PRESENCE_ID_PATTERN.test(presenceId) ||
+      !Number.isSafeInteger(clientSeq) ||
+      clientSeq < 1
     ) {
       throw new TypeError("Invalid Presence lease");
     }
@@ -158,13 +270,25 @@ export class RoomDirectory extends DurableObject {
     const now = Date.now();
     return this.ctx.storage.transaction(async (transaction) => {
       const state = await readCurrentState(transaction, now);
-      const guestPresences = state.presences[guestId];
-      if (guestPresences !== undefined) {
-        delete guestPresences[presenceId];
-        if (Object.keys(guestPresences).length === 0) {
-          delete state.presences[guestId];
-        }
+      const guestPresences = state.presences[guestId] ?? {};
+      const existing = guestPresences[presenceId];
+      if (existing !== undefined && clientSeq <= existing.clientSeq) {
+        await persistState(transaction, state);
+        return currentStats(state);
       }
+      if (
+        existing === undefined &&
+        Object.keys(guestPresences).length >= MAX_PRESENCE_RECORDS_PER_GUEST
+      ) {
+        await persistState(transaction, state);
+        return currentStats(state);
+      }
+      guestPresences[presenceId] = {
+        clientSeq,
+        active: false,
+        expiresAt: now + PRESENCE_TOMBSTONE_MS,
+      };
+      state.presences[guestId] = guestPresences;
       await persistState(transaction, state);
       return currentStats(state);
     });

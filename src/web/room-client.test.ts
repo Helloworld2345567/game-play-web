@@ -8,6 +8,7 @@ import {
 } from "./room-client";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -15,9 +16,17 @@ describe("browser Guest session", () => {
   it("uses one session bootstrap when Presence and Room connect together", async () => {
     let finishRequest: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn(
-      () =>
-        new Promise<Response>((resolve) => {
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
           finishRequest = resolve;
+          const signal = init?.signal;
+          if (signal instanceof AbortSignal) {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          }
         }),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -59,6 +68,41 @@ describe("browser Guest session", () => {
     finishLatest?.(Response.json({ ok: true }));
     await latest;
     await expect(stale).resolves.toBeInstanceOf(DOMException);
+  });
+
+  it("releases a stalled cross-tab session bootstrap after its timeout", async () => {
+    vi.useFakeTimers();
+    let finishRequest: ((response: Response) => void) | undefined;
+    let requestRejected = false;
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          finishRequest = resolve;
+          const signal = init?.signal;
+          if (signal instanceof AbortSignal) {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          }
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const session = ensureBrowserSession("棋友0002").catch(
+      (error: unknown) => {
+        requestRejected = true;
+        return error;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    await Promise.resolve();
+    const timedOut = requestRejected;
+    if (!timedOut) finishRequest?.(Response.json({ ok: true }));
+    await session;
+
+    expect(timedOut).toBe(true);
   });
 });
 

@@ -7,17 +7,17 @@
 
 ## 1. 一句话结论
 
-将 `https://play.ym0v0.com` 部署为一个 Cloudflare Worker：它同时提供前端静态资源、少量 HTTP API 和 WebSocket；每个房间对应一个 SQLite-backed `GameRoom` Durable Object，串行裁决并保存完整棋局；另有一个单例 `RoomDirectory` Durable Object 原子管理全站房间容量。除此之外不启用其他 Cloudflare 数据服务。
+将 `https://play.ym0v0.com` 部署为一个 Cloudflare Worker：它同时提供前端静态资源、少量 HTTP API 和 WebSocket；每个房间对应一个 SQLite-backed `GameRoom` Durable Object，串行裁决并保存完整棋局；另有一个单例 `RoomDirectory` Durable Object 原子管理全站房间容量和匿名 Presence 聚合。除此之外不启用其他 Cloudflare 数据服务。
 
 ```mermaid
 flowchart LR
     B[浏览器] <-->|静态资源 / HTTP / WebSocket| W[一个 Cloudflare Worker]
     W <-->|按 roomId 路由| R[每房一个 GameRoom Durable Object]
-    W <-->|建房预留| D[单例 RoomDirectory Durable Object]
+    W <-->|建房预留 / Presence| D[单例 RoomDirectory Durable Object]
     R <-->|激活 / 释放| D
 ```
 
-平台不设置在线游客人数闸门，但全站同时最多存在 10 个尚未废弃的 Room。单例 `RoomDirectory` 先原子创建 60 秒 provisional lease，GameRoom 持久化后再把它激活。明确的初始化失败会立即回滚；若只是返回途中断导致提交结果未知，Worker 会使用同一租约幂等重试，并保留临时占位而不误释放已提交房间。GameRoom 废弃前先持久化释放任务，失败由 alarm 重试；旧版本房间首次唤醒时也必须先登记容量才能继续服务。
+平台不设置在线游客人数闸门，但全站同时最多存在 10 个尚未废弃的 Room。单例 `RoomDirectory` 先原子创建 60 秒 provisional lease，GameRoom 持久化后再把它激活。明确的初始化失败会立即回滚；若只是返回途中断导致提交结果未知，Worker 会使用同一租约幂等重试，并保留临时占位而不误释放已提交房间。GameRoom 废弃前先持久化释放任务，失败由 alarm 重试；旧版本房间首次唤醒时也必须先登记容量才能继续服务。首页及其他页面每 10 秒续期一个按 Guest 去重的 45 秒 Presence，并从同一次 RPC 取得在线人数和已激活房间数；心跳与 leave 使用单调序号和 5 分钟近期 tombstone 抵抗乱序。首次无 Cookie 的并发标签页通过 IndexedDB 原子共享一个 60 秒随机 bootstrap，`RoomDirectory` 只在该短租约内将它兑换为同一 Guest，浏览器与服务端都会按期淘汰；Web Lock 只用于避免重复请求。
 
 ## 2. MVP 做什么
 
@@ -52,7 +52,7 @@ flowchart LR
 ## 4. 最小技术栈与目录
 
 - TypeScript + Preact + Vite：小型前端，不引入 UI 组件库。
-- 原生 Cloudflare Worker 路由：只有会话、建房和 WebSocket 三类入口，不引入 Hono。
+- 原生 Cloudflare Worker 路由：仅提供会话、平台统计、建房与房间连接入口，不引入 Hono。
 - 原生 Durable Objects WebSocket Hibernation API：不引入 PartyServer。
 - DO Storage 的 `get/put` 保存一个 `room` 对象；底层使用 SQLite-backed DO，但应用不写 SQL。
 - Vitest 做纯规则单测；Cloudflare Workers 测试工具做 DO 集成测试；Playwright 做双浏览器 E2E。
@@ -164,7 +164,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 交叉点棋盘使用 Canvas 2D，按设备像素比绘制但 DPR 上限为 2；井字棋和扫雷使用语义化 DOM Grid。
 - 手机棋盘占满可用宽度；大扫雷地图在自身 viewport 内拖动/缩放，不造成页面横向溢出。严格棋类确认前不画实子，双人扫雷按格显示 pending。
 - 所有棋盘提供可访问名称与文本状态；桌面扫雷支持右键插旗，手机支持长按插旗。
-- 正常落子只执行一次 GameRoom 小对象写入和一次房间广播，不跨 DO 续租；`RoomDirectory` 只参与建房、旧房登记和废弃释放。两个 DO 都使用 `locationHint: "apac"`。
+- 正常落子只执行一次 GameRoom 小对象写入和一次房间广播，不跨 DO 续租；`RoomDirectory` 另行处理建房、旧房登记、废弃释放和每页面 10 秒一次的 Presence 心跳。两个 DO 都使用 `locationHint: "apac"`。
 - 目标：规则计算 `<1 ms`；同区域落子确认 p95 `<200 ms`；重连恢复 p95 `<1 s`。大陆网络延迟主要受运营商到 Cloudflare 的链路影响，必须用移动、联通、电信实测，普通全球网络不能承诺稳定低延迟。
 
 ## 9. 最小安全基线
@@ -174,6 +174,7 @@ DO 使用 WebSocket attachment 保存身份和席位，使 Hibernation 唤醒后
 - 每连接令牌桶限制约 10 条命令/秒、突发 20；房间创建按匿名身份和 IP 粗限速。
 - 同一 Guest 每房最多 4 条 WebSocket/HTTPS 连接，单房最多 16 条；观众最多占 8 条，不能挤占玩家入座或重连容量。离线观众的昵称会从房间存储中清理。
 - 房间 ID 至少 96 bit 随机；会话 Cookie、签名和内部异常不写日志、不放 URL。
+- 会话 Cookie 使用 `Secure + HttpOnly + SameSite=Lax`；脚本可读的 IndexedDB bootstrap 只用于 60 秒首次并发去重，过期后既会轮换，也不能重新签发先前 Guest 的 Cookie。
 - 每位游客有显示昵称；统一做 Unicode/空白规范化，拒绝控制字符并限制为 1–16 个 Unicode code point。昵称只渲染为文本，不解析 HTML，也不作为身份凭据。
 - 设置 CSP、`X-Content-Type-Options: nosniff`、`Referrer-Policy: same-origin`。不做自由文本聊天，避免首版引入审核面。
 

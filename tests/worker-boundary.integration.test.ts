@@ -98,6 +98,71 @@ describe("Worker request boundary", () => {
     },
   );
 
+  it("deduplicates concurrent first sessions from one browser bootstrap", async () => {
+    const origin = "http://localhost:5173";
+    const bootstrapId = crypto.randomUUID();
+    const sessions = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        app.default.fetch(
+          apiRequest(origin, "/api/session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ displayName: "棋友0001", bootstrapId }),
+          }),
+        ),
+      ),
+    );
+    const cookies = sessions.map(
+      (response) => response.headers.get("Set-Cookie")?.split(";", 1)[0] ?? "",
+    );
+    expect(cookies.every(Boolean)).toBe(true);
+    const presenceResponses = await Promise.all(
+      cookies.map((cookie) =>
+        app.default.fetch(
+          apiRequest(origin, "/api/stats", {
+            method: "POST",
+            headers: { Cookie: cookie, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              presenceId: crypto.randomUUID(),
+              clientSeq: 1,
+            }),
+          }),
+        ),
+      ),
+    );
+
+    await expect(presenceResponses[1]!.json()).resolves.toMatchObject({
+      onlineGuests: 1,
+    });
+  });
+
+  it("does not let an expired browser bootstrap recreate a Guest identity", async () => {
+    const origin = "http://localhost:5173";
+    const bootstrapId = crypto.randomUUID();
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const createSession = () =>
+      app.default.fetch(
+        apiRequest(origin, "/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ displayName: "棋友0001", bootstrapId }),
+        }),
+      );
+
+    const first = await createSession();
+    const firstCookie = first.headers.get("Set-Cookie")?.split(";", 1)[0];
+    clock.mockReturnValue(now + 10 * 60_000);
+    const replay = await createSession();
+    const replayCookie = replay.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(firstCookie).toBeTruthy();
+    expect(replayCookie).toBeTruthy();
+    expect(replayCookie).not.toBe(firstCookie);
+  });
+
   it("renews a browser Presence and returns only anonymous platform stats", async () => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -110,7 +175,7 @@ describe("Worker request boundary", () => {
       apiRequest(origin, "/api/stats", {
         method: "POST",
         headers: { Cookie: cookie!, "Content-Type": "application/json" },
-        body: JSON.stringify({ presenceId }),
+        body: JSON.stringify({ presenceId, clientSeq: 1 }),
       }),
     );
 
@@ -139,12 +204,13 @@ describe("Worker request boundary", () => {
     );
     const { roomId } = (await created.json()) as { roomId: string };
     const presenceId = crypto.randomUUID();
+    let clientSeq = 0;
     const readStats = () =>
       app.default.fetch(
         apiRequest(origin, "/api/stats", {
           method: "POST",
           headers: { Cookie: cookie!, "Content-Type": "application/json" },
-          body: JSON.stringify({ presenceId }),
+          body: JSON.stringify({ presenceId, clientSeq: ++clientSeq }),
         }),
       );
 
@@ -185,7 +251,7 @@ describe("Worker request boundary", () => {
         apiRequest(origin, "/api/stats", {
           method: "POST",
           headers: { Cookie: cookie!, "Content-Type": "application/json" },
-          body: JSON.stringify({ presenceId }),
+          body: JSON.stringify({ presenceId, clientSeq: 1 }),
         }),
       );
       expect(heartbeat.status).toBe(200);
@@ -195,7 +261,7 @@ describe("Worker request boundary", () => {
       apiRequest(origin, "/api/presence/leave", {
         method: "POST",
         headers: { Cookie: cookie!, "Content-Type": "application/json" },
-        body: JSON.stringify({ presenceId: presenceIds[0] }),
+        body: JSON.stringify({ presenceId: presenceIds[0], clientSeq: 2 }),
       }),
     );
     expect(firstLeave.status).toBe(200);
@@ -205,11 +271,36 @@ describe("Worker request boundary", () => {
       apiRequest(origin, "/api/presence/leave", {
         method: "POST",
         headers: { Cookie: cookie!, "Content-Type": "application/json" },
-        body: JSON.stringify({ presenceId: presenceIds[1] }),
+        body: JSON.stringify({ presenceId: presenceIds[1], clientSeq: 2 }),
       }),
     );
     expect(lastLeave.status).toBe(200);
     await expect(lastLeave.json()).resolves.toMatchObject({ onlineGuests: 0 });
+  });
+
+  it("ignores stale Presence requests at the Worker boundary", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const presenceId = crypto.randomUUID();
+    const send = (path: string, clientSeq: number) =>
+      app.default.fetch(
+        apiRequest(origin, path, {
+          method: "POST",
+          headers: { Cookie: cookie!, "Content-Type": "application/json" },
+          body: JSON.stringify({ presenceId, clientSeq }),
+        }),
+      );
+
+    await send("/api/stats", 1);
+    await send("/api/presence/leave", 2);
+    const staleHeartbeat = await send("/api/stats", 1);
+
+    await expect(staleHeartbeat.json()).resolves.toMatchObject({
+      onlineGuests: 0,
+    });
   });
 
   it("forwards an authenticated HTTP sync to the authoritative Room", async () => {

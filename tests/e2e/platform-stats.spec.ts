@@ -22,10 +22,15 @@ test("refreshes the platform stats with one stable page Presence", async ({
   page,
 }) => {
   const presenceIds: string[] = [];
+  const clientSeqs: number[] = [];
   await page.clock.install();
   await page.route("**/api/stats", async (route) => {
-    const body = route.request().postDataJSON() as { presenceId: string };
+    const body = route.request().postDataJSON() as {
+      presenceId: string;
+      clientSeq: number;
+    };
     presenceIds.push(body.presenceId);
+    clientSeqs.push(body.clientSeq);
     const latest = presenceIds.length === 1
       ? { onlineGuests: 1, activeRooms: 0 }
       : { onlineGuests: 2, activeRooms: 1 };
@@ -46,6 +51,7 @@ test("refreshes the platform stats with one stable page Presence", async ({
   expect(presenceIds).toHaveLength(2);
   expect(presenceIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
   expect(presenceIds[1]).toBe(presenceIds[0]);
+  expect(clientSeqs).toEqual([1, 2]);
 });
 
 test("keeps visitors online outside the home page", async ({ page }) => {
@@ -69,11 +75,16 @@ test("leaves the same page Presence when the document is hidden", async ({
   page,
 }) => {
   let heartbeatPresenceId: string | undefined;
+  let heartbeatClientSeq: number | undefined;
   let leavingPresenceId: string | undefined;
+  let leavingClientSeq: number | undefined;
   await page.route("**/api/stats", async (route) => {
-    heartbeatPresenceId = (
-      route.request().postDataJSON() as { presenceId: string }
-    ).presenceId;
+    const body = route.request().postDataJSON() as {
+      presenceId: string;
+      clientSeq: number;
+    };
+    heartbeatPresenceId = body.presenceId;
+    heartbeatClientSeq = body.clientSeq;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -81,9 +92,12 @@ test("leaves the same page Presence when the document is hidden", async ({
     });
   });
   await page.route("**/api/presence/leave", async (route) => {
-    leavingPresenceId = (
-      route.request().postDataJSON() as { presenceId: string }
-    ).presenceId;
+    const body = route.request().postDataJSON() as {
+      presenceId: string;
+      clientSeq: number;
+    };
+    leavingPresenceId = body.presenceId;
+    leavingClientSeq = body.clientSeq;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -98,6 +112,7 @@ test("leaves the same page Presence when the document is hidden", async ({
   });
 
   await expect.poll(() => leavingPresenceId).toBe(heartbeatPresenceId);
+  expect(leavingClientSeq).toBeGreaterThan(heartbeatClientSeq!);
 });
 
 test("renews Presence immediately when a cached page is shown again", async ({
@@ -132,4 +147,143 @@ test("renews Presence immediately when a cached page is shown again", async ({
   });
 
   await expect.poll(() => heartbeatCount).toBe(2);
+});
+
+test("serializes the first Guest session across new browser tabs", async ({
+  context,
+  page,
+}) => {
+  let sessionRequestsInFlight = 0;
+  let maximumSessionConcurrency = 0;
+  const sessionCookies: string[] = [];
+  const bootstrapIds: Array<string | undefined> = [];
+  await context.route("**/api/session", async (route) => {
+    sessionRequestsInFlight += 1;
+    maximumSessionConcurrency = Math.max(
+      maximumSessionConcurrency,
+      sessionRequestsInFlight,
+    );
+    sessionCookies.push(route.request().headers().cookie ?? "");
+    bootstrapIds.push(
+      (route.request().postDataJSON() as { bootstrapId?: string }).bootstrapId,
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const response = await route.fetch();
+      await route.fulfill({ response });
+    } finally {
+      sessionRequestsInFlight -= 1;
+    }
+  });
+  await context.route("**/api/stats", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ onlineGuests: 1, activeRooms: 0 }),
+    });
+  });
+  const secondPage = await context.newPage();
+
+  await Promise.all([page.goto("/"), secondPage.goto("/")]);
+  await expect(page.getByLabel("平台实时状态")).toContainText("在线 1 人");
+  await expect(secondPage.getByLabel("平台实时状态")).toContainText(
+    "在线 1 人",
+  );
+
+  expect(maximumSessionConcurrency).toBe(1);
+  expect(sessionCookies).toHaveLength(2);
+  expect(sessionCookies[0]).toBe("");
+  expect(sessionCookies[1]).toContain("ym_session=");
+  expect(bootstrapIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
+  expect(bootstrapIds[1]).toBe(bootstrapIds[0]);
+  await secondPage.close();
+});
+
+test("deduplicates first sessions when Web Locks are unavailable", async ({
+  context,
+  page,
+}) => {
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  let sessionRequestsInFlight = 0;
+  let maximumSessionConcurrency = 0;
+  const bootstrapIds: string[] = [];
+  const issuedCookies: string[] = [];
+  await context.route("**/api/session", async (route) => {
+    sessionRequestsInFlight += 1;
+    maximumSessionConcurrency = Math.max(
+      maximumSessionConcurrency,
+      sessionRequestsInFlight,
+    );
+    bootstrapIds.push(
+      (route.request().postDataJSON() as { bootstrapId: string }).bootstrapId,
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const response = await route.fetch();
+      issuedCookies.push(response.headers()["set-cookie"] ?? "");
+      await route.fulfill({ response });
+    } finally {
+      sessionRequestsInFlight -= 1;
+    }
+  });
+  await context.route("**/api/stats", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ onlineGuests: 1, activeRooms: 0 }),
+    });
+  });
+  const secondPage = await context.newPage();
+
+  await Promise.all([page.goto("/"), secondPage.goto("/")]);
+  await expect(page.getByLabel("平台实时状态")).toContainText("在线 1 人");
+  await expect(secondPage.getByLabel("平台实时状态")).toContainText(
+    "在线 1 人",
+  );
+
+  expect(maximumSessionConcurrency).toBe(2);
+  expect(bootstrapIds).toHaveLength(2);
+  expect(bootstrapIds[1]).toBe(bootstrapIds[0]);
+  expect(issuedCookies).toHaveLength(2);
+  expect(issuedCookies[1]).toBe(issuedCookies[0]);
+  await secondPage.close();
+});
+
+test("rotates the browser bootstrap after its short deduplication window", async ({
+  context,
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-08-20T12:00:00Z") });
+  const bootstrapIds: string[] = [];
+  await page.route("**/api/session", async (route) => {
+    bootstrapIds.push(
+      (route.request().postDataJSON() as { bootstrapId: string }).bootstrapId,
+    );
+    const response = await route.fetch();
+    await route.fulfill({ response });
+  });
+  await page.route("**/api/stats", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ onlineGuests: 1, activeRooms: 0 }),
+    });
+  });
+
+  await page.goto("/");
+  await expect.poll(() => bootstrapIds.length).toBe(1);
+  await context.clearCookies();
+  await page.clock.fastForward(2 * 60_000);
+  await page.reload();
+  await expect.poll(() => bootstrapIds.length).toBe(2);
+  await expect(page.getByLabel("平台实时状态")).toContainText("在线 1 人");
+
+  expect(bootstrapIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
+  expect(bootstrapIds[1]).toMatch(/^[0-9a-f-]{36}$/u);
+  expect(bootstrapIds[1]).not.toBe(bootstrapIds[0]);
 });

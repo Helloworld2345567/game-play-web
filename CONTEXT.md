@@ -7,8 +7,12 @@
 **Guest（游客）**  
 由浏览器匿名会话识别、没有账号的访问者。
 
+**Browser Bootstrap（浏览器引导租约）**
+
+首次没有会话 Cookie 时，用来让并发标签页取得同一个 Guest 的 60 秒短租约。浏览器在 IndexedDB 中原子选择并按期轮换随机标识，`RoomDirectory` 只在同一短窗口内把它映射到 Guest；过期标识不能恢复先前身份。
+
 **Platform Presence（平台在线租约）**
-浏览器页面为 Guest 周期续期的 45 秒短租约。一个 Guest 的多个页面各有独立 Presence，但平台在线人数只计一次；关页会主动释放，通知丢失时由到期清理兜底。
+浏览器页面为 Guest 周期续期的 45 秒短租约。一个 Guest 的多个页面各有独立 Presence，但平台在线人数只计一次；关页会主动释放，通知丢失时由到期清理兜底。每个页面的心跳与释放携带单调序号，服务端保留 5 分钟的近期 tombstone 以忽略乱序旧请求；单个 Guest 最多同时计 8 个活跃页面并保留 64 条近期顺序记录。
 
 **Platform Stats（平台实时统计）**
 首页展示的匿名聚合数字，包括具有有效 Platform Presence 的 Guest 数和当前已激活、尚未废弃的 Room 数；不得包含 Guest、Presence 或 Room 标识。
