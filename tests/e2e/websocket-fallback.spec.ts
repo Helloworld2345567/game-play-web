@@ -36,8 +36,12 @@ async function exitRoom(page: Page): Promise<void> {
 test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
   browser,
 }) => {
-  const creatorContext = await browser.newContext();
-  const inviteeContext = await browser.newContext();
+  const creatorContext = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.101" },
+  });
+  const inviteeContext = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.101" },
+  });
   const creator = await creatorContext.newPage();
   const invitee = await inviteeContext.newPage();
   const [creatorWebSocketAttempts, inviteeWebSocketAttempts] =
@@ -97,8 +101,12 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
 test("retires a fallback Room after both HTTP clients explicitly leave", async ({
   browser,
 }) => {
-  const creatorContext = await browser.newContext();
-  const inviteeContext = await browser.newContext();
+  const creatorContext = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.102" },
+  });
+  const inviteeContext = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.102" },
+  });
   const creator = await creatorContext.newPage();
   const invitee = await inviteeContext.newPage();
   await Promise.all([blockWebSockets(creator), blockWebSockets(invitee)]);
@@ -136,7 +144,9 @@ test("retires a fallback Room after both HTTP clients explicitly leave", async (
 test("reuses one HTTP presence across reload before an explicit leave", async ({
   browser,
 }) => {
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.103" },
+  });
   const page = await context.newPage();
   await blockWebSockets(page);
 
@@ -167,7 +177,9 @@ test("reuses one HTTP presence across reload before an explicit leave", async ({
 test("retries when an HTTPS compatibility request is accepted but stalls", async ({
   browser,
 }) => {
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    extraHTTPHeaders: { "CF-Connecting-IP": "198.51.100.104" },
+  });
   const page = await context.newPage();
   let syncAttempts = 0;
   await page.route(/\/api\/rooms\/[^/]+\/sync$/u, async (route) => {
