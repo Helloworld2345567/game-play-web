@@ -52,6 +52,17 @@ npm run build
 
 `wrangler.jsonc` 已配置 Worker、静态资源、SQLite Durable Object 和 Custom Domain `play.ym0v0.com`。
 
+推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
+
+首次启用需要在 GitHub 仓库设置：
+
+- Actions Secret `CLOUDFLARE_API_TOKEN`：使用 Cloudflare `Edit Cloudflare Workers` 模板创建，并将资源范围限制到当前账号。
+- Actions Variable `CLOUDFLARE_ACCOUNT_ID`：Cloudflare Account ID，不属于密钥。
+
+生产 `SESSION_SECRET` 继续只保存在 Cloudflare Secret 中；不要复制到 GitHub。普通 Worker 部署会保留现有 Secret，工作流中的固定 `SESSION_SECRET` 仅供隔离的本地浏览器测试使用。
+
+本地手动部署仍可作为故障兜底：
+
 ```bash
 npx wrangler login
 npx wrangler secret put SESSION_SECRET
