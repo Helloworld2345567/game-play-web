@@ -1,6 +1,6 @@
 # Decision map: ym0v0 极简棋类平台
 
-状态：2026-08-19 已按“同时在线不超过 10 人”的容量重新收敛。实现细节见 [GOMOKU_PLATFORM_PLAN.md](./GOMOKU_PLATFORM_PLAN.md)，GitHub 证据见 [research/GITHUB_SURVEY.md](./research/GITHUB_SURVEY.md)。
+状态：2026-08-20 已按“全站同时最多 10 个未废弃房间”的容量重新收敛。实现细节见 [GOMOKU_PLATFORM_PLAN.md](./GOMOKU_PLATFORM_PLAN.md)，GitHub 证据见 [research/GITHUB_SURVEY.md](./research/GITHUB_SURVEY.md)。
 
 ## #1：复用完整平台还是基于 Cloudflare 原语自建？
 
@@ -8,7 +8,7 @@
 
 ## #2：首版到底交付什么？
 
-**结论**：交付游客邀请房、15×15 自由五子棋、休闲中国象棋、权威走子/胜负、认输/复赛、刷新和断线重连、移动端棋盘。没有账号、匹配、排位、棋钟、观战、聊天、AI 和永久历史。
+**结论**：交付可自定义昵称的游客邀请房、15×15 自由五子棋、休闲中国象棋、前两人对战与后续游客只读观战、权威走子/胜负、认输/复赛、刷新和断线重连、移动端棋盘。没有账号、匹配、排位、棋钟、聊天、AI 和永久历史。
 
 ## #3：实时状态放在哪里？
 
@@ -16,7 +16,7 @@
 
 ## #4：需要哪些 Cloudflare 产品？
 
-**结论**：只需 Worker Static Assets、Worker 和一个 DO 类。当前不需要 D1、Queue、KV、R2、Pages 或第二个 Worker。以后只在真实功能触发时逐项增加。
+**结论**：只需 Worker Static Assets、Worker，以及两个 DO 类：每房一个 `GameRoom`，单例 `RoomDirectory` 原子管理全站 10 个房间的容量。当前不需要 D1、Queue、KV、R2、Pages 或第二个 Worker。以后只在真实功能触发时逐项增加。
 
 ## #5：如何持续增加棋类？
 
