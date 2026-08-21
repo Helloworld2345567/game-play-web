@@ -1082,7 +1082,6 @@ function RoomPage({
             selfSeat={snapshot.selfSeat}
             pending={client.pending}
             disabled={client.phase !== "online" || client.leaving}
-            notice={client.notice}
             onSelect={(roleId) => {
               client.selectOpeningRole(roleId);
             }}

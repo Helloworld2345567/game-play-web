@@ -63,7 +63,7 @@ export interface LegacyStoredRoomV2 extends StoredRoomBase {
   recentActionReceipts: Record<PlatformSeatId, ActionReceipt[]>;
 }
 
-/** Current authoritative Room shape persisted by the Worker. */
+/** Room shape written before opening-role preparation was introduced. */
 export interface LegacyStoredRoomV3 extends StoredRoomBase {
   schemaVersion: 3;
   roundStartRevision: number;

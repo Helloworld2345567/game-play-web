@@ -9,7 +9,6 @@ export interface OpeningRolePanelProps {
   selfSeat: string | null;
   pending: boolean;
   disabled: boolean;
-  notice: string | null;
   onSelect(roleId: string): void;
 }
 
@@ -123,7 +122,6 @@ export function OpeningRolePanel({
   selfSeat,
   pending,
   disabled,
-  notice,
   onSelect,
 }: OpeningRolePanelProps) {
   const state = getOpeningRolePanelState({
@@ -178,7 +176,7 @@ export function OpeningRolePanel({
         ))}
       </div>
       <p class="opening-role-status" role="status" aria-live="polite">
-        {notice ?? state.statusMessage}
+        {state.statusMessage}
       </p>
     </section>
   );

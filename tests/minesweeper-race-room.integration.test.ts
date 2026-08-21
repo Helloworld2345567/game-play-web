@@ -675,9 +675,31 @@ describe("Minesweeper race through GameRoom", () => {
       "gomoku.freestyle15.v1",
     );
     const gomokuCreator = await connect(gomoku, "guest-race-a");
-    await connect(gomoku, "guest-gomoku-b");
+    const gomokuInvitee = await connect(gomoku, "guest-gomoku-b");
     await gomokuCreator.inbox.nextMatching(
       (message) => message.type === "snapshot" && message.revision === 1,
+    );
+    gomokuCreator.socket.send(
+      JSON.stringify({
+        v: 1,
+        type: "prepare_role",
+        expectedRevision: 1,
+        roleId: "black",
+      }),
+    );
+    await gomokuCreator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    gomokuInvitee.socket.send(
+      JSON.stringify({
+        v: 1,
+        type: "prepare_role",
+        expectedRevision: 2,
+        roleId: "white",
+      }),
+    );
+    await gomokuCreator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
     );
     gomokuCreator.socket.send(
       JSON.stringify({
@@ -693,7 +715,7 @@ describe("Minesweeper race through GameRoom", () => {
       gomokuCreator.inbox.nextMatching((message) => message.type === "error"),
     ).resolves.toMatchObject({
       code: "room.revision_mismatch",
-      snapshot: { revision: 1, position: { data: { moveCount: 0 } } },
+      snapshot: { revision: 3, position: { data: { moveCount: 0 } } },
     });
   });
 });

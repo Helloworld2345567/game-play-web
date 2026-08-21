@@ -67,9 +67,15 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
     await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);
     const inviteUrl = creator.url();
 
+    await creator.locator('[data-role-id="black"]').click();
+    await expect(creator.locator(".opening-role-status")).toHaveText(
+      "已选择黑方，等待对手",
+    );
     await invitee.goto(inviteUrl);
     await spectator.goto(inviteUrl);
 
+    await expect(invitee.locator('[data-role-id="black"]')).toBeDisabled();
+    await invitee.locator('[data-role-id="white"]').click();
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
       "轮到你",
     );

@@ -53,6 +53,9 @@ test("canceling Exit keeps the room, while both explicit exits retire it", async
 
     await invitee.goto(inviteUrl);
     await setDisplayName(invitee, "退出乙");
+    await creator.locator('[data-role-id="black"]').click();
+    await expect(invitee.locator('[data-role-id="black"]')).toBeDisabled();
+    await invitee.locator('[data-role-id="white"]').click();
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",

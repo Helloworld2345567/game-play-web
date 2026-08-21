@@ -20,6 +20,12 @@
 **Seat（席位）**  
 游客在一个 Room 内稳定的平台身份。席位与每局棋种侧的黑、白、红等阵营映射分离；复赛可交换阵营，但不交换 Seat。
 
+**Opening Preparation（开局预备）**
+回合制 Room 在首局 Position 创建前的房间级阶段。两个 Seat 各自认领一个不同的 Opening Role；选择即确认，两个角色都被认领后自动创建首局 Position。创建者可以在对手加入前先选，角色冲突按房间串行处理的先到顺序裁定。并发扫雷不进入此阶段。
+
+**Opening Role（开局角色）**
+回合制 `GameRules` 以 `openingRoleIds` 声明的有序二元组。第一项对应传给 `create()` 的第一个 Seat 及先手角色，第二项对应后手角色；网页 adapter 只负责标签和颜色。复赛反转上一局的角色到 Seat 映射，不改变 Seat 本身。
+
 **Spectator（观众）**
 进入 Room 但不占有 Seat 的游客。观众只读地观看当前棋局，不属于有效玩家连接。
 
@@ -84,6 +90,6 @@
 玩家可见房间状态、昵称或 Presence 改变后的序号。HTTPS fallback 的 `/sync` 携带 `sinceSnapshotRevision`；没有可见变化时返回 `204` 和当前修订号，不重新投影或向 WebSocket 重复广播。轮询仍在内存中续租，但持久化频率被限制到约每 5 秒一次。
 
 **Action Consistency（动作一致性策略）**
-规则模块声明 `strict_revision` 或 `concurrent_idempotent`。五子棋、中国象棋和井字棋保持严格 revision；扫雷竞速允许并发幂等动作，客户端从房间快照读取策略而不按棋种名称判断。
+规则模块声明 `strict_revision` 或 `concurrent_idempotent`。五子棋、中国象棋、井字棋和警察抓小偷保持严格 revision；扫雷竞速允许并发幂等动作，客户端从房间快照读取策略而不按棋种名称判断。
 
-避免把 User、Match、Rating、OpeningRule 和通用 Board 等未来概念提前加入当前实现；真实功能出现时再扩充语言。
+避免把 User、Match、Rating 和通用 Board 等未来概念提前加入当前实现；真实功能出现时再扩充语言。

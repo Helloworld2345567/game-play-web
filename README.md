@@ -1,6 +1,6 @@
 # ym0v0 棋局
 
-一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋和扫雷四个入口；扫雷入口内可选单人或双人竞速及三种难度。无需注册，创建房间后把邀请链接发给朋友即可开始。
+一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋、警察抓小偷和扫雷五个入口；扫雷入口内可选单人或双人竞速及三种难度。无需注册，创建房间后把邀请链接发给朋友即可开始。
 
 - 线上地址：<https://play.ym0v0.com>
 - 服务端权威裁决：严格棋类拒绝旧修订；并发棋类始终按最新权威局面验证动作
@@ -11,7 +11,7 @@
 - 全站最多同时存在 10 个房间；废弃时会持久记录释放任务，短暂故障后自动重试
 - WebSocket Hibernation、完整快照重连、手机与键盘操作
 - 可主动退出房间；玩家全部关页后保留 60 秒重连窗口，随后自动废弃旧链接
-- 双方确认复赛并自动交换先手
+- 回合制房间在首局开始前由双方选择角色和先后手；双方确认复赛后自动交换角色与先后手
 - 中国象棋支持标准棋子走法、九宫、河界、将军/将死、困毙、飞将、三次重复与连续 60 回合无进展自动和棋；不含竞赛规则的长将/长捉责任裁定
 - 扫雷支持 9×9/10 雷、16×16/40 雷、30×16/99 雷；单人模式不占房间名额
 - 双人扫雷竞速使用同一权威雷区和共同中央安全起点，双方的已揭格与旗帜完全独立；只公开进度，先完成者获胜，踩雷者失败
@@ -23,7 +23,7 @@
 
 共享 `GameManifest` 只包含可信纯元数据，客户端 `GameCatalog` 通过静态 allowlist 动态加载本地页面或房间 renderer，服务端 `GameRules` 注册表独立控制规则恢复与新建。浏览器侧保留窄的 `useRoom()` 接口，内部 `RoomSession` 将 WebSocket、HTTPS polling、协议解析和并发动作跟踪分离，因此增加棋类不需要修改会话与重连核心。
 
-五子棋、中国象棋和井字棋继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道，`clientSeq` 在单个连接内单调；HTTPS fallback 对同一连接串行发送，未知结果会暂停后续序号并从最小 pending 动作恢复，服务端也会拒绝已见更高序号后的未见低序号。旗帜使用显式 `set_flag`；服务端会拒绝已淘汰序号和同序号不同 ID。旧 `minesweeper.duel.*.v1` 只保留已有房间恢复，公共建房 API 也会拒绝。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交；无变化的 fallback sync 返回 `204`，不会反复投影和广播同一快照。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
+五子棋、中国象棋、井字棋和警察抓小偷继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道，`clientSeq` 在单个连接内单调；HTTPS fallback 对同一连接串行发送，未知结果会暂停后续序号并从最小 pending 动作恢复，服务端也会拒绝已见更高序号后的未见低序号。旗帜使用显式 `set_flag`；服务端会拒绝已淘汰序号和同序号不同 ID。旧 `minesweeper.duel.*.v1` 只保留已有房间恢复，公共建房 API 也会拒绝。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交；无变化的 fallback sync 返回 `204`，不会反复投影和广播同一快照。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
 
 单人榜以签名 Guest 作为匿名身份，昵称从签名会话取得。`minesweeper.solo.v1` 与其他规则版本不混榜，记录在 180 天后由每日清理任务删除。它是客户端计时并提交的休闲榜，已做输入校验、请求限流和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。
 
@@ -59,7 +59,7 @@ npm run test:e2e
 npm run build
 ```
 
-测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋和扫雷引擎、真实 workerd Durable Object、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、观战、退出与空房回收、断网恢复、完整胜局和复赛流程。
+测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、警察抓小偷和扫雷引擎、真实 workerd Durable Object、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
 
 ## 部署
 
@@ -93,3 +93,5 @@ npm run deploy
 3. 为新规则发布不可变的 `ruleSetId`；不要按客户端消息动态选择规则。
 
 房间协议只传递不透明的棋种 payload，平台核心不读取棋种私有局面。需要隐藏信息的游戏必须实现 `project(authoritativePosition, viewerSeat)`，并为并发游戏明确选择 `concurrent_idempotent`；其他棋类保持 `strict_revision`。规则语义变化应发布新的不可变 `ruleSetId`。
+
+需要首局选角色的回合制规则在 `GameRules.definition.openingRoleIds` 中按先手、后手顺序声明两个稳定角色 ID，并在网页 adapter 中提供对应标签；房间层统一处理认领、开局和复赛换边。
