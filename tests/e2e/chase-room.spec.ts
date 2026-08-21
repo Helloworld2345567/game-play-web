@@ -46,6 +46,8 @@ test("two players chase on the easy map, capture, then swap roles in a rematch",
 
     const picker = creator.getByRole("dialog", { name: "警察抓小偷" });
     await expect(picker).toBeVisible();
+    await expect(picker).not.toContainText("最优");
+    await expect(picker).toContainText("双方每次沿线走一步");
     await picker.getByRole("radio", { name: /^简单/u }).check();
     await picker.getByRole("button", { name: "创建追逃房间" }).click();
     await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);
@@ -75,6 +77,10 @@ test("two players chase on the easy map, capture, then swap roles in a rematch",
 
     await expect(creator.locator("[data-node]")).toHaveCount(6);
     await expect(invitee.locator("[data-node]")).toHaveCount(6);
+    await expect(creator.locator(".chase-board-info")).not.toContainText("最优");
+    await expect(creator.locator(".chase-board-info")).toContainText(
+      "上限 15 回合",
+    );
     await Promise.all([
       expectNoHorizontalOverflow(creator),
       expectNoHorizontalOverflow(invitee),

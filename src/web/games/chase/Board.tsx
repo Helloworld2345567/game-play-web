@@ -267,7 +267,7 @@ export function ChaseBoard({
           </span>
         </div>
         <p class="chase-board-status">
-          {currentTurnLabel} · 已完成 {data.completedRounds} 回合 / 上限 {data.roundLimit} 回合 · 最优 x = {data.optimalRounds}
+          {currentTurnLabel} · 已完成 {data.completedRounds} 回合 / 上限 {data.roundLimit} 回合
         </p>
         <p class="chase-board-limit-note">
           警察完成第 {data.roundLimit} 回合仍未抓到小偷，小偷获胜。

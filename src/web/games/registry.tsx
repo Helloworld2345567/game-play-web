@@ -582,17 +582,17 @@ const CHASE_DIFFICULTIES = [
   {
     ruleSetId: CHASE_RULE_SET_IDS[0],
     displayName: "警察抓小偷 · 简单",
-    landingDescription: "闭环地图 · x=5 · 上限15轮",
+    landingDescription: "初始地图 · 上限15轮",
   },
   {
     ruleSetId: CHASE_RULE_SET_IDS[1],
     displayName: "警察抓小偷 · 中等",
-    landingDescription: "闭环地图 · x=10 · 上限25轮",
+    landingDescription: "中型闭环 · 上限25轮",
   },
   {
     ruleSetId: CHASE_RULE_SET_IDS[2],
     displayName: "警察抓小偷 · 困难",
-    landingDescription: "闭环地图 · x=20 · 上限45轮",
+    landingDescription: "大型闭环 · 上限45轮",
   },
 ] as const;
 

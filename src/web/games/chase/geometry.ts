@@ -64,7 +64,7 @@ export const CHASE_MAPS: Readonly<Record<ChaseMapId, ChaseMapDefinition>> = {
     points: EASY_POINTS,
   },
   medium: makeRingMap("medium", "中等地图"),
-  hard: makeRingMap("hard", "20 轮地图"),
+  hard: makeRingMap("hard", "困难地图"),
 };
 
 /** Accept both compact map ids in position.data and rule-set-shaped ids. */

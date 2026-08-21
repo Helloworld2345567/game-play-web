@@ -467,9 +467,9 @@ const CHASE_DIFFICULTY_OPTIONS: ReadonlyArray<{
   label: string;
   detail: string;
 }> = [
-  { id: "easy", label: "简单", detail: "最优 x=5 · 上限15轮" },
-  { id: "medium", label: "中等", detail: "最优 x=10 · 上限25轮" },
-  { id: "hard", label: "困难", detail: "最优 x=20 · 上限45轮" },
+  { id: "easy", label: "简单", detail: "上限 15 轮" },
+  { id: "medium", label: "中等", detail: "上限 25 轮" },
+  { id: "hard", label: "困难", detail: "上限 45 轮" },
 ];
 
 function ChasePicker({
@@ -565,8 +565,11 @@ function ChasePicker({
         </fieldset>
 
         <p id="chase-picker-summary" class="picker-summary">
-          <strong>{selectedDifficulty?.detail}</strong>
-          <span>小偷先走；警察完成上限轮数仍未抓到，小偷获胜。</span>
+          <strong>{selectedDifficulty?.label}地图 · {selectedDifficulty?.detail}</strong>
+          <span>
+            小偷先走，双方每次沿线走一步；警察走到小偷所在点即获胜，
+            撑过回合上限则小偷获胜。
+          </span>
         </p>
 
         {error && <p class="inline-error picker-error" role="alert">{error}</p>}
