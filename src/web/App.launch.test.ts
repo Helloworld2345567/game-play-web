@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LANDING_GAME_CATALOG,
+  resolveChaseLaunch,
   resolveMinesweeperLaunch,
   shouldPromptForDisplayName,
 } from "./App";
@@ -12,7 +13,16 @@ describe("landing game catalog", () => {
       "gomoku",
       "xiangqi",
       "tictactoe",
+      "chase",
       "minesweeper",
+    ]);
+    expect(
+      LANDING_GAME_CATALOG.filter((entry) => entry.launch.kind === "picker").map(
+        (entry) => entry.launch,
+      ),
+    ).toEqual([
+      { kind: "picker", gameType: "chase" },
+      { kind: "picker", gameType: "minesweeper" },
     ]);
   });
 
@@ -21,7 +31,10 @@ describe("landing game catalog", () => {
       LANDING_GAME_CATALOG.filter((entry) => entry.launch.kind === "room"),
     ).toEqual(
       availableGameAdapters
-        .filter((adapter) => adapter.gameType !== "minesweeper")
+        .filter(
+          (adapter) =>
+            adapter.gameType !== "minesweeper" && adapter.gameType !== "chase",
+        )
         .map((adapter) => ({
           id: adapter.gameType,
           label: "landingLabel" in adapter
@@ -36,6 +49,21 @@ describe("landing game catalog", () => {
           },
         })),
     );
+  });
+
+  it.each([
+    ["easy", "chase.easy.v1"],
+    ["medium", "chase.medium.v1"],
+    ["hard", "chase.hard.v1"],
+  ] as const)("maps %s chase difficulty to its versioned room rules", (
+    difficulty,
+    ruleSetId,
+  ) => {
+    expect(resolveChaseLaunch(difficulty)).toEqual({
+      kind: "room",
+      gameType: "chase",
+      ruleSetId,
+    });
   });
 
   it("maps a solo difficulty to a refresh-safe URL", () => {

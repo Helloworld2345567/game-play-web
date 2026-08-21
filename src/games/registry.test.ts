@@ -56,4 +56,22 @@ describe("game rules registry", () => {
       isCreatableRuleSet("gomoku", "gomoku.freestyle15.v1"),
     ).toBe(true);
   });
+
+  it("registers and allows creation of every police-chase map", () => {
+    for (const ruleSetId of [
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ]) {
+      expect(isSupportedGame("chase", ruleSetId)).toBe(true);
+      expect(isCreatableRuleSet("chase", ruleSetId)).toBe(true);
+      expect(getGameRules(ruleSetId)?.definition).toEqual({
+        gameType: "chase",
+        ruleSetId,
+        actionConsistency: "strict_revision",
+      });
+    }
+    expect(isSupportedGame("chase", "chase.unknown.v1")).toBe(false);
+    expect(isCreatableRuleSet("chase", "chase.unknown.v1")).toBe(false);
+  });
 });

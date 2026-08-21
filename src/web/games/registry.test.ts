@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { RulePosition } from "../../core/game-rules";
 import type { GameActionCommand } from "../../shared/protocol";
 import {
   clientGameCatalog,
@@ -23,6 +24,39 @@ function minesweeperAction(
   };
 }
 
+function chaseAction(
+  payload: GameActionCommand["payload"],
+): GameActionCommand {
+  return {
+    v: 1,
+    type: "game_action",
+    gameType: "chase",
+    ruleSetId: "chase.easy.v1",
+    expectedRevision: 4,
+    payload,
+  };
+}
+
+function chasePosition(
+  overrides: Record<string, unknown> = {},
+): RulePosition {
+  return {
+    data: {
+      mapId: "easy",
+      thiefSeat: "seat-a",
+      policeSeat: "seat-b",
+      thiefNode: "L",
+      policeNode: "T",
+      moveCount: 4,
+      optimalRounds: 5,
+      maxRounds: 15,
+      ...overrides,
+    },
+    turn: "seat-a",
+    outcome: null,
+  };
+}
+
 describe("game outcome presentation", () => {
   it("exposes allowlisted renderer loading through every catalog entry", () => {
     expect(
@@ -35,6 +69,18 @@ describe("game outcome presentation", () => {
     ).toBeTypeOf("function");
     expect(
       getClientGameRendererLoader("gomoku", "xiangqi.casual.v1"),
+    ).toBeNull();
+    for (const ruleSetId of [
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ]) {
+      expect(
+        getClientGameRendererLoader("chase", ruleSetId),
+      ).toBeTypeOf("function");
+    }
+    expect(
+      getClientGameRendererLoader("gomoku", "chase.easy.v1"),
     ).toBeNull();
   });
 
@@ -62,6 +108,83 @@ describe("game outcome presentation", () => {
         ruleSetId,
       });
     }
+  });
+
+  it("registers all three chase map rule versions", () => {
+    for (const ruleSetId of [
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ]) {
+      expect(getGameAdapter("chase", ruleSetId)).toMatchObject({
+        gameType: "chase",
+        ruleSetId,
+        displayName: expect.stringContaining("警察抓小偷"),
+      });
+    }
+  });
+
+  it("uses the position role assignment for chase seat swatches", () => {
+    const adapter = getGameAdapter("chase", "chase.easy.v1");
+    expect(adapter?.getSeatPresentations(chasePosition())).toEqual({
+      "seat-a": { label: "小偷", swatchClassName: "chase-thief" },
+      "seat-b": { label: "警察", swatchClassName: "chase-police" },
+    });
+    expect(
+      adapter?.getSeatPresentations(
+        chasePosition({ thiefSeat: "seat-b", policeSeat: "seat-a" }),
+      ),
+    ).toEqual({
+      "seat-a": { label: "警察", swatchClassName: "chase-police" },
+      "seat-b": { label: "小偷", swatchClassName: "chase-thief" },
+    });
+  });
+
+  it("projects chase moves into pending node keys", () => {
+    const adapter = getGameAdapter("chase", "chase.easy.v1");
+    expect(
+      projectPendingCells(adapter, [
+        chaseAction({ type: "move", to: "V1" }),
+        chaseAction({ type: "move", to: "V2" }),
+      ]),
+    ).toEqual(new Set(["move:V1", "move:V2"]));
+  });
+
+  it("describes chase outcomes for players and spectators", () => {
+    const adapter = getGameAdapter("chase", "chase.easy.v1");
+    const outcome = {
+      kind: "win" as const,
+      winner: "seat-a",
+      reason: "thief_survived",
+    };
+    expect(adapter?.getOutcomeMessage?.(outcome, {
+      selfSeat: "seat-a",
+      winnerDisplayName: "小偷玩家",
+    })).toBe("小偷撑过回合上限 · 你赢了");
+    expect(adapter?.getOutcomeMessage?.(outcome, {
+      selfSeat: "seat-b",
+      winnerDisplayName: "小偷玩家",
+    })).toBe("小偷撑过回合上限 · 对手获胜");
+    expect(adapter?.getOutcomeMessage?.(outcome, {
+      selfSeat: null,
+      winnerDisplayName: "小偷玩家",
+    })).toBe("小偷玩家（小偷撑过回合上限）");
+    expect(adapter?.getOutcomeMessage?.({
+      kind: "win",
+      winner: "seat-a",
+      reason: "resignation",
+    }, {
+      selfSeat: "seat-a",
+      winnerDisplayName: "小偷玩家",
+    })).toBeNull();
+    expect(adapter?.getOutcomeMessage?.({
+      kind: "win",
+      winner: "seat-b",
+      reason: "police_caught_thief",
+    }, {
+      selfSeat: "seat-b",
+      winnerDisplayName: "警察玩家",
+    })).toBe("警察抓获小偷 · 你赢了");
   });
 
   it("projects opaque minesweeper commands into pending cell keys", () => {

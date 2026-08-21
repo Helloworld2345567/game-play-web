@@ -1,4 +1,5 @@
 import type { GameRules } from "../core/game-rules";
+import { chaseRules } from "./chase/rules";
 import { gomokuRules } from "./gomoku/rules";
 import { minesweeperDuelRules } from "./minesweeper/duel-rules";
 import { minesweeperRaceRules } from "./minesweeper/race-rules";
@@ -16,6 +17,9 @@ const registrations: readonly ServerRuleRegistration[] = [
   { rules: gomokuRules, creationPolicy: "enabled" },
   { rules: xiangqiRules, creationPolicy: "enabled" },
   { rules: ticTacToeRules, creationPolicy: "enabled" },
+  ...Object.values(chaseRules).map(
+    (rules) => ({ rules, creationPolicy: "enabled" as const }),
+  ),
   ...Object.values(minesweeperDuelRules).map(
     (rules) => ({ rules, creationPolicy: "legacy_only" as const }),
   ),

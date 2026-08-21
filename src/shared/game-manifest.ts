@@ -61,6 +61,23 @@ export const GAME_MANIFESTS = [
     creatableRuleSetIds: ["tictactoe.classic3.v1"],
   },
   {
+    gameId: "chase",
+    title: "警察抓小偷",
+    description: "轮流走一步 · 警察抓到小偷获胜",
+    creationPolicy: "enabled",
+    launchKind: "turn-room",
+    ruleSetIds: [
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ],
+    creatableRuleSetIds: [
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ],
+  },
+  {
     gameId: "minesweeper",
     title: "扫雷",
     description: "单人计时 · 双人竞速",

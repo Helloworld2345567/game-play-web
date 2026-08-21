@@ -93,6 +93,18 @@ const RENDERER_LOADERS = {
         ({ MinesweeperDuelBoard }) => MinesweeperDuelBoard,
       ),
   },
+  "chase.easy.v1": {
+    gameId: "chase",
+    load: () => import("./chase/Board").then(({ ChaseBoard }) => ChaseBoard),
+  },
+  "chase.medium.v1": {
+    gameId: "chase",
+    load: () => import("./chase/Board").then(({ ChaseBoard }) => ChaseBoard),
+  },
+  "chase.hard.v1": {
+    gameId: "chase",
+    load: () => import("./chase/Board").then(({ ChaseBoard }) => ChaseBoard),
+  },
 } as const satisfies Readonly<Record<string, RendererRegistration>>;
 
 /* Page imports are allowlisted independently from room renderers. */
@@ -155,10 +167,12 @@ function catalogEntry(
 }
 
 export const clientGameCatalog: readonly ClientGameCatalogEntry[] = [
-  catalogEntry(GAME_MANIFESTS[0]),
-  catalogEntry(GAME_MANIFESTS[1]),
-  catalogEntry(GAME_MANIFESTS[2]),
-  catalogEntry(GAME_MANIFESTS[3], PAGE_LOADERS.minesweeper),
+  ...GAME_MANIFESTS.map((manifest) =>
+    catalogEntry(
+      manifest,
+      manifest.gameId === "minesweeper" ? PAGE_LOADERS.minesweeper : undefined,
+    ),
+  ),
 ];
 
 export function getClientGameCatalogEntry(

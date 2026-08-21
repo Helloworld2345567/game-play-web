@@ -169,6 +169,18 @@ const MINESWEEPER_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   "minesweeper.invalid_action": "无法识别这次扫雷操作。",
 };
 
+const CHASE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  "chase.game_finished": "本局已经结束。",
+  "chase.not_your_turn": "还没轮到你。",
+  "chase.not_a_player": "观众不能操作棋盘。",
+  "chase.invalid_action": "无法识别这次走子。",
+  "chase.invalid_position": "棋局数据无效，请刷新后重试。",
+  "chase.occupied": "不能走到对方所在的节点。",
+  "chase.illegal_move": "只能沿地图上的边走一步。",
+  "chase.not_adjacent": "只能沿地图上的边走一步。",
+  "chase.out_of_bounds": "目标节点不存在。",
+};
+
 const MINESWEEPER_RACE_RULE_SET_IDS = [
   "minesweeper.race.9x9x10.v1",
   "minesweeper.race.16x16x40.v1",
@@ -195,6 +207,63 @@ function minesweeperPendingCellKey(
     return null;
   }
   return `${String(command.payload.x)},${String(command.payload.y)}`;
+}
+
+function chasePendingCellKey(command: GameActionCommand): string | null {
+  if (
+    command.gameType !== "chase" ||
+    typeof command.payload !== "object" ||
+    command.payload === null ||
+    Array.isArray(command.payload) ||
+    command.payload.type !== "move" ||
+    typeof command.payload.to !== "string"
+  ) {
+    return null;
+  }
+  return `move:${command.payload.to}`;
+}
+
+interface ChasePositionData {
+  readonly thiefSeat: PlatformSeatId | null;
+  readonly policeSeat: PlatformSeatId | null;
+  readonly thiefNode: string | null;
+  readonly policeNode: string | null;
+  readonly moveCount: number | null;
+  readonly optimalRounds: number | null;
+  readonly maxRounds: number | null;
+}
+
+function readChasePositionData(position: RulePosition | null): ChasePositionData {
+  const data = position?.data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return {
+      thiefSeat: null,
+      policeSeat: null,
+      thiefNode: null,
+      policeNode: null,
+      moveCount: null,
+      optimalRounds: null,
+      maxRounds: null,
+    };
+  }
+  const record = data as Record<string, unknown>;
+  const asSeat = (value: unknown): PlatformSeatId | null =>
+    value === "seat-a" || value === "seat-b" ? value : null;
+  const asString = (value: unknown): string | null =>
+    typeof value === "string" ? value : null;
+  const asInteger = (value: unknown): number | null =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : null;
+  return {
+    thiefSeat: asSeat(record.thiefSeat),
+    policeSeat: asSeat(record.policeSeat),
+    thiefNode: asString(record.thiefNode),
+    policeNode: asString(record.policeNode),
+    moveCount: asInteger(record.moveCount ?? record.ply),
+    optimalRounds: asInteger(record.optimalRounds),
+    maxRounds: asInteger(record.maxRounds ?? record.roundLimit),
+  };
 }
 
 export function projectPendingCells(
@@ -503,12 +572,122 @@ export const minesweeperDuelAdapters = [
   ),
 ] as const;
 
+const CHASE_RULE_SET_IDS = [
+  "chase.easy.v1",
+  "chase.medium.v1",
+  "chase.hard.v1",
+] as const;
+
+const CHASE_DIFFICULTIES = [
+  {
+    ruleSetId: CHASE_RULE_SET_IDS[0],
+    displayName: "警察抓小偷 · 简单",
+    landingDescription: "闭环地图 · x=5 · 上限15轮",
+  },
+  {
+    ruleSetId: CHASE_RULE_SET_IDS[1],
+    displayName: "警察抓小偷 · 中等",
+    landingDescription: "闭环地图 · x=10 · 上限25轮",
+  },
+  {
+    ruleSetId: CHASE_RULE_SET_IDS[2],
+    displayName: "警察抓小偷 · 困难",
+    landingDescription: "闭环地图 · x=20 · 上限45轮",
+  },
+] as const;
+
+function chaseSeatPresentations(
+  position: RulePosition | null,
+): SeatPresentations {
+  const data = readChasePositionData(position);
+  const thiefSeat = data.thiefSeat ?? "seat-a";
+  return {
+    "seat-a": {
+      label: thiefSeat === "seat-a" ? "小偷" : "警察",
+      swatchClassName: thiefSeat === "seat-a" ? "chase-thief" : "chase-police",
+    },
+    "seat-b": {
+      label: thiefSeat === "seat-b" ? "小偷" : "警察",
+      swatchClassName: thiefSeat === "seat-b" ? "chase-thief" : "chase-police",
+    },
+  };
+}
+
+function chaseRoleForSeat(
+  data: ChasePositionData,
+  seat: string | null,
+): "小偷" | "警察" | null {
+  if (seat !== null && seat === data.thiefSeat) return "小偷";
+  if (seat !== null && seat === data.policeSeat) return "警察";
+  return null;
+}
+
+function createChaseAdapter(
+  ruleSetId: string,
+  displayName: string,
+  landingDescription: string,
+): GameAdapter {
+  return dynamicAdapter({
+    gameType: "chase",
+    ruleSetId,
+    displayName,
+    landingLabel: "警察抓小偷",
+    createRoomLabel: `创建${displayName}房`,
+    landingDescription,
+    getPendingCellKey: chasePendingCellKey,
+    getSeatPresentations: chaseSeatPresentations,
+    getErrorMessage(code) {
+      return CHASE_ERROR_MESSAGES[code] ?? null;
+    },
+    getStatusMessage(position, selfSeat) {
+      const data = readChasePositionData(position);
+      if (position.outcome !== null) return "本局已结束";
+      if (selfSeat === null) return "正在观战警察抓小偷";
+      const role = chaseRoleForSeat(data, selfSeat);
+      const moveText = data.moveCount === null
+        ? ""
+        : ` · 第 ${data.moveCount} 步`;
+      if (position.turn === selfSeat) {
+        return `轮到你${role === null ? "" : `（${role}）`}${moveText}`;
+      }
+      const turnRole = chaseRoleForSeat(data, position.turn);
+      return `等待${turnRole ?? "对手"}走子${moveText}`;
+    },
+    getOutcomeMessage(outcome, viewer) {
+      if (outcome.kind !== "win") return null;
+      const result = outcome.reason === "thief_survived"
+        ? "小偷撑过回合上限"
+        : outcome.reason === "police_caught_thief"
+          ? "警察抓获小偷"
+          : null;
+      if (result === null) return null;
+      if (viewer.selfSeat === null) {
+        return viewer.winnerDisplayName === null
+          ? result
+          : `${viewer.winnerDisplayName}（${result}）`;
+      }
+      return outcome.winner === viewer.selfSeat
+        ? `${result} · 你赢了`
+        : `${result} · 对手获胜`;
+    },
+  });
+}
+
+export const chaseAdapters = CHASE_DIFFICULTIES.map((difficulty) =>
+  createChaseAdapter(
+    difficulty.ruleSetId,
+    difficulty.displayName,
+    difficulty.landingDescription,
+  ),
+) as readonly GameAdapter[];
+
 export const availableGameAdapters: readonly GameAdapter[] = [
   gomokuAdapter,
   xiangqiAdapter,
   ticTacToeAdapter,
   ...minesweeperRaceAdapters,
   ...minesweeperDuelAdapters,
+  ...chaseAdapters,
 ];
 
 const adaptersByRuleSetId = new Map<string, GameAdapter>(

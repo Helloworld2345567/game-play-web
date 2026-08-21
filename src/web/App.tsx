@@ -4,6 +4,7 @@ import {
   type MinefieldPresetId,
 } from "../games/minesweeper/presets";
 import { normalizeDisplayName } from "../shared/display-name";
+import { getGameManifest } from "../shared/game-manifest";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
   GameErrorBoundary,
@@ -45,7 +46,8 @@ interface PlatformStats {
 const LANDING_ROOM_ENTRIES = clientGameCatalog.flatMap((manifest) => {
   if (
     manifest.launchKind !== "turn-room" ||
-    manifest.creationPolicy !== "enabled"
+    manifest.creationPolicy !== "enabled" ||
+    manifest.gameId === "chase"
   ) {
     return [];
   }
@@ -71,16 +73,38 @@ const LANDING_ROOM_ENTRIES = clientGameCatalog.flatMap((manifest) => {
 export const LANDING_GAME_CATALOG = [
   ...LANDING_ROOM_ENTRIES,
   {
+    id: "chase",
+    label: "警察抓小偷",
+    ariaLabel: "警察抓小偷，选择地图难度",
+    description: "轮流走一步 · 警察抓住小偷获胜",
+    launch: { kind: "picker" as const, gameType: "chase" as const },
+  },
+  {
     id: "minesweeper",
     label: "扫雷",
     ariaLabel: "扫雷，选择玩法和难度",
     description: "单人计时 · 双人竞速",
-    launch: { kind: "picker" as const },
+    launch: { kind: "picker" as const, gameType: "minesweeper" as const },
   },
 ] as const;
 
 export type MinesweeperLaunchMode = "solo" | "race";
 export type MinesweeperPreset = MinefieldPresetId;
+
+export type ChaseDifficulty = "easy" | "medium" | "hard";
+
+export function resolveChaseLaunch(difficulty: ChaseDifficulty) {
+  const ruleSetId = `chase.${difficulty}.v1`;
+  const manifest = getGameManifest("chase");
+  if (!manifest?.creatableRuleSetIds.includes(ruleSetId)) {
+    throw new Error("unsupported_chase_difficulty");
+  }
+  return {
+    kind: "room" as const,
+    gameType: "chase",
+    ruleSetId,
+  };
+}
 
 export function resolveMinesweeperLaunch(
   mode: MinesweeperLaunchMode,
@@ -438,6 +462,123 @@ function MinesweeperPicker({
   );
 }
 
+const CHASE_DIFFICULTY_OPTIONS: ReadonlyArray<{
+  id: ChaseDifficulty;
+  label: string;
+  detail: string;
+}> = [
+  { id: "easy", label: "简单", detail: "最优 x=5 · 上限15轮" },
+  { id: "medium", label: "中等", detail: "最优 x=10 · 上限25轮" },
+  { id: "hard", label: "困难", detail: "最优 x=20 · 上限45轮" },
+];
+
+function ChasePicker({
+  difficulty,
+  creating,
+  error,
+  onDifficultyChange,
+  onStart,
+  onClose,
+}: {
+  difficulty: ChaseDifficulty;
+  creating: boolean;
+  error: string | null;
+  onDifficultyChange(difficulty: ChaseDifficulty): void;
+  onStart(): void;
+  onClose(): void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog !== null && !dialog.open) dialog.showModal();
+  }, []);
+
+  const close = () => {
+    if (creating) return;
+    const dialog = dialogRef.current;
+    if (dialog?.open) dialog.close();
+    else onClose();
+  };
+
+  const selectedDifficulty = CHASE_DIFFICULTY_OPTIONS.find(
+    (option) => option.id === difficulty,
+  );
+
+  return (
+    <dialog
+      ref={dialogRef}
+      class="minesweeper-picker chase-picker"
+      aria-labelledby="chase-picker-title"
+      aria-describedby="chase-picker-summary"
+      onCancel={(event) => {
+        if (creating) event.preventDefault();
+      }}
+      onClose={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <header class="dialog-heading">
+        <div>
+          <p class="eyebrow">选择地图</p>
+          <h2 id="chase-picker-title">警察抓小偷</h2>
+        </div>
+        <button
+          class="dialog-close"
+          type="button"
+          aria-label="关闭警察抓小偷地图选择"
+          disabled={creating}
+          onClick={close}
+        >
+          <span aria-hidden="true">×</span>
+        </button>
+      </header>
+
+      <form
+        class="minesweeper-picker-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onStart();
+        }}
+      >
+        <fieldset disabled={creating}>
+          <legend>难度</legend>
+          <div class="choice-segments preset-segments">
+            {CHASE_DIFFICULTY_OPTIONS.map((option) => (
+              <label class="choice-segment" key={option.id}>
+                <input
+                  type="radio"
+                  name="chase-difficulty"
+                  value={option.id}
+                  checked={difficulty === option.id}
+                  autofocus={difficulty === option.id}
+                  onChange={() => onDifficultyChange(option.id)}
+                />
+                <span>
+                  <strong>{option.label}</strong>
+                  <small>{option.detail}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <p id="chase-picker-summary" class="picker-summary">
+          <strong>{selectedDifficulty?.detail}</strong>
+          <span>小偷先走；警察完成上限轮数仍未抓到，小偷获胜。</span>
+        </p>
+
+        {error && <p class="inline-error picker-error" role="alert">{error}</p>}
+
+        <button class="primary-button picker-submit" type="submit" disabled={creating}>
+          {creating ? "正在创建…" : "创建追逃房间"}
+        </button>
+      </form>
+    </dialog>
+  );
+}
+
 function LandingPage({
   displayName,
   onDisplayNameChange,
@@ -454,7 +595,11 @@ function LandingPage({
     useState<MinesweeperLaunchMode>("solo");
   const [minesweeperPreset, setMinesweeperPreset] =
     useState<MinesweeperPreset>("small");
+  const [chasePickerOpen, setChasePickerOpen] = useState(false);
+  const [chaseDifficulty, setChaseDifficulty] =
+    useState<ChaseDifficulty>("easy");
   const minesweeperTriggerRef = useRef<HTMLButtonElement>(null);
+  const chaseTriggerRef = useRef<HTMLButtonElement>(null);
 
   const createRoom = async (gameType: string, ruleSetId: string) => {
     if (creating !== null) return;
@@ -508,10 +653,21 @@ function LandingPage({
     void createRoom(launch.gameType, launch.ruleSetId);
   };
 
+  const startChase = () => {
+    const launch = resolveChaseLaunch(chaseDifficulty);
+    void createRoom(launch.gameType, launch.ruleSetId);
+  };
+
   const closeMinesweeperPicker = () => {
     setMinesweeperPickerOpen(false);
     setError(null);
     requestAnimationFrame(() => minesweeperTriggerRef.current?.focus());
+  };
+
+  const closeChasePicker = () => {
+    setChasePickerOpen(false);
+    setError(null);
+    requestAnimationFrame(() => chaseTriggerRef.current?.focus());
   };
 
   return (
@@ -546,7 +702,9 @@ function LandingPage({
             <button
               key={game.id}
               ref={game.launch.kind === "picker"
-                ? minesweeperTriggerRef
+                ? game.launch.gameType === "chase"
+                  ? chaseTriggerRef
+                  : minesweeperTriggerRef
                 : undefined}
               class="secondary-button hero-button game-choice"
               type="button"
@@ -555,7 +713,11 @@ function LandingPage({
               onClick={() => {
                 if (game.launch.kind === "picker") {
                   setError(null);
-                  setMinesweeperPickerOpen(true);
+                  if (game.launch.gameType === "chase") {
+                    setChasePickerOpen(true);
+                  } else {
+                    setMinesweeperPickerOpen(true);
+                  }
                 } else {
                   void createRoom(
                     game.launch.gameType,
@@ -580,7 +742,7 @@ function LandingPage({
             </button>
           ))}
         </div>
-        {error && !minesweeperPickerOpen && (
+        {error && !minesweeperPickerOpen && !chasePickerOpen && (
           <p class="inline-error" role="alert">{error}</p>
         )}
       </section>
@@ -600,6 +762,19 @@ function LandingPage({
           }}
           onStart={startMinesweeper}
           onClose={closeMinesweeperPicker}
+        />
+      )}
+      {chasePickerOpen && (
+        <ChasePicker
+          difficulty={chaseDifficulty}
+          creating={creating !== null}
+          error={error}
+          onDifficultyChange={(difficulty) => {
+            setChaseDifficulty(difficulty);
+            setError(null);
+          }}
+          onStart={startChase}
+          onClose={closeChasePicker}
         />
       )}
     </main>
