@@ -8,9 +8,11 @@ import {
 } from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
 import {
+  createRoom,
   getRecentActionReceipts,
   type StoredRoom,
 } from "../src/core/room-state";
+import { getGameRules } from "../src/games/registry";
 import {
   ROOM_DIRECTORY_NAME,
   type RoomDirectory,
@@ -112,6 +114,7 @@ async function connect(
   stub: DurableObjectStub<GameRoom>,
   guestId: string,
   displayName?: string,
+  connectionId = crypto.randomUUID(),
 ): Promise<TestConnection> {
   const headers = new Headers({
     Upgrade: "websocket",
@@ -121,9 +124,12 @@ async function connect(
     headers.set("X-Internal-Display-Name", encodeURIComponent(displayName));
   }
   const response = await stub.fetch(
-    new Request("https://room.internal/websocket", {
-      headers,
-    }),
+    new Request(
+      `https://room.internal/websocket?connectionId=${encodeURIComponent(connectionId)}`,
+      {
+        headers,
+      },
+    ),
   );
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
@@ -197,6 +203,59 @@ async function initializeRoom(
       creatorDisplayName,
     )
   ).stub;
+}
+
+/**
+ * Legacy-only duel rooms are loaded for recovery but cannot be initialized
+ * through the production boundary. Seed one directly so the projection and
+ * concurrent-action tests continue to exercise the legacy reader.
+ */
+async function seedLegacyMinesweeperRoom(
+  roomLabel: string,
+  creatorGuestId = "guest-mine-creator",
+): Promise<InitializedRoomFixture> {
+  const testEnv = env as unknown as TestEnv;
+  const roomId = fixtureRoomId(roomLabel);
+  const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+  const reservation = await directory.reserve(roomId);
+  if (!reservation.ok) {
+    throw new Error(`Unable to reserve test Room: ${reservation.reason}`);
+  }
+  const rules = getGameRules(MINESWEEPER_SMALL_RULE_SET);
+  if (rules === null) throw new Error("Missing legacy minesweeper rules");
+  const now = Date.now();
+  const room = createRoom({
+    roomId,
+    creatorGuestId,
+    rules,
+    now,
+  });
+  const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+  const activated = await directory.activate(roomId, reservation.leaseId);
+  if (!activated) throw new Error("Unable to activate test Room lease");
+  await runInDurableObject(stub, async (instance, state) => {
+    const target = instance as unknown as {
+      room: StoredRoom | null;
+      displayNames: Record<string, string>;
+      snapshotRevision: number;
+      capacityLeaseId: string | null;
+      capacityPhase: "provisioning" | "active" | null;
+      capacityProvisioningSince: number | null;
+    };
+    target.room = room;
+    target.displayNames = { [creatorGuestId]: "测试玩家" };
+    target.snapshotRevision = 0;
+    target.capacityLeaseId = reservation.leaseId;
+    target.capacityPhase = "active";
+    target.capacityProvisioningSince = null;
+    await state.storage.put("room", room);
+    await state.storage.put("displayNames", target.displayNames);
+    await state.storage.put("snapshotRevision", 0);
+    await state.storage.put("capacityLeaseId", reservation.leaseId);
+    await state.storage.put("capacityPhase", "active");
+    await state.storage.delete("capacityProvisioningSince");
+  });
+  return { stub, roomId, capacityLeaseId: reservation.leaseId };
 }
 
 async function makeLegacyRoom(
@@ -489,11 +548,9 @@ async function startMinesweeperRoom(
   firstStart = { x: 1, y: 1 },
   secondStart = { x: 7, y: 7 },
 ): Promise<StartedMinesweeperRoom> {
-  const initialized = await initializeManagedRoom(
+  const initialized = await seedLegacyMinesweeperRoom(
     roomLabel,
     "guest-mine-creator",
-    MINESWEEPER_GAME_TYPE,
-    MINESWEEPER_SMALL_RULE_SET,
   );
   const { stub } = initialized;
   const creator = await connect(stub, "guest-mine-creator");
@@ -629,6 +686,35 @@ describe("GameRoom Durable Object", () => {
           roomId,
           gameType: "gomoku",
           ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects legacy-only rules at the Room initialization boundary", async () => {
+    const testEnv = env as unknown as TestEnv;
+    const roomId = "legacy-only-init-01";
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+
+    const response = await stub.fetch(
+      new Request("https://room.internal/initialize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Guest-Id": "guest-legacy-init-creator",
+        },
+        body: JSON.stringify({
+          roomId,
+          gameType: "minesweeper",
+          ruleSetId: "minesweeper.duel.9x9x10.v1",
+          capacityLeaseId: "00000000-0000-4000-8000-000000000000",
         }),
       }),
     );
@@ -872,6 +958,51 @@ describe("GameRoom Durable Object", () => {
         state.storage.get<number>("snapshotRevision"),
       ),
     ).resolves.toBe(snapshotRevision);
+  });
+
+  it("does not advance the snapshot when pruning an expired duplicate HTTP lease", async () => {
+    const stub = await initializeRoom("room-http-expired-duplicate");
+    const startedAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    try {
+      await postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: "http-expired-duplicate-a",
+      });
+
+      clock.mockReturnValue(startedAt + 5_000);
+      const second = await postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: "http-expired-duplicate-b",
+      });
+      const snapshotRevision = second.message.snapshotRevision;
+      expect(snapshotRevision).toEqual(expect.any(Number));
+
+      // Lease A has expired, but Lease B still keeps this Guest visibly online.
+      clock.mockReturnValue(startedAt + 16_000);
+      const heartbeat = await postRoomHttpRaw(
+        stub,
+        "sync",
+        "guest-creator",
+        {
+          v: 1,
+          connectionId: "http-expired-duplicate-b",
+          sinceSnapshotRevision: snapshotRevision,
+        },
+      );
+
+      expect(heartbeat.status).toBe(204);
+      expect(heartbeat.headers.get("X-Snapshot-Revision")).toBe(
+        String(snapshotRevision),
+      );
+      await expect(
+        runInDurableObject(stub, (_instance, state) =>
+          state.storage.get<number>("snapshotRevision"),
+        ),
+      ).resolves.toBe(snapshotRevision);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("applies an HTTP command and returns its authoritative snapshot", async () => {
@@ -1413,6 +1544,73 @@ describe("GameRoom Durable Object", () => {
       );
       expect(rateLimited.message).toMatchObject({
         type: "error",
+        code: "protocol.rate_limited",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rate limits WebSocket commands across all connections of one Guest", async () => {
+    const stub = await initializeRoom("room-ws-guest-rate-limit");
+    const firstSocket = await connect(stub, "guest-creator");
+    const secondSocket = await connect(stub, "guest-creator");
+    vi.setSystemTime(Date.now());
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        const firstResponse = firstSocket.inbox.nextMatching(
+          (message) => message.type === "error",
+        );
+        firstSocket.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+        await expect(firstResponse).resolves.toMatchObject({
+          type: "error",
+          code: "room.revision_mismatch",
+        });
+
+        const secondResponse = secondSocket.inbox.nextMatching(
+          (message) => message.type === "error",
+        );
+        secondSocket.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+        await expect(secondResponse).resolves.toMatchObject({
+          type: "error",
+          code: "room.revision_mismatch",
+        });
+      }
+
+      const rateLimited = secondSocket.inbox.nextMatching(
+        (message) => message.type === "error",
+      );
+      secondSocket.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+      await expect(rateLimited).resolves.toMatchObject({
+        type: "error",
+        code: "protocol.rate_limited",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("charges oversized WebSocket frames to the connection rate bucket", async () => {
+    const stub = await initializeRoom("room-ws-oversized-rate-limit");
+    const creator = await connect(stub, "guest-creator");
+    vi.setSystemTime(Date.now());
+    try {
+      const oversized = "x".repeat(4_097);
+      for (let index = 0; index < 20; index += 1) {
+        const response = creator.inbox.nextMatching(
+          (message) => message.type === "error",
+        );
+        creator.socket.send(oversized);
+        await expect(response).resolves.toMatchObject({
+          code: "protocol.message_too_large",
+        });
+      }
+
+      const rateLimited = creator.inbox.nextMatching(
+        (message) => message.type === "error",
+      );
+      creator.socket.send(oversized);
+      await expect(rateLimited).resolves.toMatchObject({
         code: "protocol.rate_limited",
       });
     } finally {

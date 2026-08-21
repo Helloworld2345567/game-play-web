@@ -20,6 +20,8 @@ export type ClientGamePageLoader = () => Promise<ClientGamePage>;
 
 export interface ClientGameCatalogEntry extends GameManifest {
   readonly loadPage?: ClientGamePageLoader;
+  /** Resolve one trusted rule version through the literal renderer allowlist. */
+  readonly loadRenderer?: (ruleSetId: string) => Promise<ClientGameRenderer>;
 }
 
 interface RendererRegistration {
@@ -103,10 +105,19 @@ export function getClientGameRendererLoader(
   gameId: string,
   ruleSetId: string,
 ): ClientGameRendererLoader | null {
+  const entry = getClientGameCatalogEntry(gameId);
+  if (
+    entry?.loadRenderer === undefined ||
+    !entry.ruleSetIds.includes(ruleSetId)
+  ) {
+    return null;
+  }
   const registration = (
     RENDERER_LOADERS as Readonly<Record<string, RendererRegistration>>
   )[ruleSetId];
-  return registration?.gameId === gameId ? registration.load : null;
+  return registration?.gameId === gameId
+    ? () => entry.loadRenderer!(ruleSetId)
+    : null;
 }
 
 export function getClientGamePageLoader(
@@ -119,16 +130,35 @@ export function getClientGamePageLoader(
 
 /**
  * Client-side catalog.  The manifest remains the source of truth for the
- * metadata; this layer only adds lazy page loading for local games.
+ * metadata; this layer adds the trusted lazy page and renderer capabilities.
  */
+function catalogEntry(
+  manifest: GameManifest,
+  loadPage?: ClientGamePageLoader,
+): ClientGameCatalogEntry {
+  return {
+    ...manifest,
+    ...(loadPage === undefined ? {} : { loadPage }),
+    loadRenderer(ruleSetId) {
+      const registration = (
+        RENDERER_LOADERS as Readonly<Record<string, RendererRegistration>>
+      )[ruleSetId];
+      if (
+        registration?.gameId !== manifest.gameId ||
+        !manifest.ruleSetIds.includes(ruleSetId)
+      ) {
+        return Promise.reject(new Error("unsupported_game_renderer"));
+      }
+      return registration.load();
+    },
+  };
+}
+
 export const clientGameCatalog: readonly ClientGameCatalogEntry[] = [
-  { ...GAME_MANIFESTS[0] },
-  { ...GAME_MANIFESTS[1] },
-  { ...GAME_MANIFESTS[2] },
-  {
-    ...GAME_MANIFESTS[3],
-    loadPage: PAGE_LOADERS.minesweeper,
-  },
+  catalogEntry(GAME_MANIFESTS[0]),
+  catalogEntry(GAME_MANIFESTS[1]),
+  catalogEntry(GAME_MANIFESTS[2]),
+  catalogEntry(GAME_MANIFESTS[3], PAGE_LOADERS.minesweeper),
 ];
 
 export function getClientGameCatalogEntry(

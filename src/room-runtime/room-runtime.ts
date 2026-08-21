@@ -27,6 +27,7 @@ export class RoomRuntime {
     guestId: string,
     command: RoomCommand,
     now: number,
+    actionScope?: string,
   ): Promise<ExecutedRoomCommand> {
     const room = this.hooks.currentRoom();
     if (room === null) return { ok: false, code: "room.expired" };
@@ -40,6 +41,7 @@ export class RoomRuntime {
       rules,
       now,
       this.hooks.randomSeed(),
+      actionScope,
     );
     if (decision.changed) {
       const broadcast = decision.broadcast !== false;

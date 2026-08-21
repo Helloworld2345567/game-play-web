@@ -214,6 +214,173 @@ describe("room state", () => {
     });
   });
 
+  it("keeps independent connection sequence windows for one Seat", () => {
+    let current = joinedConcurrentRoom();
+    for (let offset = 0; offset <= MAX_RECENT_ACTION_RECEIPTS; offset += 1) {
+      const decision = applyRoomCommand(
+        current,
+        "guest-creator",
+        concurrentCommand(
+          `connection-a-${offset}`,
+          1_000 + offset,
+          1,
+          offset,
+        ),
+        concurrentRules,
+        3_000 + offset,
+        "",
+        "connection-a",
+      );
+      if (!decision.ok) throw new Error(decision.code);
+      current = decision.room;
+    }
+
+    const lateFromAnotherConnection = applyRoomCommand(
+      current,
+      "guest-creator",
+      concurrentCommand("connection-b-late", 0, 1, 10_000),
+      concurrentRules,
+      4_000,
+      "",
+      "connection-b",
+    );
+
+    expect(lateFromAnotherConnection).toMatchObject({
+      ok: true,
+      changed: true,
+    });
+    expect(lateFromAnotherConnection.room.position?.data).toMatchObject({
+      revealed: expect.arrayContaining([10_000]),
+    });
+
+    const replayFromCompactedScope = applyRoomCommand(
+      current,
+      "guest-creator",
+      concurrentCommand("connection-a-0", 1_000, 1, 20_000),
+      concurrentRules,
+      4_001,
+      "",
+      "connection-a",
+    );
+    expect(replayFromCompactedScope).toMatchObject({
+      ok: false,
+      changed: false,
+      code: "room.action_expired",
+    });
+  });
+
+  it("rejects an unseen lower sequence after a higher same-scope action", () => {
+    const scope = "serialized-http-connection";
+    const first = applyRoomCommand(
+      joinedConcurrentRoom(),
+      "guest-creator",
+      concurrentCommand("scope-seq-2", 2, 1, 2),
+      concurrentRules,
+      3_000,
+      "",
+      scope,
+    );
+    if (!first.ok) throw new Error(first.code);
+
+    const delayed = applyRoomCommand(
+      first.room,
+      "guest-creator",
+      concurrentCommand("scope-seq-1", 1, 1, 1),
+      concurrentRules,
+      3_001,
+      "",
+      scope,
+    );
+
+    expect(delayed).toMatchObject({
+      ok: false,
+      changed: false,
+      code: "room.action_out_of_order",
+      room: { revision: first.room.revision },
+    });
+    expect(delayed.room.position?.data).not.toMatchObject({
+      revealed: expect.arrayContaining([1]),
+    });
+  });
+
+  it("rejects a replay after HTTP to WebSocket retry reuses one scope", () => {
+    const sharedConnectionScope = "browser-connection-shared";
+    const first = applyRoomCommand(
+      joinedConcurrentRoom(),
+      "guest-creator",
+      concurrentCommand("transport-retry-old", 0, 1, 999),
+      concurrentRules,
+      3_000,
+      "",
+      sharedConnectionScope,
+    );
+    if (!first.ok) throw new Error(first.code);
+
+    let current = first.room;
+    for (let sequence = 1; sequence <= MAX_RECENT_ACTION_RECEIPTS; sequence += 1) {
+      const advanced = applyRoomCommand(
+        current,
+        "guest-creator",
+        concurrentCommand(
+          `transport-retry-recent-${sequence}`,
+          sequence,
+          1,
+          sequence,
+        ),
+        concurrentRules,
+        3_000 + sequence,
+        "",
+        sharedConnectionScope,
+      );
+      if (!advanced.ok) throw new Error(advanced.code);
+      current = advanced.room;
+    }
+
+    const replayedThroughOtherTransport = applyRoomCommand(
+      current,
+      "guest-creator",
+      concurrentCommand("transport-retry-old", 0, 1, 1_000),
+      concurrentRules,
+      4_000,
+      "",
+      sharedConnectionScope,
+    );
+
+    expect(replayedThroughOtherTransport).toMatchObject({
+      ok: false,
+      changed: false,
+      code: "room.action_expired",
+    });
+    expect(replayedThroughOtherTransport.room.position?.data).not.toMatchObject({
+      revealed: expect.arrayContaining([1_000]),
+    });
+  });
+
+  it("returns scoped action receipts in revision order", () => {
+    let current = joinedConcurrentRoom();
+    for (const [scope, actionId, clientSeq, cell, now] of [
+      ["connection-a", "ordered-a", 0, 30, 3_000],
+      ["connection-b", "ordered-b", 0, 31, 3_001],
+      ["connection-a", "ordered-a-late", 1, 32, 3_002],
+    ] as const) {
+      const decision = applyRoomCommand(
+        current,
+        "guest-creator",
+        concurrentCommand(actionId, clientSeq, 1, cell),
+        concurrentRules,
+        now,
+        "",
+        scope,
+      );
+      if (!decision.ok) throw new Error(decision.code);
+      current = decision.room;
+    }
+
+    expect(
+      getRecentActionReceipts(current, "seat-a").map((item) => item.revision),
+    ).toEqual([2, 3, 4]);
+  });
+
   it("consumes a rejected concurrent Action ID so a replay can never execute", () => {
     const room = joinedConcurrentRoom();
     const rejected = applyRoomCommand(

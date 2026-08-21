@@ -163,6 +163,7 @@ function humanizeError(
     "room.game_in_progress": "对局结束后才能准备复赛。",
     "room.action_expired": "这次操作已过期，请重新操作。",
     "room.action_sequence_conflict": "操作序号冲突，请刷新页面后重试。",
+    "room.action_out_of_order": "操作顺序异常，请稍后重试。",
     "room.rule_mismatch": "客户端与房间规则版本不一致，请刷新页面。",
     "protocol.invalid_message": "消息格式无效，请刷新后重试。",
     "protocol.message_too_large": "消息过大。",
@@ -394,11 +395,12 @@ export function ensureBrowserSession(
   return waitForSession(startBrowserSessionRequest(displayName), signal);
 }
 
-function websocketUrl(roomId: string): string {
+function websocketUrl(roomId: string, connectionId: string): string {
   const url = new URL(
     `/api/rooms/${encodeURIComponent(roomId)}/websocket`,
     location.href,
   );
+  url.searchParams.set("connectionId", connectionId);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
 }
@@ -591,6 +593,7 @@ export function useRoom(
     const concurrentActions = createConcurrentActionTracker();
     const concurrentHttpInFlight = new Set<string>();
     const concurrentWebSocketSent = new Set<string>();
+    let concurrentHttpPumpRunning = false;
     const connection = connectionRef.current!;
     const connectionId = connection.id;
 
@@ -742,10 +745,10 @@ export function useRoom(
         }
         httpNoticeShown = true;
       }
-    const rejectedCode = reconciliation.rejectedCodes.at(-1);
-    if (rejectedCode !== undefined) {
-      setNotice(humanizeError(rejectedCode, next, resolveErrorMessage));
-    }
+      const rejectedCode = reconciliation.rejectedCodes.at(-1);
+      if (rejectedCode !== undefined) {
+        setNotice(humanizeError(rejectedCode, next, resolveErrorMessage));
+      }
     };
 
     const handleServerMessage = (
@@ -952,31 +955,50 @@ export function useRoom(
     async function sendConcurrentHttpCommand(
       command: GameActionCommand,
       currentGeneration: number,
-    ): Promise<void> {
+    ): Promise<boolean> {
       const actionId = command.actionId;
       if (
         actionId === undefined ||
         concurrentHttpInFlight.has(actionId) ||
         !concurrentActions.actionIds().has(actionId)
       ) {
-        return;
+        // The command may have been acknowledged while it waited in the
+        // serial lane. Treat that as progress so the pump can inspect the
+        // next pending action.
+        return true;
       }
       concurrentHttpInFlight.add(actionId);
       try {
         const message = await postHttp("command", command);
-        if (disposed || terminal || currentGeneration !== generation) return;
+        if (disposed || terminal || currentGeneration !== generation) {
+          return false;
+        }
         if (message.type !== "heartbeat") {
           handleServerMessage(message, "http");
         }
-        if (message.type === "heartbeat") scheduleHttpSync(0);
+        if (message.type === "heartbeat") {
+          // A command endpoint should return a snapshot or an error. Treat a
+          // heartbeat as outcome-unknown so the next clientSeq cannot
+          // overtake this action; sync will restart the lane from pending.
+          scheduleHttpSync(0);
+          return false;
+        }
+        return true;
       } catch (error) {
-        if (disposed || terminal || currentGeneration !== generation) return;
-        if (failPermanentlyForHttp(error)) return;
+        if (disposed || terminal || currentGeneration !== generation) {
+          return false;
+        }
+        if (failPermanentlyForHttp(error)) return false;
         httpReady = false;
         httpRecovering = true;
         setNotice("连接暂时中断，正在确认刚才的操作。");
         setPhase(navigator.onLine ? "retrying" : "offline");
         scheduleHttpSync(0);
+        // The server may have committed this request before the response was
+        // lost. Stop the lane here; later sequence numbers must not overtake
+        // it until sync confirms the state and the pending queue is retried
+        // from its lowest clientSeq.
+        return false;
       } finally {
         concurrentHttpInFlight.delete(actionId);
       }
@@ -992,9 +1014,37 @@ export function useRoom(
       ) {
         return;
       }
-      for (const command of concurrentActions.commands()) {
-        void sendConcurrentHttpCommand(command, generation);
-      }
+      if (concurrentHttpPumpRunning) return;
+      concurrentHttpPumpRunning = true;
+      const currentGeneration = generation;
+      void (async () => {
+        try {
+          while (
+            !disposed &&
+            !terminal &&
+            fallbackActive &&
+            httpReady &&
+            navigator.onLine &&
+            currentGeneration === generation
+          ) {
+            const next = [...concurrentActions.commands()]
+              .filter((command) => command.actionId !== undefined)
+              .sort(
+                (left, right) =>
+                  (left.clientSeq ?? Number.MAX_SAFE_INTEGER) -
+                  (right.clientSeq ?? Number.MAX_SAFE_INTEGER),
+              )[0];
+            if (next === undefined) break;
+            const completed = await sendConcurrentHttpCommand(
+              next,
+              currentGeneration,
+            );
+            if (!completed) break;
+          }
+        } finally {
+          concurrentHttpPumpRunning = false;
+        }
+      })();
     }
 
     function flushConcurrentWebSocketCommands(socket: WebSocket): void {
@@ -1022,7 +1072,7 @@ export function useRoom(
     }
 
     websocketTransport = new WebSocketTransport({
-      url: websocketUrl(roomId),
+      url: websocketUrl(roomId, connectionId),
       ensureSession,
       onOpen: (socket) => {
         if (disposed || terminal || fallbackActive) return;
@@ -1100,7 +1150,7 @@ export function useRoom(
           if (!concurrentActions.add(command)) return false;
           publishPending();
           setNotice(null);
-          void sendConcurrentHttpCommand(command, generation);
+          flushConcurrentHttpCommands();
           return true;
         }
         if (!websocketTransport?.isOpen()) return false;

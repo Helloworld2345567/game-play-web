@@ -30,6 +30,7 @@ import {
 import { ProfileMenu } from "./ProfileMenu";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
+const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const DISPLAY_NAME_STORAGE_KEY = "ym0v0.display-name";
 const DISPLAY_NAME_CONFIRMED_STORAGE_KEY = "ym0v0.display-name-confirmed";
 let memoryDisplayName: string | null = null;
@@ -476,7 +477,13 @@ function LandingPage({
         roomId?: string;
         error?: string;
       };
-      if (!response.ok || !body.roomId) throw new Error(body.error);
+      if (
+        !response.ok ||
+        typeof body.roomId !== "string" ||
+        !ROOM_ID_PATTERN.test(body.roomId)
+      ) {
+        throw new Error(body.error);
+      }
       location.assign(`/r/${body.roomId}`);
     } catch (failure) {
       setCreating(null);

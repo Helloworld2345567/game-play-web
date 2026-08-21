@@ -114,6 +114,7 @@ function recordRejectedConcurrentAction(
   clientSeq: number,
   code: string,
   now: number,
+  actionScope?: string,
 ): Extract<RoomDecision, { ok: false }> {
   const receipt: ActionReceipt = {
     actionId,
@@ -124,7 +125,12 @@ function recordRejectedConcurrentAction(
   };
   const next: StoredRoom = {
     ...room,
-    actionJournal: recordActionReceipt(room.actionJournal, seat, receipt),
+    actionJournal: recordActionReceipt(
+      room.actionJournal,
+      seat,
+      receipt,
+      actionScope,
+    ),
   };
   return {
     ok: false,
@@ -248,6 +254,7 @@ export function applyRoomCommand(
   rules: GameRules,
   now: number,
   randomSeed = "",
+  actionScope?: string,
 ): RoomDecision {
   const concurrentAction =
     command.type === "game_action" &&
@@ -368,10 +375,12 @@ export function applyRoomCommand(
     ) {
       return { ok: false, room, code: "room.revision_mismatch" };
     }
-    const journalAdmission = admitAction(room.actionJournal, seat, {
-      actionId,
-      clientSeq,
-    });
+    const journalAdmission = admitAction(
+      room.actionJournal,
+      seat,
+      { actionId, clientSeq },
+      actionScope,
+    );
     if (journalAdmission.kind === "duplicate") {
       return {
         ok: true,
@@ -396,6 +405,14 @@ export function applyRoomCommand(
         code: "room.action_sequence_conflict",
       };
     }
+    if (journalAdmission.kind === "out_of_order") {
+      return {
+        ok: false,
+        room,
+        changed: false,
+        code: "room.action_out_of_order",
+      };
+    }
     if (baseRevision > room.revision) {
       return recordRejectedConcurrentAction(
         room,
@@ -404,6 +421,7 @@ export function applyRoomCommand(
         clientSeq,
         "room.revision_mismatch",
         now,
+        actionScope,
       );
     }
     if (baseRevision < room.roundStartRevision) {
@@ -414,6 +432,7 @@ export function applyRoomCommand(
         clientSeq,
         "room.revision_mismatch",
         now,
+        actionScope,
       );
     }
   }
@@ -431,6 +450,7 @@ export function applyRoomCommand(
         command.clientSeq!,
         ruleDecision.code,
         now,
+        actionScope,
       );
     }
     return { ok: false, room, code: ruleDecision.code };
@@ -453,7 +473,12 @@ export function applyRoomCommand(
     actionJournal:
       receipt === undefined
         ? room.actionJournal
-        : recordActionReceipt(room.actionJournal, seat, receipt),
+        : recordActionReceipt(
+            room.actionJournal,
+            seat,
+            receipt,
+            actionScope,
+          ),
     updatedAt: now,
     expiresAt:
       now + (finished ? FINISHED_ROOM_TTL_MS : ACTIVE_ROOM_TTL_MS),

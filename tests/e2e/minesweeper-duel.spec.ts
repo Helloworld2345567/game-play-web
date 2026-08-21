@@ -79,7 +79,7 @@ test("two players race on identical independent minefields, then rematch", async
   let holdCreatorSnapshots = false;
   let deliverCreatorSnapshot: ((message: string) => void) | null = null;
   const heldCreatorSnapshots: string[] = [];
-  await creator.routeWebSocket(/\/websocket$/u, (socket) => {
+  await creator.routeWebSocket(/\/websocket(?:\?.*)?$/u, (socket) => {
     const server = socket.connectToServer();
     deliverCreatorSnapshot = (message) => socket.send(message);
     server.onMessage((message) => {

@@ -66,6 +66,82 @@ describe("HttpPollingTransport", () => {
     expect(invalidateSession).toHaveBeenCalledTimes(1);
   });
 
+  it("serializes mutating requests for one connection scope", async () => {
+    const snapshotPayload = {
+      v: 1,
+      type: "snapshot",
+      roomId: "room-1",
+      gameType: "future-game",
+      ruleSetId: "future-game.v1",
+      actionConsistency: "concurrent_idempotent",
+      snapshotRevision: 1,
+      revision: 1,
+      round: 1,
+      selfSeat: "seat-a",
+      seats: {
+        "seat-a": {
+          occupied: true,
+          online: true,
+          rematchReady: false,
+          displayName: "A",
+        },
+        "seat-b": {
+          occupied: true,
+          online: true,
+          rematchReady: false,
+          displayName: "B",
+        },
+      },
+      spectators: [],
+      position: null,
+      actionReceipts: [],
+    };
+    let releaseFirst!: () => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      releaseFirst = () => resolve(Response.json(snapshotPayload));
+    });
+    const fetchImpl = vi.fn(async () => {
+      if (fetchImpl.mock.calls.length === 1) return firstResponse;
+      return Response.json(snapshotPayload);
+    });
+    const transport = new HttpPollingTransport({
+      roomId: "room-1",
+      connectionId: "connection-1",
+      ensureSession: async () => undefined,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    const first = transport.request("command", {
+      v: 1,
+      type: "game_action",
+      gameType: "future-game",
+      ruleSetId: "future-game.v1",
+      expectedRevision: 1,
+      actionId: "scope-seq-2",
+      clientSeq: 2,
+      baseRevision: 1,
+      payload: { value: 2 },
+    });
+    await Promise.resolve();
+    const second = transport.request("command", {
+      v: 1,
+      type: "game_action",
+      gameType: "future-game",
+      ruleSetId: "future-game.v1",
+      expectedRevision: 1,
+      actionId: "scope-seq-1",
+      clientSeq: 1,
+      baseRevision: 1,
+      payload: { value: 1 },
+    });
+    await Promise.resolve();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await expect(first).resolves.toMatchObject({ type: "snapshot" });
+    await expect(second).resolves.toMatchObject({ type: "snapshot" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects an OK response that is not a valid room message", async () => {
     const fetchImpl = vi.fn(
       async () => new Response("not-json", { status: 200 }),
@@ -103,6 +179,60 @@ describe("HttpPollingTransport", () => {
     transport.dispose();
     rejectFetch?.(new DOMException("aborted", "AbortError"));
     await request;
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles queued mutations when disposed without starting later fetches", async () => {
+    let resolveFirstFetchStarted!: () => void;
+    const firstFetchStarted = new Promise<void>((resolve) => {
+      resolveFirstFetchStarted = resolve;
+    });
+    let rejectFirstFetch!: (error: unknown) => void;
+    const firstFetch = new Promise<Response>((_resolve, reject) => {
+      rejectFirstFetch = reject;
+    });
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        resolveFirstFetchStarted();
+        init?.signal?.addEventListener("abort", () => {
+          rejectFirstFetch(init.signal?.reason);
+        });
+        return firstFetch;
+      },
+    );
+    const transport = new HttpPollingTransport({
+      roomId: "room-1",
+      connectionId: "connection-1",
+      ensureSession: async () => undefined,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    const pending = Array.from({ length: 4 }, () =>
+      transport.request("leave").then(
+        () => null,
+        (error: unknown) => error,
+      ),
+    );
+
+    await firstFetchStarted;
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    transport.dispose();
+
+    const settled = await Promise.race([
+      Promise.all(pending),
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error("queued mutations did not settle")),
+          500,
+        );
+      }),
+    ]);
+    expect(settled).toHaveLength(4);
+    expect(settled.every((error) => error instanceof Error)).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    await expect(transport.request("leave")).rejects.toMatchObject({
+      name: "AbortError",
+    });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 

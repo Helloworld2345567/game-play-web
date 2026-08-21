@@ -760,29 +760,92 @@ describe("Worker request boundary", () => {
     // Use an isolated edge identity so this test is independent of the
     // process-wide best-effort bucket state retained by the Worker isolate.
     const clientIp = `test-${crypto.randomUUID()}`;
+    const fixedNow = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
     const responses: Response[] = [];
-    for (let index = 0; index <= capacity; index += 1) {
-      responses.push(
-        await app.default.fetch(
-          apiRequest(origin, path, {
-            method: "POST",
-            headers: {
-              Cookie: cookie!,
-              "Content-Type": "application/json",
-              "CF-Connecting-IP": clientIp,
-            },
-            body: JSON.stringify(makeBody(index)),
-          }),
+    try {
+      for (let index = 0; index <= capacity; index += 1) {
+        responses.push(
+          await app.default.fetch(
+            apiRequest(origin, path, {
+              method: "POST",
+              headers: {
+                Cookie: cookie!,
+                "Content-Type": "application/json",
+                "CF-Connecting-IP": clientIp,
+              },
+              body: JSON.stringify(makeBody(index)),
+            }),
+          ),
+        );
+      }
+
+      expect(responses.slice(0, capacity).every((response) => response.status === 200)).toBe(
+        true,
+      );
+      expect(responses[capacity]?.status).toBe(429);
+      expect(responses[capacity]?.headers.get("Retry-After")).toMatch(/^\d+$/u);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("soft-limits Room HTTP forwarding by Guest and Cloudflare client IP", async () => {
+    const origin = "http://localhost:5173";
+    const fixedNow = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    try {
+      const session = await app.default.fetch(
+        apiRequest(origin, "/api/session", { method: "POST" }),
+      );
+      const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+      const roomId = "AAAAAAAAAAAAAAAA";
+      const clientIp = `room-http-${crypto.randomUUID()}`;
+      // The rate check runs before body parsing and forwarding. Keep these
+      // requests concurrent so the test focuses on the edge bucket rather
+      // than spending its five-second budget on sequential request plumbing.
+      const responses = await Promise.all(
+        Array.from({ length: 241 }, () =>
+          app.default.fetch(
+            apiRequest(origin, `/api/rooms/${roomId}/sync`, {
+              method: "POST",
+              headers: {
+                Cookie: cookie!,
+                "Content-Type": "text/plain",
+                "CF-Connecting-IP": clientIp,
+              },
+              body: "{}",
+            }),
+          ),
         ),
       );
-    }
 
-    expect(responses.slice(0, capacity).every((response) => response.status === 200)).toBe(
-      true,
-    );
-    expect(responses[capacity]?.status).toBe(429);
-    expect(responses[capacity]?.headers.get("Retry-After")).toMatch(/^\d+$/u);
-  });
+      const rejected = responses.filter((response) => response.status === 415);
+      const limited = responses.filter((response) => response.status === 429);
+      expect(rejected).toHaveLength(240);
+      expect(limited).toHaveLength(1);
+      expect(limited[0]?.headers.get("Retry-After")).toMatch(/^\d+$/u);
+
+      // The same edge bucket protects an unauthenticated flood before the
+      // request can reach the session-required branch.
+      const unauthenticated = await app.default.fetch(
+        apiRequest(origin, `/api/rooms/${roomId}/sync`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain",
+            "CF-Connecting-IP": clientIp,
+          },
+          body: "{}",
+        }),
+      );
+      expect(unauthenticated.status).toBe(429);
+      await expect(unauthenticated.json()).resolves.toEqual({
+        error: "request.rate_limited",
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  }, 20_000);
 
   it("records and reads a Minesweeper score using only the signed session nickname", async () => {
     const origin = "http://localhost:5173";

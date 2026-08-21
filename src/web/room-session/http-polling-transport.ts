@@ -47,6 +47,12 @@ export class HttpPollingTransport {
   private readonly requestTimeoutMs: number;
   private readonly controllers = new Set<AbortController>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
+  // Mutating room requests share one browser connection scope. Keep them
+  // serialized at the transport boundary as a second line of defense; the
+  // RoomSession lane also stops after an outcome-unknown failure so a later
+  // clientSeq cannot overtake the request that may have committed.
+  private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: HttpPollingTransportOptions) {
     this.roomId = options.roomId;
@@ -67,6 +73,36 @@ export class HttpPollingTransport {
     command?: RoomCommand,
     options: HttpRequestOptions = {},
   ): Promise<HttpTransportResult> {
+    if (this.disposed) {
+      throw new DOMException("HTTP transport disposed", "AbortError");
+    }
+    if (operation === "command" || operation === "leave") {
+      const previous = this.mutationTail;
+      let release!: () => void;
+      this.mutationTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      try {
+        await previous;
+        if (this.disposed) {
+          throw new DOMException("HTTP transport disposed", "AbortError");
+        }
+        return await this.requestUnserialized(operation, command, options);
+      } finally {
+        release();
+      }
+    }
+    return this.requestUnserialized(operation, command, options);
+  }
+
+  private async requestUnserialized(
+    operation: HttpRoomOperation,
+    command?: RoomCommand,
+    options: HttpRequestOptions = {},
+  ): Promise<HttpTransportResult> {
+    if (this.disposed) {
+      throw new DOMException("HTTP transport disposed", "AbortError");
+    }
     const keepalive = options.keepalive === true;
     for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
       const controller = keepalive ? null : new AbortController();
@@ -160,6 +196,7 @@ export class HttpPollingTransport {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.clearScheduledSync();
     this.abortRequests();
   }

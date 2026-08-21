@@ -10,7 +10,7 @@ import {
   type PlatformSeatId,
   type StoredRoom,
 } from "./core/room-state";
-import { getGameRules, isSupportedGame } from "./games/registry";
+import { getGameRules, isCreatableRuleSet } from "./games/registry";
 import {
   admitRoomActivity,
   type RoomActivityTransport,
@@ -41,6 +41,8 @@ export interface GameRoomEnv {
 interface SocketAttachment {
   guestId: string;
   seat: PlatformSeatId | null;
+  /** Per-browser-connection clientSeq namespace; absent only in old state. */
+  actionScope?: string;
   tokens: number;
   lastRefillAt: number;
   leaving?: boolean;
@@ -83,6 +85,8 @@ interface HttpRateBucket {
   lastRefillAt: number;
 }
 
+type WebSocketGuestRateBuckets = Map<string, HttpRateBucket>;
+
 type HttpRateBuckets = Record<string, HttpRateBucket>;
 
 const ROOM_STORAGE_KEY = "room";
@@ -122,6 +126,11 @@ const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const MAX_MESSAGE_BYTES = 4_096;
 const RATE_CAPACITY = 20;
 const RATE_REFILL_PER_MS = 10 / 1_000;
+// The per-Guest bucket keeps multiple sockets from multiplying the allowance
+// of the same signed session. It is intentionally an isolate-local soft
+// boundary; the connection attachment remains the hibernation-safe bucket.
+const MAX_WEBSOCKET_GUEST_RATE_BUCKETS = 256;
+const CONNECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/u;
 
 function isInitializePayload(value: unknown): value is InitializePayload {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -138,7 +147,7 @@ function isInitializePayload(value: unknown): value is InitializePayload {
     Object.keys(payload).every((key) =>
       ["roomId", "gameType", "ruleSetId", "capacityLeaseId"].includes(key),
     ) &&
-    isSupportedGame(payload.gameType, payload.ruleSetId)
+    isCreatableRuleSet(payload.gameType, payload.ruleSetId)
   );
 }
 
@@ -172,7 +181,7 @@ function isHttpConnectionEnvelope(
   return (
     envelope.v === PROTOCOL_VERSION &&
     typeof envelope.connectionId === "string" &&
-    /^[A-Za-z0-9_-]{16,64}$/u.test(envelope.connectionId) &&
+    CONNECTION_ID_PATTERN.test(envelope.connectionId) &&
     (envelope.sinceSnapshotRevision === undefined ||
       (Number.isSafeInteger(envelope.sinceSnapshotRevision) &&
         (envelope.sinceSnapshotRevision as number) >= 0))
@@ -187,6 +196,8 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
   private room: StoredRoom | null = null;
   private httpLeases: HttpLeases = {};
   private httpRateBuckets: HttpRateBuckets = {};
+  private readonly websocketGuestRateBuckets: WebSocketGuestRateBuckets =
+    new Map();
   private displayNames: Record<string, string> = {};
   private snapshotRevision = 0;
   private capacityLeaseId: string | null = null;
@@ -454,6 +465,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       guestId,
       command,
       now,
+      value.connectionId,
     );
     if (!decision.ok) {
       return this.httpError(
@@ -586,12 +598,24 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       .filter(([, lease]) => lease.expiresAt <= now)
       .map(([connectionId]) => connectionId);
     if (expiredConnectionIds.length === 0) return false;
+    const expiredGuestIds = new Set(
+      expiredConnectionIds.map(
+        (connectionId) => this.httpLeases[connectionId]!.guestId,
+      ),
+    );
+    // Include the soon-to-be-pruned leases in the "before" view. This lets us
+    // distinguish an expired duplicate tab from the last visible connection
+    // of a Guest; only the latter changes the public snapshot.
+    const onlineBefore = this.onlineGuestIds(now, true);
     for (const connectionId of expiredConnectionIds) {
       delete this.httpLeases[connectionId];
     }
     await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
     await this.pruneOfflineSpectatorDisplayNames(now);
-    return true;
+    const onlineAfter = this.onlineGuestIds(now);
+    return [...expiredGuestIds].some(
+      (guestId) => onlineBefore.has(guestId) !== onlineAfter.has(guestId),
+    );
   }
 
   private httpError(
@@ -715,6 +739,21 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
     }
+    const websocketUrl = new URL(request.url);
+    const connectionIds = websocketUrl.searchParams.getAll("connectionId");
+    const requestedConnectionId = connectionIds[0];
+    if (
+      connectionIds.length !== 1 ||
+      requestedConnectionId === undefined ||
+      !CONNECTION_ID_PATTERN.test(requestedConnectionId)
+    ) {
+      return this.rejectedSocket("room.invalid_request");
+    }
+    // HTTP fallback and WebSocket commands share one browser connection's
+    // action sequence. The query value is supplied by the same page-local
+    // connection ID used in the HTTP envelope; never accept an arbitrary
+    // string as a journal key.
+    const actionScope = requestedConnectionId;
     const now = Date.now();
     const admission = await this.admitActivity({
       transport: "websocket_connect",
@@ -768,6 +807,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     server.serializeAttachment({
       guestId,
       seat,
+      actionScope,
       tokens: RATE_CAPACITY,
       lastRefillAt: Date.now(),
     } satisfies SocketAttachment);
@@ -838,6 +878,12 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       socket.close(1008, "Missing connection state");
       return;
     }
+    if (attachment.actionScope === undefined) {
+      // Do not let a hibernated pre-scope socket manufacture a fresh journal
+      // namespace. The browser will reconnect with a validated connectionId.
+      socket.close(1008, "Missing connection scope");
+      return;
+    }
     const admission = await this.admitActivity({
       transport: "websocket_message",
       guestId: attachment.guestId,
@@ -860,23 +906,33 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       socket.close(1003, "Text messages only");
       return;
     }
+    const hasRateToken = this.consumeRateToken(socket, attachment);
     if (new TextEncoder().encode(message).byteLength > MAX_MESSAGE_BYTES) {
-      this.sendError(socket, "protocol.message_too_large");
+      this.sendError(
+        socket,
+        hasRateToken
+          ? "protocol.message_too_large"
+          : "protocol.rate_limited",
+      );
       return;
     }
-
-    const hasRateToken = this.consumeRateToken(socket, attachment);
 
     let value: unknown;
     try {
       value = JSON.parse(message);
     } catch {
-      this.sendError(socket, "protocol.invalid_message");
+      this.sendError(
+        socket,
+        hasRateToken ? "protocol.invalid_message" : "protocol.rate_limited",
+      );
       return;
     }
     const command = parseClientCommand(value);
     if (command === null) {
-      this.sendError(socket, "protocol.invalid_message");
+      this.sendError(
+        socket,
+        hasRateToken ? "protocol.invalid_message" : "protocol.rate_limited",
+      );
       return;
     }
     if (command.type !== "leave" && !hasRateToken) {
@@ -918,6 +974,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       attachment.guestId,
       command,
       Date.now(),
+      attachment.actionScope,
     );
     if (!decision.ok) {
       this.sendError(
@@ -963,13 +1020,11 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         0,
       );
     if (expiredLeases.length > 0) {
-      for (const [connectionId] of expiredLeases) {
-        delete this.httpLeases[connectionId];
+      const visibleChange = await this.pruneExpiredHttpLeases(now);
+      if (visibleChange) {
+        await this.markSnapshotChanged();
+        this.broadcastSnapshots();
       }
-      await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
-      await this.pruneOfflineSpectatorDisplayNames(now);
-      await this.markSnapshotChanged();
-      this.broadcastSnapshots();
     }
     if (
       this.livePlayerSockets().length > 0 ||
@@ -1024,6 +1079,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       this.room = null;
       this.httpLeases = {};
       this.httpRateBuckets = {};
+      this.websocketGuestRateBuckets.clear();
       this.displayNames = {};
       this.snapshotRevision = 0;
       this.snapshotCache.clear();
@@ -1142,17 +1198,42 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     attachment: SocketAttachment,
   ): boolean {
     const now = Date.now();
-    const replenished = Math.min(
+    const socketReplenished = Math.min(
       RATE_CAPACITY,
       attachment.tokens +
         (now - attachment.lastRefillAt) * RATE_REFILL_PER_MS,
     );
-    const allowed = replenished >= 1;
+    const guestBucket = this.websocketGuestRateBuckets.get(
+      attachment.guestId,
+    );
+    const guestReplenished = Math.min(
+      RATE_CAPACITY,
+      (guestBucket?.tokens ?? RATE_CAPACITY) +
+        (now - (guestBucket?.lastRefillAt ?? now)) * RATE_REFILL_PER_MS,
+    );
+    const allowed = socketReplenished >= 1 && guestReplenished >= 1;
+
+    // Check both buckets before debiting either one. A blocked Guest bucket
+    // must not consume a token from a socket that still has capacity (and
+    // vice versa), otherwise the two limits would drift under contention.
     socket.serializeAttachment({
       ...attachment,
-      tokens: allowed ? replenished - 1 : replenished,
+      tokens: allowed ? socketReplenished - 1 : socketReplenished,
       lastRefillAt: now,
     } satisfies SocketAttachment);
+
+    this.websocketGuestRateBuckets.delete(attachment.guestId);
+    this.websocketGuestRateBuckets.set(attachment.guestId, {
+      tokens: allowed ? guestReplenished - 1 : guestReplenished,
+      lastRefillAt: now,
+    });
+    while (
+      this.websocketGuestRateBuckets.size > MAX_WEBSOCKET_GUEST_RATE_BUCKETS
+    ) {
+      const oldest = this.websocketGuestRateBuckets.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.websocketGuestRateBuckets.delete(oldest);
+    }
     return allowed;
   }
 
@@ -1420,6 +1501,29 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     );
   }
 
+  private onlineGuestIds(
+    now: number,
+    includeExpiredHttpLeases = false,
+  ): Set<string> {
+    if (this.room === null) return new Set();
+    const onlineGuests = new Set(
+      this.liveSockets().flatMap((socket) => {
+        const attachment =
+          socket.deserializeAttachment() as SocketAttachment | null;
+        return attachment?.guestId ? [attachment.guestId] : [];
+      }),
+    );
+    const leases = includeExpiredHttpLeases
+      ? Object.values(this.httpLeases)
+      : this.activeHttpLeases(now);
+    for (const lease of leases) {
+      if (getGuestSeat(this.room, lease.guestId) === lease.seat) {
+        onlineGuests.add(lease.guestId);
+      }
+    }
+    return onlineGuests;
+  }
+
   private activePlayerHttpLeases(now: number): HttpLease[] {
     return this.activeHttpLeases(now).filter(
       (lease) => lease.seat !== null,
@@ -1482,18 +1586,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     const cacheKey = `${this.snapshotRevision}:${guestId}`;
     const cached = this.snapshotCache.get(cacheKey);
     if (cached !== undefined) return cached;
-    const onlineGuests = new Set(
-      [
-        ...this.liveSockets().flatMap((socket) => {
-          const attachment =
-            socket.deserializeAttachment() as SocketAttachment | null;
-          return attachment?.guestId ? [attachment.guestId] : [];
-        }),
-        ...this.activeHttpLeases(Date.now()).flatMap((lease) =>
-          lease.guestId ? [lease.guestId] : [],
-        ),
-      ],
-    );
+    const onlineGuests = this.onlineGuestIds(Date.now());
     const snapshot = projectRoomSnapshot({
       room,
       rules,

@@ -23,7 +23,7 @@
 
 共享 `GameManifest` 只包含可信纯元数据，客户端 `GameCatalog` 通过静态 allowlist 动态加载本地页面或房间 renderer，服务端 `GameRules` 注册表独立控制规则恢复与新建。浏览器侧保留窄的 `useRoom()` 接口，内部 `RoomSession` 将 WebSocket、HTTPS polling、协议解析和并发动作跟踪分离，因此增加棋类不需要修改会话与重连核心。
 
-五子棋、中国象棋和井字棋继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道，`clientSeq` 在单个连接内单调、服务端按有限窗口去重，旗帜使用显式 `set_flag`；服务端会拒绝已淘汰序号和同序号不同 ID。旧 `minesweeper.duel.*.v1` 只保留已有房间恢复，公共建房 API 也会拒绝。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交；无变化的 fallback sync 返回 `204`，不会反复投影和广播同一快照。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
+五子棋、中国象棋和井字棋继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道，`clientSeq` 在单个连接内单调；HTTPS fallback 对同一连接串行发送，未知结果会暂停后续序号并从最小 pending 动作恢复，服务端也会拒绝已见更高序号后的未见低序号。旗帜使用显式 `set_flag`；服务端会拒绝已淘汰序号和同序号不同 ID。旧 `minesweeper.duel.*.v1` 只保留已有房间恢复，公共建房 API 也会拒绝。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交；无变化的 fallback sync 返回 `204`，不会反复投影和广播同一快照。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
 
 单人榜以签名 Guest 作为匿名身份，昵称从签名会话取得。`minesweeper.solo.v1` 与其他规则版本不混榜，记录在 180 天后由每日清理任务删除。它是客户端计时并提交的休闲榜，已做输入校验、请求限流和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。
 
@@ -65,7 +65,7 @@ npm run build
 
 `wrangler.jsonc` 已配置 Worker、静态资源、`GameRoom`、`RoomDirectory` 和 `MinesweeperLeaderboard` 三个 SQLite Durable Object 类，以及 Custom Domain `play.ym0v0.com`。
 
-推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
+推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行高危依赖审计、单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
 
 首次启用需要在 GitHub 仓库设置：
 
@@ -84,7 +84,7 @@ npm run deploy
 
 生产密钥只能写入 Cloudflare Secret，不要放入 `.env`、源码或 Git 历史。
 
-安全边界：Worker 对 JSON 请求执行 Content-Type、Content-Length 和字节上限校验；会话、建房、房间命令、统计和排行榜入口都有 Guest/IP 维度的软限流，生产环境还应在 Cloudflare WAF/Rate Limiting 配置分布式规则。静态资源使用 CSP、HSTS、同源隔离、`nosniff` 和禁止 iframe；生产构建不发布 source map。`SESSION_SECRET` 缺失或过弱时 Worker 拒绝启动，客户端清单不是服务端授权边界。
+安全边界：Worker 对 JSON 请求执行 Content-Type、Content-Length 和字节上限校验；会话、建房、房间 HTTP/WebSocket 握手、统计和排行榜入口都有 Guest/IP 维度的软限流，房间内 WebSocket 消息还受 Guest 级限流约束，生产环境还应在 Cloudflare WAF/Rate Limiting 配置分布式规则。静态资源使用 CSP、HSTS、同源隔离、`nosniff` 和禁止 iframe；生产构建不发布 source map。`SESSION_SECRET` 缺失或过弱时 Worker 拒绝启动，客户端清单不是服务端授权边界。
 
 ## 增加棋种
 

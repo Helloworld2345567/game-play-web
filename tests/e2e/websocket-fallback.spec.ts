@@ -2,10 +2,13 @@ import { expect, test, type Page } from "@playwright/test";
 
 async function blockWebSockets(page: Page): Promise<() => number> {
   let attempts = 0;
-  await page.routeWebSocket(/\/api\/rooms\/[^/]+\/websocket$/u, (socket) => {
-    attempts += 1;
-    socket.close({ code: 1001, reason: "blocked by test network" });
-  });
+  await page.routeWebSocket(
+    /\/api\/rooms\/[^/]+\/websocket(?:\?.*)?$/u,
+    (socket) => {
+      attempts += 1;
+      socket.close({ code: 1001, reason: "blocked by test network" });
+    },
+  );
   return () => attempts;
 }
 

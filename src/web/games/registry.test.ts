@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { GameActionCommand } from "../../shared/protocol";
 import {
+  clientGameCatalog,
+  getClientGameRendererLoader,
+} from "./catalog";
+import {
   GameErrorBoundary,
   getGameAdapter,
   projectPendingCells,
@@ -20,6 +24,20 @@ function minesweeperAction(
 }
 
 describe("game outcome presentation", () => {
+  it("exposes allowlisted renderer loading through every catalog entry", () => {
+    expect(
+      clientGameCatalog.every(
+        (entry) => typeof entry.loadRenderer === "function",
+      ),
+    ).toBe(true);
+    expect(
+      getClientGameRendererLoader("gomoku", "gomoku.freestyle15.v1"),
+    ).toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader("gomoku", "xiangqi.casual.v1"),
+    ).toBeNull();
+  });
+
   it("registers all three double-player minesweeper difficulties", () => {
     for (const ruleSetId of [
       "minesweeper.duel.9x9x10.v1",

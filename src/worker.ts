@@ -35,6 +35,7 @@ export interface WorkerEnv extends GameRoomEnv {
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
+const ROOM_CONNECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/u;
 const PRESENCE_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
@@ -63,6 +64,55 @@ const ROOM_CREATION_RATE_LIMIT: SoftRateLimitConfig = {
   capacity: 5,
   windowMs: 60_000,
 };
+// HTTPS fallback polls once per second while a Room is open. Keep enough burst
+// for a few browser tabs while still putting a cheap edge-local ceiling in
+// front of every Room request. Cloudflare WAF/Rate Limiting remains the
+// distributed enforcement boundary in production.
+const ROOM_HTTP_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 240,
+  windowMs: 60_000,
+};
+const ROOM_WEBSOCKET_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 30,
+  windowMs: 60_000,
+};
+
+interface RateLimitRoute {
+  scope: string;
+  config: SoftRateLimitConfig;
+}
+
+function unauthenticatedRateLimitFor(
+  pathname: string,
+  method: string,
+): RateLimitRoute | null {
+  if (/^\/api\/rooms\/[A-Za-z0-9_-]+\/websocket$/u.test(pathname)) {
+    return { scope: "room:websocket", config: ROOM_WEBSOCKET_RATE_LIMIT };
+  }
+  if (/^\/api\/rooms\/[A-Za-z0-9_-]+\/(sync|command|leave)$/u.test(pathname)) {
+    return { scope: "room:http", config: ROOM_HTTP_RATE_LIMIT };
+  }
+  if (method !== "POST") return null;
+  if (pathname === "/api/stats") {
+    return { scope: "presence:heartbeat", config: PRESENCE_RATE_LIMIT };
+  }
+  if (pathname === "/api/presence/leave") {
+    return { scope: "presence:leave", config: PRESENCE_RATE_LIMIT };
+  }
+  if (pathname === "/api/minesweeper/leaderboard") {
+    return { scope: "leaderboard:query", config: LEADERBOARD_QUERY_RATE_LIMIT };
+  }
+  if (pathname === "/api/minesweeper/leaderboard/record") {
+    return {
+      scope: "leaderboard:record",
+      config: LEADERBOARD_RECORD_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/rooms") {
+    return { scope: "room:create", config: ROOM_CREATION_RATE_LIMIT };
+  }
+  return null;
+}
 
 function json(
   value: unknown,
@@ -383,13 +433,34 @@ async function forwardWebSocket(
   ) {
     return json({ error: "room.invalid_request" }, { status: 400 });
   }
+  const rateLimit = checkSoftRateLimit(
+    request,
+    "room:websocket",
+    guest.guestId,
+    ROOM_WEBSOCKET_RATE_LIMIT,
+  );
+  if (!rateLimit.allowed) {
+    return rateLimitResponse("room.rate_limited", rateLimit);
+  }
+  const externalUrl = new URL(request.url);
+  const connectionIds = externalUrl.searchParams.getAll("connectionId");
+  if (
+    connectionIds.length !== 1 ||
+    !ROOM_CONNECTION_ID_PATTERN.test(connectionIds[0] ?? "")
+  ) {
+    return json({ error: "room.invalid_request" }, { status: 400 });
+  }
   const headers = new Headers();
   headers.set("Upgrade", "websocket");
   setInternalGuestHeaders(headers, guest);
   const id = env.ROOMS.idFromName(roomId);
   const stub = env.ROOMS.get(id, { locationHint: "apac" });
+  const internalUrl = new URL("https://room.internal/websocket");
+  if (connectionIds[0] !== undefined) {
+    internalUrl.searchParams.set("connectionId", connectionIds[0]);
+  }
   return stub.fetch(
-    new Request("https://room.internal/websocket", { headers }),
+    new Request(internalUrl, { headers }),
   );
 }
 
@@ -402,6 +473,15 @@ async function forwardRoomHttp(
 ): Promise<Response> {
   if (request.method !== "POST" || !ROOM_ID_PATTERN.test(roomId)) {
     return json({ error: "room.invalid_request" }, { status: 400 });
+  }
+  const rateLimit = checkSoftRateLimit(
+    request,
+    "room:http",
+    guest.guestId,
+    ROOM_HTTP_RATE_LIMIT,
+  );
+  if (!rateLimit.allowed) {
+    return rateLimitResponse("room.rate_limited", rateLimit);
   }
   const result = await readBoundedJson(request, MAX_ROOM_HTTP_BODY_BYTES);
   if (isJsonResultFailure(result)) {
@@ -501,32 +581,10 @@ export default {
 
     const guest = await readGuestSession(request, env.SESSION_SECRET);
     if (guest === null) {
-      const unauthenticatedRateLimit =
-        request.method !== "POST"
-          ? null
-          : url.pathname === "/api/stats"
-            ? {
-              scope: "presence:heartbeat",
-              config: PRESENCE_RATE_LIMIT,
-            }
-            : url.pathname === "/api/presence/leave"
-              ? { scope: "presence:leave", config: PRESENCE_RATE_LIMIT }
-              : url.pathname === "/api/minesweeper/leaderboard"
-                ? {
-                  scope: "leaderboard:query",
-                  config: LEADERBOARD_QUERY_RATE_LIMIT,
-                }
-                : url.pathname === "/api/minesweeper/leaderboard/record"
-                  ? {
-                    scope: "leaderboard:record",
-                    config: LEADERBOARD_RECORD_RATE_LIMIT,
-                  }
-                  : url.pathname === "/api/rooms"
-                    ? {
-                      scope: "room:create",
-                      config: ROOM_CREATION_RATE_LIMIT,
-                    }
-                    : null;
+      const unauthenticatedRateLimit = unauthenticatedRateLimitFor(
+        url.pathname,
+        request.method,
+      );
       if (unauthenticatedRateLimit !== null) {
         const rateLimit = checkSoftRateLimit(
           request,

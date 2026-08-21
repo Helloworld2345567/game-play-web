@@ -3,9 +3,11 @@ import { env } from "cloudflare:workers";
 import { reset, runInDurableObject } from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
 import {
+  createRoom,
   getRecentActionReceipts,
   type StoredRoom,
 } from "../src/core/room-state";
+import { getGameRules } from "../src/games/registry";
 import {
   ROOM_DIRECTORY_NAME,
   type RoomDirectory,
@@ -95,6 +97,7 @@ interface TestConnection {
 
 const liveSockets = new Set<WebSocket>();
 const RACE_RULE_SET = "minesweeper.race.9x9x10.v1";
+const LEGACY_DUEL_RULE_SET = "minesweeper.duel.9x9x10.v1";
 
 function fixtureRoomId(label: string): string {
   let first = 2_166_136_261;
@@ -140,17 +143,69 @@ async function initializeRoom(
   return stub;
 }
 
+/**
+ * Legacy duel rules remain readable for existing rooms, but are intentionally
+ * rejected by the production initialization boundary. Seed the historical
+ * room state directly and activate its capacity lease so this test exercises
+ * recovery without bypassing that production guard.
+ */
+async function seedLegacyDuelRoom(
+  label: string,
+  creatorGuestId = "guest-race-a",
+): Promise<DurableObjectStub<GameRoom>> {
+  const testEnv = env as unknown as TestEnv;
+  const roomId = fixtureRoomId(label);
+  const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+  const reservation = await directory.reserve(roomId);
+  if (!reservation.ok) throw new Error(reservation.reason);
+  const rules = getGameRules(LEGACY_DUEL_RULE_SET);
+  if (rules === null) throw new Error("Missing legacy minesweeper rules");
+  const now = Date.now();
+  const room = createRoom({ roomId, creatorGuestId, rules, now });
+  const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+  const activated = await directory.activate(roomId, reservation.leaseId);
+  if (!activated) throw new Error("Unable to activate test Room lease");
+
+  await runInDurableObject(stub, async (instance, state) => {
+    const target = instance as unknown as {
+      room: StoredRoom | null;
+      displayNames: Record<string, string>;
+      snapshotRevision: number;
+      capacityLeaseId: string | null;
+      capacityPhase: "provisioning" | "active" | null;
+      capacityProvisioningSince: number | null;
+    };
+    target.room = room;
+    target.displayNames = { [creatorGuestId]: "测试玩家" };
+    target.snapshotRevision = 0;
+    target.capacityLeaseId = reservation.leaseId;
+    target.capacityPhase = "active";
+    target.capacityProvisioningSince = null;
+    await state.storage.put("room", room);
+    await state.storage.put("displayNames", target.displayNames);
+    await state.storage.put("snapshotRevision", 0);
+    await state.storage.put("capacityLeaseId", reservation.leaseId);
+    await state.storage.put("capacityPhase", "active");
+    await state.storage.delete("capacityProvisioningSince");
+  });
+  return stub;
+}
+
 async function connect(
   stub: DurableObjectStub<GameRoom>,
   guestId: string,
 ): Promise<TestConnection> {
+  const connectionId = crypto.randomUUID();
   const response = await stub.fetch(
-    new Request("https://room.internal/websocket", {
-      headers: {
-        Upgrade: "websocket",
-        "X-Internal-Guest-Id": guestId,
+    new Request(
+      `https://room.internal/websocket?connectionId=${connectionId}`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          "X-Internal-Guest-Id": guestId,
+        },
       },
-    }),
+    ),
   );
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
@@ -602,11 +657,7 @@ describe("Minesweeper race through GameRoom", () => {
   });
 
   it("keeps legacy duel available and strict board games revision-gated", async () => {
-    const duel = await initializeRoom(
-      "legacy-duel-still-supported",
-      "minesweeper",
-      "minesweeper.duel.9x9x10.v1",
-    );
+    const duel = await seedLegacyDuelRoom("legacy-duel-still-supported");
     const duelCreator = await connect(duel, "guest-race-a");
     const duelInvitee = await connect(duel, "guest-legacy-b");
     await duelCreator.inbox.nextMatching(
