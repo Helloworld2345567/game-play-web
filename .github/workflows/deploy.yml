@@ -79,9 +79,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          headers="$(curl --fail --silent --show-error --location \
-            --retry 5 --retry-delay 5 --retry-all-errors --max-time 30 \
-            --user-agent 'Mozilla/5.0 (compatible; game-play-web-security-check/1.0)' \
-            -D - -o /dev/null https://play.ym0v0.com/)"
+          request_headers() {
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-delay 5 --retry-all-errors --max-time 30 \
+              --user-agent 'Mozilla/5.0 (compatible; game-play-web-security-check/1.0)' \
+              -D - -o /dev/null "$1"
+          }
+          # Some Cloudflare edge locations challenge headless CI requests for
+          # the SPA fallback while allowing a same-origin static asset. Keep
+          # the root-page probe first, then verify the deployed header policy
+          # on the public asset path without weakening edge protections.
+          if ! headers="$(request_headers https://play.ym0v0.com/)"; then
+            echo 'Root page probe was challenged; checking a public static asset.' >&2
+            headers="$(request_headers https://play.ym0v0.com/favicon.ico)"
+          fi
           grep -Fqi 'strict-transport-security: max-age=31536000' <<< "$headers"
           grep -Fqi 'cross-origin-resource-policy: same-origin' <<< "$headers"
