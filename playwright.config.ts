@@ -5,6 +5,12 @@ export default defineConfig({
   fullyParallel: false,
   retries: 0,
   reporter: "list",
+  // Durable Objects are cold-started by the in-process Worker on shared CI
+  // runners. Keep local assertions fast while allowing those first RPCs time
+  // to complete instead of turning a slow startup into a cascading failure.
+  expect: {
+    timeout: process.env.CI === "1" ? 15_000 : 5_000,
+  },
   use: {
     baseURL: "http://localhost:5173",
     browserName: "chromium",
