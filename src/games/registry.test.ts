@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   getGameRules,
+  getRematchGameRules,
+  getRematchRuleSetIds,
   isCreatableRuleSet,
   isSupportedGame,
 } from "./registry";
@@ -74,5 +76,76 @@ describe("game rules registry", () => {
     }
     expect(isSupportedGame("chase", "chase.unknown.v1")).toBe(false);
     expect(isCreatableRuleSet("chase", "chase.unknown.v1")).toBe(false);
+  });
+
+  it("allows compatible rule changes within the chase rematch group", () => {
+    expect(
+      getRematchGameRules("chase.easy.v1", "chase.medium.v1")?.definition,
+    ).toEqual({
+      gameType: "chase",
+      ruleSetId: "chase.medium.v1",
+      actionConsistency: "strict_revision",
+      openingRoleIds: ["thief", "police"],
+    });
+    expect(getRematchRuleSetIds("chase.easy.v1")).toEqual([
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ]);
+    expect(getRematchRuleSetIds("chase.hard.v1")).toEqual([
+      "chase.easy.v1",
+      "chase.medium.v1",
+      "chase.hard.v1",
+    ]);
+  });
+
+  it("keeps single-mode and legacy rooms on their current rule", () => {
+    expect(
+      getRematchGameRules(
+        "minesweeper.duel.9x9x10.v1",
+        "minesweeper.duel.9x9x10.v1",
+      ),
+    ).toBe(getGameRules("minesweeper.duel.9x9x10.v1"));
+    expect(getRematchRuleSetIds("minesweeper.duel.9x9x10.v1")).toEqual([
+      "minesweeper.duel.9x9x10.v1",
+    ]);
+    expect(getRematchRuleSetIds("gomoku.freestyle15.v1")).toEqual([
+      "gomoku.freestyle15.v1",
+    ]);
+  });
+
+  it("rejects unknown, cross-game, and legacy-only rule changes", () => {
+    expect(getRematchGameRules("missing.v1", "chase.easy.v1")).toBeNull();
+    expect(
+      getRematchGameRules("chase.easy.v1", "missing.v1"),
+    ).toBeNull();
+    expect(
+      getRematchGameRules("chase.easy.v1", "gomoku.freestyle15.v1"),
+    ).toBeNull();
+    expect(
+      getRematchGameRules(
+        "minesweeper.duel.9x9x10.v1",
+        "minesweeper.race.9x9x10.v1",
+      ),
+    ).toBeNull();
+    expect(getRematchRuleSetIds("missing.v1")).toEqual([]);
+  });
+
+  it("lists all compatible enabled race presets while preserving legacy recovery", () => {
+    expect(
+      getRematchGameRules(
+        "minesweeper.race.9x9x10.v1",
+        "minesweeper.race.16x16x40.v1",
+      )?.definition,
+    ).toMatchObject({
+      gameType: "minesweeper",
+      ruleSetId: "minesweeper.race.16x16x40.v1",
+      actionConsistency: "concurrent_idempotent",
+    });
+    expect(getRematchRuleSetIds("minesweeper.race.9x9x10.v1")).toEqual([
+      "minesweeper.race.9x9x10.v1",
+      "minesweeper.race.16x16x40.v1",
+      "minesweeper.race.30x16x99.v1",
+    ]);
   });
 });

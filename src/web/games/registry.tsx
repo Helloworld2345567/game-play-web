@@ -53,6 +53,8 @@ export interface GameAdapter {
   readonly gameType: string;
   readonly ruleSetId: string;
   readonly displayName: string;
+  /** Short label used when choosing among modes in the same game family. */
+  readonly modeLabel?: string;
   readonly landingLabel?: string;
   readonly createRoomLabel: string;
   readonly landingDescription: string;
@@ -504,12 +506,14 @@ function minesweeperSeatPresentations(): SeatPresentations {
 function createMinesweeperRaceAdapter(
   ruleSetId: string,
   displayName: string,
+  modeLabel: string,
   landingDescription: string,
 ): GameAdapter {
   return dynamicAdapter({
     gameType: "minesweeper",
     ruleSetId,
     displayName,
+    modeLabel,
     createRoomLabel: displayName,
     landingDescription,
     getPendingCellKey: minesweeperPendingCellKey,
@@ -588,16 +592,19 @@ export const minesweeperRaceAdapters = [
   createMinesweeperRaceAdapter(
     MINESWEEPER_RACE_RULE_SET_IDS[0],
     "双人扫雷竞速 · 小型",
+    "小型",
     "9×9 · 10 雷 · 同图独立竞速",
   ),
   createMinesweeperRaceAdapter(
     MINESWEEPER_RACE_RULE_SET_IDS[1],
     "双人扫雷竞速 · 中型",
+    "中型",
     "16×16 · 40 雷 · 同图独立竞速",
   ),
   createMinesweeperRaceAdapter(
     MINESWEEPER_RACE_RULE_SET_IDS[2],
     "双人扫雷竞速 · 大型",
+    "大型",
     "30×16 · 99 雷 · 桌面完整显示",
   ),
 ] as const;
@@ -633,16 +640,19 @@ const CHASE_DIFFICULTIES = [
   {
     ruleSetId: CHASE_RULE_SET_IDS[0],
     displayName: "警察抓小偷 · 简单",
+    modeLabel: "简单",
     landingDescription: "初始地图 · 上限15轮",
   },
   {
     ruleSetId: CHASE_RULE_SET_IDS[1],
     displayName: "警察抓小偷 · 中等",
+    modeLabel: "中等",
     landingDescription: "中型闭环 · 上限25轮",
   },
   {
     ruleSetId: CHASE_RULE_SET_IDS[2],
     displayName: "警察抓小偷 · 困难",
+    modeLabel: "困难",
     landingDescription: "大型闭环 · 上限45轮",
   },
 ] as const;
@@ -676,12 +686,14 @@ function chaseRoleForSeat(
 function createChaseAdapter(
   ruleSetId: string,
   displayName: string,
+  modeLabel: string,
   landingDescription: string,
 ): GameAdapter {
   return dynamicAdapter({
     gameType: "chase",
     ruleSetId,
     displayName,
+    modeLabel,
     landingLabel: "警察抓小偷",
     createRoomLabel: `创建${displayName}房`,
     landingDescription,
@@ -742,6 +754,7 @@ export const chaseAdapters = CHASE_DIFFICULTIES.map((difficulty) =>
   createChaseAdapter(
     difficulty.ruleSetId,
     difficulty.displayName,
+    difficulty.modeLabel,
     difficulty.landingDescription,
   ),
 ) as readonly GameAdapter[];

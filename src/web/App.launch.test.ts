@@ -3,6 +3,7 @@ import {
   LANDING_GAME_CATALOG,
   resolveChaseLaunch,
   resolveMinesweeperLaunch,
+  resolveRematchModeOptions,
   shouldPromptForDisplayName,
 } from "./App";
 import { availableGameAdapters } from "./games/registry";
@@ -92,5 +93,29 @@ describe("landing game catalog", () => {
     expect(shouldPromptForDisplayName("棋友0001", null)).toBe(true);
     expect(shouldPromptForDisplayName("棋友0001", "1")).toBe(false);
     expect(shouldPromptForDisplayName("   ", "1")).toBe(true);
+  });
+
+  it("resolves server-approved rematch rules to concise client mode choices", () => {
+    expect(
+      resolveRematchModeOptions("chase", {
+        ruleSetIds: [
+          "chase.easy.v1",
+          "chase.medium.v1",
+          "unknown.rule.v1",
+        ],
+        selectedRuleSetId: "chase.medium.v1",
+      }),
+    ).toEqual([
+      {
+        ruleSetId: "chase.easy.v1",
+        label: "简单",
+        description: "初始地图 · 上限15轮",
+      },
+      {
+        ruleSetId: "chase.medium.v1",
+        label: "中等",
+        description: "中型闭环 · 上限25轮",
+      },
+    ]);
   });
 });

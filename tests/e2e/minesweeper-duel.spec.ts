@@ -288,6 +288,18 @@ test("two players race on identical independent minefields, then rematch", async
     await expect(invitee.locator('.minesweeper-cell[data-state="mine"]'))
       .toHaveCount(40);
 
+    const creatorModePanel = creator.getByRole("region", {
+      name: "下一局模式",
+    });
+    const inviteeModePanel = invitee.getByRole("region", {
+      name: "下一局模式",
+    });
+    await expect(creatorModePanel.getByRole("radio", { name: "中型" }))
+      .toHaveAttribute("aria-checked", "true");
+    await creatorModePanel.getByRole("radio", { name: "小型" }).click();
+    await expect(inviteeModePanel.getByRole("radio", { name: "小型" }))
+      .toHaveAttribute("aria-checked", "true");
+
     await creator.getByRole("button", { name: "再来一局" }).click();
     await expect(
       invitee.locator(".seat-card").filter({ hasText: "扫雷甲" }),
@@ -304,8 +316,14 @@ test("two players race on identical independent minefields, then rematch", async
     ).toBeVisible();
     await expect(creator.getByText(/第 2 局/u)).toBeVisible();
     await expect(
+      creator.getByText("第 2 局 · 双人扫雷竞速 · 小型", { exact: true }),
+    ).toBeVisible();
+    await expect(
       creator.locator('.minesweeper-cell[data-state="hidden"]'),
-    ).toHaveCount(256);
+    ).toHaveCount(81);
+    await expect(
+      invitee.locator('.minesweeper-cell[data-state="hidden"]'),
+    ).toHaveCount(81);
 
     await explicitExit(creator);
     await explicitExit(invitee);

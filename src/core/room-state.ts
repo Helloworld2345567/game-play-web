@@ -70,8 +70,8 @@ export interface LegacyStoredRoomV3 extends StoredRoomBase {
   actionJournal: ActionJournalState;
 }
 
-/** Current authoritative Room shape persisted by the Worker. */
-export interface StoredRoom extends StoredRoomBase {
+/** Room shape written before next-round mode selection was introduced. */
+export interface LegacyStoredRoomV4 extends StoredRoomBase {
   schemaVersion: 4;
   roundStartRevision: number;
   actionJournal: ActionJournalState;
@@ -81,23 +81,46 @@ export interface StoredRoom extends StoredRoomBase {
   activeSeatOrder: readonly [PlatformSeatId, PlatformSeatId] | null;
 }
 
+/** Current authoritative Room shape persisted by the Worker. */
+export interface StoredRoom extends StoredRoomBase {
+  schemaVersion: 5;
+  roundStartRevision: number;
+  actionJournal: ActionJournalState;
+  /** Non-null only while a turn-based room is choosing opening roles. */
+  preparation: RoomPreparationState | null;
+  /** Role order currently passed to GameRules.create(). */
+  activeSeatOrder: readonly [PlatformSeatId, PlatformSeatId] | null;
+  /** A trusted rule selected for the next round; null keeps the current rule. */
+  rematchRuleSetId: string | null;
+}
+
 export type PersistedRoom =
   | LegacyStoredRoomV1
   | LegacyStoredRoomV2
   | LegacyStoredRoomV3
+  | LegacyStoredRoomV4
   | StoredRoom;
 
 /** Migrates any supported persisted Room schema to the current shape. */
 export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
   const schemaVersion = (room as { schemaVersion: unknown }).schemaVersion;
-  if (schemaVersion === 4) return room as StoredRoom;
+  if (schemaVersion === 5) return room as StoredRoom;
+  if (schemaVersion === 4) {
+    const legacyRoom = room as LegacyStoredRoomV4;
+    return {
+      ...legacyRoom,
+      schemaVersion: 5,
+      rematchRuleSetId: null,
+    };
+  }
   if (schemaVersion === 3) {
     const legacyRoom = room as LegacyStoredRoomV3;
     return {
       ...legacyRoom,
-      schemaVersion: 4,
+      schemaVersion: 5,
       preparation: null,
       activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
+      rematchRuleSetId: null,
     };
   }
   if (schemaVersion === 2) {
@@ -105,10 +128,11 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
     const { recentActionReceipts, ...base } = legacyRoom;
     return {
       ...base,
-      schemaVersion: 4,
+      schemaVersion: 5,
       actionJournal: migrateReceiptJournal(recentActionReceipts),
       preparation: null,
       activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
+      rematchRuleSetId: null,
     };
   }
   if (schemaVersion !== 1) {
@@ -118,11 +142,12 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
 
   return {
     ...legacyRoom,
-    schemaVersion: 4,
+    schemaVersion: 5,
     roundStartRevision: legacyRoom.revision,
     actionJournal: createActionJournal(),
     preparation: null,
     activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
+    rematchRuleSetId: null,
   };
 }
 
@@ -170,6 +195,47 @@ function activeOrderFromPreparation(
   );
   if (firstSeat === undefined || secondSeat === undefined) return null;
   return [firstSeat, secondSeat];
+}
+
+export type RematchRuleResolver = (ruleSetId: string) => GameRules | null;
+
+function sameOpeningRoles(left: GameRules, right: GameRules): boolean {
+  const leftRoles = left.definition.openingRoleIds;
+  const rightRoles = right.definition.openingRoleIds;
+  if (leftRoles === undefined || rightRoles === undefined) {
+    return leftRoles === undefined && rightRoles === undefined;
+  }
+  return (
+    leftRoles.length === rightRoles.length &&
+    leftRoles.every((roleId, index) => roleId === rightRoles[index])
+  );
+}
+
+/**
+ * Keep the core state machine independent of the server registry while still
+ * defending the round boundary against an incompatible injected rule.
+ */
+function resolveCompatibleRematchRules(
+  currentRules: GameRules,
+  targetRuleSetId: string,
+  resolver?: RematchRuleResolver,
+): GameRules | null {
+  const targetRules = resolver === undefined
+    ? targetRuleSetId === currentRules.definition.ruleSetId
+      ? currentRules
+      : null
+    : resolver(targetRuleSetId);
+  if (
+    targetRules === null ||
+    targetRules.definition.ruleSetId !== targetRuleSetId ||
+    targetRules.definition.gameType !== currentRules.definition.gameType ||
+    targetRules.definition.actionConsistency !==
+      currentRules.definition.actionConsistency ||
+    !sameOpeningRoles(currentRules, targetRules)
+  ) {
+    return null;
+  }
+  return targetRules;
 }
 
 export type RoomDecision =
@@ -238,7 +304,7 @@ export function createRoom({
   now,
 }: CreateRoomInput): StoredRoom {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     roomId,
     gameType: rules.definition.gameType,
     ruleSetId: rules.definition.ruleSetId,
@@ -253,6 +319,7 @@ export function createRoom({
     actionJournal: createActionJournal(),
     preparation: openingRoleIds(rules) === null ? null : emptyPreparation(),
     activeSeatOrder: null,
+    rematchRuleSetId: null,
     createdAt: now,
     updatedAt: now,
     expiresAt: now + WAITING_ROOM_TTL_MS,
@@ -405,6 +472,7 @@ export function applyRoomCommand(
   now: number,
   randomSeed = "",
   actionScope?: string,
+  resolveRematchRule?: RematchRuleResolver,
 ): RoomDecision {
   const concurrentAction =
     command.type === "game_action" &&
@@ -461,6 +529,47 @@ export function applyRoomCommand(
     };
     return { ok: true, room: next, changed: true };
   }
+  if (command.type === "select_rematch_rule") {
+    if (room.position?.outcome === null || room.position === null) {
+      return { ok: false, room, code: "room.game_in_progress" };
+    }
+    const targetRules = resolveCompatibleRematchRules(
+      rules,
+      command.ruleSetId,
+      resolveRematchRule,
+    );
+    if (targetRules === null) {
+      return { ok: false, room, code: "room.invalid_rematch_rule" };
+    }
+    const rematchRuleSetId =
+      targetRules.definition.ruleSetId === room.ruleSetId
+        ? null
+        : targetRules.definition.ruleSetId;
+    if (room.rematchRuleSetId === rematchRuleSetId) {
+      return { ok: true, room, changed: false };
+    }
+    const next: StoredRoom = {
+      ...room,
+      revision: room.revision + 1,
+      rematchRuleSetId,
+      seats: {
+        [SEAT_A]: {
+          ...room.seats[SEAT_A],
+          rematchReady: false,
+        },
+        [SEAT_B]:
+          room.seats[SEAT_B] === null
+            ? null
+            : {
+                ...room.seats[SEAT_B],
+                rematchReady: false,
+              },
+      },
+      updatedAt: now,
+      expiresAt: now + FINISHED_ROOM_TTL_MS,
+    };
+    return { ok: true, room: next, changed: true };
+  }
   if (command.type === "rematch_ready") {
     if (room.position?.outcome === null || room.position === null) {
       return { ok: false, room, code: "room.game_in_progress" };
@@ -480,6 +589,17 @@ export function applyRoomCommand(
     const bothReady =
       seats[SEAT_A]?.rematchReady === true &&
       seats[SEAT_B]?.rematchReady === true;
+    const targetRuleSetId = room.rematchRuleSetId ?? room.ruleSetId;
+    const rematchRules = bothReady
+      ? resolveCompatibleRematchRules(
+          rules,
+          targetRuleSetId,
+          resolveRematchRule,
+        )
+      : rules;
+    if (rematchRules === null) {
+      return { ok: false, room, code: "room.invalid_rematch_rule" };
+    }
     const currentOrder =
       room.activeSeatOrder ??
       legacyActiveSeatOrder(room) ??
@@ -495,6 +615,10 @@ export function applyRoomCommand(
       ...room,
       revision: nextRevision,
       round: bothReady ? room.round + 1 : room.round,
+      ruleSetId: bothReady
+        ? rematchRules.definition.ruleSetId
+        : room.ruleSetId,
+      rematchRuleSetId: bothReady ? null : room.rematchRuleSetId,
       roundStartRevision: bothReady
         ? nextRevision
         : (room.roundStartRevision ?? 0),
@@ -511,7 +635,7 @@ export function applyRoomCommand(
           }
         : seats,
       position: bothReady
-        ? rules.create(nextOrder, { now, randomSeed })
+        ? rematchRules.create(nextOrder, { now, randomSeed })
         : room.position,
       preparation: null,
       activeSeatOrder: bothReady ? nextOrder : room.activeSeatOrder,

@@ -6,6 +6,7 @@ import {
 import { normalizeDisplayName } from "../shared/display-name";
 import { getGameManifest } from "../shared/game-manifest";
 import type {
+  RematchOptionsView,
   RoomPreparationView,
   RoomSnapshot,
 } from "../shared/protocol";
@@ -34,6 +35,10 @@ import {
 } from "./room-client";
 import { ProfileMenu } from "./ProfileMenu";
 import { OpeningRolePanel } from "./OpeningRolePanel";
+import {
+  RematchModeSelector,
+  type RematchModeOption,
+} from "./RematchModeSelector";
 import { ThemeToggle } from "./theme";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
@@ -126,6 +131,25 @@ export function resolveMinesweeperLaunch(
     gameType: "minesweeper",
     ruleSetId: getMinesweeperRuleSetId("race", preset),
   };
+}
+
+/** Resolve only server-approved rule ids that also have a trusted adapter. */
+export function resolveRematchModeOptions(
+  gameType: string,
+  rematchOptions: RematchOptionsView | null | undefined,
+): readonly RematchModeOption[] {
+  if (rematchOptions === null || rematchOptions === undefined) return [];
+  return rematchOptions.ruleSetIds.flatMap((ruleSetId) => {
+    const modeAdapter = getGameAdapter(gameType, ruleSetId);
+    if (modeAdapter === null) return [];
+    return [
+      {
+        ruleSetId,
+        label: modeAdapter.modeLabel ?? modeAdapter.displayName,
+        description: modeAdapter.landingDescription,
+      },
+    ];
+  });
 }
 
 function isPlatformStats(value: unknown): value is PlatformStats {
@@ -934,6 +958,14 @@ function RoomPage({
     snapshot !== null &&
     selfSeat !== null &&
     snapshot.seats[selfSeat]?.rematchReady === true;
+  const rematchModeOptions = useMemo(
+    () =>
+      resolveRematchModeOptions(
+        snapshot?.gameType ?? "",
+        snapshot?.rematchOptions,
+      ),
+    [snapshot?.gameType, snapshot?.rematchOptions],
+  );
   const spectators = snapshot?.spectators ?? [];
 
   const share = async () => {
@@ -1117,6 +1149,29 @@ function RoomPage({
               立即重试
             </button>
           </div>
+        )}
+
+        {outcome !== null &&
+          snapshot?.rematchOptions !== null &&
+          snapshot?.rematchOptions !== undefined &&
+          rematchModeOptions.length > 1 && (
+          <RematchModeSelector
+            options={rematchModeOptions}
+            selectedRuleSetId={snapshot.rematchOptions.selectedRuleSetId}
+            disabled={
+              !isPlayer ||
+              client.leaving ||
+              client.pending ||
+              client.phase !== "online"
+            }
+            onSelect={(ruleSetId) => {
+              if (
+                ruleSetId !== snapshot.rematchOptions?.selectedRuleSetId
+              ) {
+                client.selectRematchRule(ruleSetId);
+              }
+            }}
+          />
         )}
 
         <div class="room-actions">

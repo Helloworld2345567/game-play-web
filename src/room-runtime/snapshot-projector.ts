@@ -6,6 +6,7 @@ import {
   SEAT_B,
   type StoredRoom,
 } from "../core/room-state";
+import { getRematchRuleSetIds } from "../games/registry";
 import { defaultDisplayName } from "../shared/display-name";
 import { PROTOCOL_VERSION, type RoomSnapshot } from "../shared/protocol";
 
@@ -31,6 +32,12 @@ export function projectRoomSnapshot({
   const spectatorGuestIds = [...onlineGuestIds]
     .filter((guestId) => getGuestSeat(room, guestId) === null)
     .sort();
+  const rematchRuleSetIds = getRematchRuleSetIds(room.ruleSetId);
+  const selectedRematchRuleSetId =
+    room.rematchRuleSetId !== null &&
+    rematchRuleSetIds.includes(room.rematchRuleSetId)
+      ? room.rematchRuleSetId
+      : room.ruleSetId;
   return {
     v: PROTOCOL_VERSION,
     type: "snapshot",
@@ -72,6 +79,15 @@ export function projectRoomSnapshot({
               [SEAT_A]: null,
               [SEAT_B]: null,
             },
+          }
+        : null,
+    rematchOptions:
+      room.position !== null &&
+      room.position.outcome !== null &&
+      rematchRuleSetIds.length > 1
+        ? {
+            ruleSetIds: rematchRuleSetIds,
+            selectedRuleSetId: selectedRematchRuleSetId,
           }
         : null,
     position:

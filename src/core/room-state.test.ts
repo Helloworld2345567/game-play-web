@@ -12,6 +12,7 @@ import {
   type LegacyStoredRoomV1,
   type LegacyStoredRoomV2,
   type LegacyStoredRoomV3,
+  type LegacyStoredRoomV4,
   type PersistedRoom,
   type StoredRoom,
 } from "./room-state";
@@ -50,6 +51,35 @@ const concurrentRules: GameRules = {
     return position;
   },
 };
+
+const alternateConcurrentRules: GameRules = {
+  ...concurrentRules,
+  definition: {
+    ...concurrentRules.definition,
+    ruleSetId: "fake-concurrent.v2",
+  },
+  create(seats, context) {
+    return {
+      data: {
+        mode: "alternate",
+        seats: [...seats],
+        seed: context.randomSeed,
+      },
+      turn: null,
+      outcome: null,
+    };
+  },
+};
+
+function resolveConcurrentRematch(ruleSetId: string): GameRules | null {
+  if (ruleSetId === concurrentRules.definition.ruleSetId) {
+    return concurrentRules;
+  }
+  if (ruleSetId === alternateConcurrentRules.definition.ruleSetId) {
+    return alternateConcurrentRules;
+  }
+  return null;
+}
 
 function concurrentCommand(
   actionId: string,
@@ -142,7 +172,8 @@ describe("room state", () => {
       now: 1_000,
     });
 
-    expect(room.schemaVersion).toBe(4);
+    expect(room.schemaVersion).toBe(5);
+    expect(room.rematchRuleSetId).toBeNull();
   });
 
   it("applies concurrent Actions from the same base revision to the latest state", () => {
@@ -548,7 +579,7 @@ describe("room state", () => {
 
     const hydrated = hydrateStoredRoom(persistedRoom);
 
-    expect(hydrated.schemaVersion).toBe(4);
+    expect(hydrated.schemaVersion).toBe(5);
     expect(hydrated.roundStartRevision).toBe(legacyRoom.revision);
     expect(hydrated.actionJournal).toEqual({
       "seat-a": { compactedThrough: -1, receipts: [] },
@@ -631,19 +662,37 @@ describe("room state", () => {
 
     const hydrated = hydrateStoredRoom(legacyRoom);
 
-    expect(hydrated.schemaVersion).toBe(4);
+    expect(hydrated.schemaVersion).toBe(5);
     expect(hydrated.preparation).toBeNull();
     expect(hydrated.activeSeatOrder).toEqual(["seat-a", "seat-b"]);
   });
 
+  it("migrates schema v4 rooms without inventing a next-round mode", () => {
+    const current = joinedConcurrentRoom();
+    const {
+      rematchRuleSetId: _rematchRuleSetId,
+      schemaVersion: _schemaVersion,
+      ...base
+    } = current;
+    const legacyRoom: LegacyStoredRoomV4 = {
+      ...base,
+      schemaVersion: 4,
+    };
+
+    const hydrated = hydrateStoredRoom(legacyRoom);
+
+    expect(hydrated.schemaVersion).toBe(5);
+    expect(hydrated.rematchRuleSetId).toBeNull();
+  });
+
   it("fails closed instead of downgrading an unknown future schema", () => {
     const futureRoom = {
-      schemaVersion: 5,
+      schemaVersion: 6,
       roomId: "future-room",
     } as unknown as PersistedRoom;
 
     expect(() => hydrateStoredRoom(futureRoom)).toThrow(
-      "Unsupported Room schema version: 5",
+      "Unsupported Room schema version: 6",
     );
   });
 
@@ -1066,5 +1115,154 @@ describe("room state", () => {
     expect(secondReady.room.position?.outcome).toBeNull();
     expect(secondReady.room.seats["seat-a"]?.rematchReady).toBe(false);
     expect(secondReady.room.seats["seat-b"]?.rematchReady).toBe(false);
+  });
+
+  it("only allows a seated player to select a trusted mode after the game", () => {
+    const room = joinedConcurrentRoom();
+    const whilePlaying = applyRoomCommand(
+      room,
+      "guest-creator",
+      {
+        v: 1,
+        type: "select_rematch_rule",
+        expectedRevision: room.revision,
+        ruleSetId: alternateConcurrentRules.definition.ruleSetId,
+      },
+      concurrentRules,
+      3_000,
+      "unused-seed",
+      undefined,
+      resolveConcurrentRematch,
+    );
+    expect(whilePlaying).toMatchObject({
+      ok: false,
+      code: "room.game_in_progress",
+    });
+
+    const resigned = applyRoomCommand(
+      room,
+      "guest-creator",
+      { v: 1, type: "resign", expectedRevision: room.revision },
+      concurrentRules,
+      3_001,
+    );
+    if (!resigned.ok) throw new Error(resigned.code);
+    const unknown = applyRoomCommand(
+      resigned.room,
+      "guest-creator",
+      {
+        v: 1,
+        type: "select_rematch_rule",
+        expectedRevision: resigned.room.revision,
+        ruleSetId: "fake-concurrent.unknown",
+      },
+      concurrentRules,
+      3_002,
+      "unused-seed",
+      undefined,
+      resolveConcurrentRematch,
+    );
+
+    expect(unknown).toMatchObject({
+      ok: false,
+      code: "room.invalid_rematch_rule",
+      room: { rematchRuleSetId: null },
+    });
+  });
+
+  it("changes the shared next-round mode, clears readiness, and creates the rematch atomically", () => {
+    const room = joinedConcurrentRoom();
+    const resigned = applyRoomCommand(
+      room,
+      "guest-creator",
+      { v: 1, type: "resign", expectedRevision: room.revision },
+      concurrentRules,
+      3_000,
+    );
+    if (!resigned.ok) throw new Error(resigned.code);
+    const firstReady = applyRoomCommand(
+      resigned.room,
+      "guest-creator",
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: resigned.room.revision,
+        ready: true,
+      },
+      concurrentRules,
+      3_001,
+    );
+    if (!firstReady.ok) throw new Error(firstReady.code);
+
+    const selected = applyRoomCommand(
+      firstReady.room,
+      "guest-invitee",
+      {
+        v: 1,
+        type: "select_rematch_rule",
+        expectedRevision: firstReady.room.revision,
+        ruleSetId: alternateConcurrentRules.definition.ruleSetId,
+      },
+      concurrentRules,
+      3_002,
+      "unused-seed",
+      undefined,
+      resolveConcurrentRematch,
+    );
+    expect(selected.ok).toBe(true);
+    if (!selected.ok) return;
+    expect(selected.room.rematchRuleSetId).toBe("fake-concurrent.v2");
+    expect(selected.room.ruleSetId).toBe("fake-concurrent.v1");
+    expect(selected.room.seats["seat-a"]?.rematchReady).toBe(false);
+    expect(selected.room.seats["seat-b"]?.rematchReady).toBe(false);
+
+    const creatorReady = applyRoomCommand(
+      selected.room,
+      "guest-creator",
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: selected.room.revision,
+        ready: true,
+      },
+      concurrentRules,
+      3_003,
+      "round-two-seed",
+      undefined,
+      resolveConcurrentRematch,
+    );
+    if (!creatorReady.ok) throw new Error(creatorReady.code);
+    const rematch = applyRoomCommand(
+      creatorReady.room,
+      "guest-invitee",
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: creatorReady.room.revision,
+        ready: true,
+      },
+      concurrentRules,
+      3_004,
+      "round-two-seed",
+      undefined,
+      resolveConcurrentRematch,
+    );
+
+    expect(rematch.ok).toBe(true);
+    if (!rematch.ok) return;
+    expect(rematch.room).toMatchObject({
+      round: 2,
+      ruleSetId: "fake-concurrent.v2",
+      rematchRuleSetId: null,
+      activeSeatOrder: ["seat-b", "seat-a"],
+      position: {
+        data: {
+          mode: "alternate",
+          seats: ["seat-b", "seat-a"],
+          seed: "round-two-seed",
+        },
+        outcome: null,
+      },
+    });
   });
 });

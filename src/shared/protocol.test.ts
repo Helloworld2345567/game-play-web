@@ -78,4 +78,23 @@ describe("client protocol", () => {
       .toBeNull();
     expect(parseClientCommand({ ...command, roleId: 7 })).toBeNull();
   });
+
+  it("accepts a strict rematch rule selection command", () => {
+    const command = {
+      v: 1,
+      type: "select_rematch_rule",
+      expectedRevision: 8,
+      ruleSetId: "chase.medium.v1",
+    };
+
+    expect(parseClientCommand(command)).toEqual(command);
+    expect(
+      parseClientCommand({ ...command, expectedRevision: -1 }),
+    ).toBeNull();
+    expect(parseClientCommand({ ...command, ruleSetId: "" })).toBeNull();
+    expect(
+      parseClientCommand({ ...command, ruleSetId: "x".repeat(81) }),
+    ).toBeNull();
+    expect(parseClientCommand({ ...command, ruleSetId: 7 })).toBeNull();
+  });
 });

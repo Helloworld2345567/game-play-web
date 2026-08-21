@@ -2,7 +2,7 @@ import {
   applyRoomCommand,
   type StoredRoom,
 } from "../core/room-state";
-import { getGameRules } from "../games/registry";
+import { getGameRules, getRematchGameRules } from "../games/registry";
 import type { RoomCommand } from "../shared/protocol";
 
 export type ExecutedRoomCommand =
@@ -42,6 +42,8 @@ export class RoomRuntime {
       now,
       this.hooks.randomSeed(),
       actionScope,
+      (targetRuleSetId) =>
+        getRematchGameRules(room.ruleSetId, targetRuleSetId),
     );
     if (decision.changed) {
       const broadcast = decision.broadcast !== false;

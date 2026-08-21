@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GameRules } from "../core/game-rules";
 import { createRoom } from "../core/room-state";
+import { chaseEasyRules } from "../games/chase/rules";
 import { projectRoomSnapshot } from "./snapshot-projector";
 
 const preparedTurnRules: GameRules = {
@@ -45,6 +46,45 @@ describe("room snapshot projection", () => {
         "seat-a": null,
         "seat-b": null,
       },
+    });
+  });
+
+  it("projects trusted next-round modes only for a finished multi-mode game", () => {
+    const room = {
+      ...createRoom({
+        roomId: "finished-chase-room",
+        creatorGuestId: "guest-a",
+        rules: chaseEasyRules,
+        now: 1_000,
+      }),
+      rematchRuleSetId: "chase.medium.v1",
+      position: {
+        data: {},
+        turn: null,
+        outcome: {
+          kind: "win" as const,
+          winner: "seat-a",
+          reason: "resign",
+        },
+      },
+    };
+
+    const snapshot = projectRoomSnapshot({
+      room,
+      rules: chaseEasyRules,
+      viewerGuestId: "guest-a",
+      onlineGuestIds: new Set(["guest-a"]),
+      displayNames: { "guest-a": "甲" },
+      snapshotRevision: 1,
+    });
+
+    expect(snapshot.rematchOptions).toEqual({
+      ruleSetIds: [
+        "chase.easy.v1",
+        "chase.medium.v1",
+        "chase.hard.v1",
+      ],
+      selectedRuleSetId: "chase.medium.v1",
     });
   });
 });

@@ -37,6 +37,12 @@ export interface RematchReadyCommand extends CommandBase {
   ready: boolean;
 }
 
+/** Select the rule set for the next rematch without starting it. */
+export interface SelectRematchRuleCommand extends CommandBase {
+  type: "select_rematch_rule";
+  ruleSetId: string;
+}
+
 /** Select one of a turn-based game's opening roles; selecting confirms it. */
 export interface PrepareRoleCommand extends CommandBase {
   type: "prepare_role";
@@ -47,6 +53,7 @@ export type RoomCommand =
   | GameActionCommand
   | ResignCommand
   | RematchReadyCommand
+  | SelectRematchRuleCommand
   | PrepareRoleCommand;
 
 export type ClientCommand = LeaveCommand | RoomCommand;
@@ -66,6 +73,11 @@ export interface RoomSpectatorView {
 export interface RoomPreparationView {
   roleIds: readonly [string, string];
   roleBySeat: Record<string, string | null>;
+}
+
+export interface RematchOptionsView {
+  ruleSetIds: readonly string[];
+  selectedRuleSetId: string;
 }
 
 export interface ActionReceipt {
@@ -92,6 +104,8 @@ export interface RoomSnapshot {
   spectators: RoomSpectatorView[];
   /** Present while a turn-based room is waiting for both opening choices. */
   preparation?: RoomPreparationView | null;
+  /** Present when the room supports selecting a rule set for the next round. */
+  rematchOptions?: RematchOptionsView | null;
   position: RulePosition | null;
   actionReceipts?: ActionReceipt[];
 }
@@ -209,6 +223,17 @@ export function parseClientCommand(value: unknown): ClientCommand | null {
       type: "rematch_ready",
       expectedRevision,
       ready: value.ready,
+    };
+  }
+  if (
+    value.type === "select_rematch_rule" &&
+    isShortIdentifier(value.ruleSetId, 80)
+  ) {
+    return {
+      v: PROTOCOL_VERSION,
+      type: "select_rematch_rule",
+      expectedRevision,
+      ruleSetId: value.ruleSetId,
     };
   }
   if (

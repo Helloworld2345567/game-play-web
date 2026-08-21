@@ -7,6 +7,7 @@ import {
   type PrepareRoleCommand,
   type RoomCommand,
   type RoomSnapshot,
+  type SelectRematchRuleCommand,
   type ServerError,
 } from "../shared/protocol";
 import {
@@ -121,6 +122,19 @@ export function createPrepareRoleCommand(
   };
 }
 
+/** Creates the strict-revision command that changes the shared next mode. */
+export function createSelectRematchRuleCommand(
+  snapshot: Pick<RoomSnapshot, "revision">,
+  ruleSetId: string,
+): SelectRematchRuleCommand {
+  return {
+    v: PROTOCOL_VERSION,
+    type: "select_rematch_rule",
+    expectedRevision: snapshot.revision,
+    ruleSetId,
+  };
+}
+
 export { createConcurrentActionLedger };
 export type { ConcurrentActionLedger };
 
@@ -146,6 +160,7 @@ interface RoomClientView {
   selectOpeningRole(roleId: string): boolean;
   sendGameAction(payload: JsonValue): boolean;
   resign(): boolean;
+  selectRematchRule(ruleSetId: string): boolean;
   setRematchReady(ready: boolean): boolean;
   leave(): Promise<void>;
   retryNow(): void;
@@ -176,6 +191,7 @@ function humanizeError(
     "room.waiting_for_opponent": "请等待对手加入。",
     "room.game_finished": "本局已经结束。",
     "room.game_in_progress": "对局结束后才能准备复赛。",
+    "room.invalid_rematch_rule": "这个下一局模式不可用，请重新选择。",
     "room.preparation_unavailable": "当前不在角色选择阶段。",
     "room.invalid_role": "这个角色不可选择。",
     "room.role_taken": "这个角色已经被对手选择。",
@@ -1400,6 +1416,15 @@ export function useRoom(
     [send],
   );
 
+  const selectRematchRule = useCallback(
+    (ruleSetId: string): boolean => {
+      const current = snapshotRef.current;
+      if (current === null) return false;
+      return send(createSelectRematchRuleCommand(current, ruleSetId));
+    },
+    [send],
+  );
+
   return {
     phase,
     transport,
@@ -1413,6 +1438,7 @@ export function useRoom(
     selectOpeningRole,
     sendGameAction,
     resign,
+    selectRematchRule,
     setRematchReady,
     leave: () => leaveRef.current(),
     retryNow: () => retryRef.current(),

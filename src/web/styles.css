@@ -1772,3 +1772,111 @@ html[data-theme="light"] .chase-node {
   color: var(--theme-muted);
   background: #fffaf2;
 }
+
+.rematch-mode-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+  padding: clamp(16px, 3vw, 22px);
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 20px;
+  background: var(--theme-surface-soft);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
+}
+
+.rematch-mode-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.rematch-mode-heading .eyebrow {
+  margin-bottom: 5px;
+}
+
+.rematch-mode-heading h2 {
+  margin: 0;
+  font-size: clamp(1.2rem, 5vw, 1.55rem);
+  line-height: 1.1;
+}
+
+.rematch-mode-options {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.rematch-mode-option {
+  display: flex;
+  min-width: 0;
+  min-height: 68px;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 12px 14px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 15px;
+  color: var(--theme-text);
+  background: var(--theme-surface);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.rematch-mode-option:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--theme-accent) 70%, var(--theme-border));
+  background: color-mix(in srgb, var(--theme-accent) 8%, var(--theme-surface));
+  transform: translateY(-1px);
+}
+
+.rematch-mode-option.is-selected {
+  border-color: var(--theme-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-accent) 34%, transparent);
+}
+
+.rematch-mode-option:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.rematch-mode-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.rematch-mode-option-copy strong,
+.rematch-mode-option-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rematch-mode-option-copy strong {
+  font-size: 0.94rem;
+}
+
+.rematch-mode-option-copy small {
+  color: var(--theme-subtle);
+  font-size: 0.74rem;
+}
+
+.rematch-mode-note {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+html[data-theme="light"] .rematch-mode-panel {
+  border-color: var(--theme-border);
+  background: var(--theme-surface-raised);
+}
+
+html[data-theme="light"] .rematch-mode-option {
+  background: #fffaf2;
+}

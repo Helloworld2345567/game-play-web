@@ -48,6 +48,24 @@ export function boundaryErrorCode(value: unknown): string | null {
     : null;
 }
 
+function isRematchOptions(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.ruleSetIds)) return false;
+  const ruleSetIds = value.ruleSetIds;
+  if (
+    ruleSetIds.length === 0 ||
+    !ruleSetIds.every(
+      (ruleSetId) =>
+        typeof ruleSetId === "string" &&
+        ruleSetId.length > 0 &&
+        ruleSetId.length <= 80,
+    ) ||
+    typeof value.selectedRuleSetId !== "string"
+  ) {
+    return false;
+  }
+  return ruleSetIds.includes(value.selectedRuleSetId);
+}
+
 /**
  * The wire-format boundary for room messages.  It owns validation and
  * serialization only; game payloads remain opaque JSON values here.
@@ -63,6 +81,9 @@ export class RoomProtocol {
       Number.isSafeInteger(value.revision) &&
       Number.isSafeInteger(value.round) &&
       isRecord(value.seats) &&
+      (!Object.hasOwn(value, "rematchOptions") ||
+        value.rematchOptions === null ||
+        isRematchOptions(value.rematchOptions)) &&
       (!Object.hasOwn(value, "snapshotRevision") ||
         (Number.isSafeInteger(value.snapshotRevision) &&
           (value.snapshotRevision as number) >= 0))

@@ -90,8 +90,8 @@ npm run deploy
 
 1. 在 `src/games/<game>/` 实现并测试确定性的 `GameRules`，注册到 `src/games/registry.ts`。
 2. 在 `src/web/games/<game>/` 实现棋盘与展示 adapter，注册到 `src/web/games/registry.tsx`。
-3. 为新规则发布不可变的 `ruleSetId`；不要按客户端消息动态选择规则。
+3. 为新规则发布不可变的 `ruleSetId`；服务端只从注册表解析规则，不能直接信任客户端提交的 ID。需要在复赛时切换模式的兼容规则，应在服务端注册到同一个显式 `rematchGroup`。
 
 房间协议只传递不透明的棋种 payload，平台核心不读取棋种私有局面。需要隐藏信息的游戏必须实现 `project(authoritativePosition, viewerSeat)`，并为并发游戏明确选择 `concurrent_idempotent`；其他棋类保持 `strict_revision`。规则语义变化应发布新的不可变 `ruleSetId`。
 
-需要首局选角色的回合制规则在 `GameRules.definition.openingRoleIds` 中按先手、后手顺序声明两个稳定角色 ID，并在网页 adapter 中提供对应标签；房间层统一处理认领、开局和复赛换边。
+需要首局选角色的回合制规则在 `GameRules.definition.openingRoleIds` 中按先手、后手顺序声明两个稳定角色 ID，并在网页 adapter 中提供对应标签；房间层统一处理认领、开局和复赛换边。每一局内的 `ruleSetId` 保持不可变；本局结束后，玩家可从服务端授权的同组模式中选择下一局规则，修改模式会清除双方复赛准备，双方重新确认后才原子切换规则并开局。

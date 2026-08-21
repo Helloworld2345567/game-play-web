@@ -1308,6 +1308,12 @@ describe("GameRoom Durable Object", () => {
         expectedRevision: STARTED_TURN_ROOM_REVISION,
         ready: true,
       },
+      {
+        v: 1,
+        type: "select_rematch_rule",
+        expectedRevision: STARTED_TURN_ROOM_REVISION,
+        ruleSetId: "chase.medium.v1",
+      },
     ];
     for (const command of commands) {
       const response = await postRoomHttp(
@@ -3250,6 +3256,142 @@ describe("GameRoom Durable Object", () => {
 
     creatorAfterReconnect.socket.close(1000, "test complete");
     inviteeAfterReconnect.socket.close(1000, "test complete");
+  });
+
+  it("switches an allowed chase mode only at the atomic rematch boundary", async () => {
+    const stub = await initializeRoom(
+      "room-chase-rematch-mode",
+      "guest-chase-creator",
+      "chase",
+      "chase.easy.v1",
+    );
+    const creator = await connect(stub, "guest-chase-creator");
+    const invitee = await connect(stub, "guest-chase-invitee");
+    await creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 1,
+    );
+
+    const creatorChoice = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    const inviteeChoice = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    creator.socket.send(JSON.stringify(prepareRoleCommand(1, "thief")));
+    await Promise.all([creatorChoice, inviteeChoice]);
+    const creatorStarted = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    const inviteeStarted = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    invitee.socket.send(JSON.stringify(prepareRoleCommand(2, "police")));
+    await Promise.all([creatorStarted, inviteeStarted]);
+
+    const creatorFinished = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 4,
+    );
+    const inviteeFinished = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 4,
+    );
+    creator.socket.send(JSON.stringify({
+      v: 1,
+      type: "resign",
+      expectedRevision: 3,
+    }));
+    await expect(creatorFinished).resolves.toMatchObject({
+      ruleSetId: "chase.easy.v1",
+      rematchOptions: {
+        ruleSetIds: [
+          "chase.easy.v1",
+          "chase.medium.v1",
+          "chase.hard.v1",
+        ],
+        selectedRuleSetId: "chase.easy.v1",
+      },
+    });
+    await inviteeFinished;
+
+    const rejected = creator.inbox.nextMatching(
+      (message) => message.type === "error",
+    );
+    creator.socket.send(JSON.stringify({
+      v: 1,
+      type: "select_rematch_rule",
+      expectedRevision: 4,
+      ruleSetId: "minesweeper.race.9x9x10.v1",
+    }));
+    await expect(rejected).resolves.toMatchObject({
+      code: "room.invalid_rematch_rule",
+      snapshot: {
+        revision: 4,
+        ruleSetId: "chase.easy.v1",
+      },
+    });
+
+    const creatorSelected = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 5,
+    );
+    const inviteeSelected = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 5,
+    );
+    creator.socket.send(JSON.stringify({
+      v: 1,
+      type: "select_rematch_rule",
+      expectedRevision: 4,
+      ruleSetId: "chase.medium.v1",
+    }));
+    await expect(creatorSelected).resolves.toMatchObject({
+      ruleSetId: "chase.easy.v1",
+      rematchOptions: { selectedRuleSetId: "chase.medium.v1" },
+    });
+    await inviteeSelected;
+
+    const creatorReady = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 6,
+    );
+    const inviteeSeesReady = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 6,
+    );
+    creator.socket.send(JSON.stringify({
+      v: 1,
+      type: "rematch_ready",
+      expectedRevision: 5,
+      ready: true,
+    }));
+    await Promise.all([creatorReady, inviteeSeesReady]);
+
+    const creatorRematch = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 7,
+    );
+    const inviteeRematch = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 7,
+    );
+    invitee.socket.send(JSON.stringify({
+      v: 1,
+      type: "rematch_ready",
+      expectedRevision: 6,
+      ready: true,
+    }));
+    await expect(creatorRematch).resolves.toMatchObject({
+      round: 2,
+      ruleSetId: "chase.medium.v1",
+      rematchOptions: null,
+      position: {
+        turn: "seat-b",
+        data: {
+          mapId: "medium",
+          thiefSeat: "seat-b",
+          policeSeat: "seat-a",
+        },
+      },
+    });
+    await expect(inviteeRematch).resolves.toMatchObject({
+      ruleSetId: "chase.medium.v1",
+    });
+
+    creator.socket.close(1000, "test complete");
+    invitee.socket.close(1000, "test complete");
   });
 
   it("runs a Chinese chess room through the same authoritative protocol", async () => {

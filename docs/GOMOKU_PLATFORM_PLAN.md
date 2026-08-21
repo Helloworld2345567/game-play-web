@@ -141,7 +141,7 @@ interface RulePosition {
 
 服务端返回 `snapshot`，包含 `gameType`、`ruleSetId`、`actionConsistency`、最新 `revision`、自己的席位、双方状态和面向该观看者投影后的 `RulePosition`。认输和准备复赛是平台命令；复赛必须双方确认，并交换先后手。权威局面只保存在 Durable Object，隐藏雷区、种子和对手旗帜不会进入终局前的浏览器快照。
 
-客户端 envelope 中的 `gameType/ruleSetId` 只用于版本一致性检查；服务端始终使用房间初始化时持久化的不可变 `ruleSetId` 选择规则模块，不一致立即拒绝，绝不按客户端字段切换规则。
+客户端游戏动作 envelope 中的 `gameType/ruleSetId` 只用于版本一致性检查；服务端始终按房间当前持久化的 `ruleSetId` 从注册表选择规则模块，不一致立即拒绝。单局期间规则不可变；仅在终局后的复赛边界，服务端才接受同一显式 `rematchGroup` 内、仍可创建且角色与一致性语义兼容的目标规则。修改下一局模式会清除双方准备，双方重新确认后在一次持久化决策中同时切换 `ruleSetId`、创建新局面并交换先后手。
 
 每个改变持久状态的命令令 `revision + 1`。DO 逐条执行：校验消息 → 校验身份、规则 ID 与一致性策略 → 调用房间已绑定的规则模块 → `storage.put("room", nextState)` → 广播观看者专属 snapshot。必须先持久化再广播。五子棋、象棋和井字棋继续严格拒绝旧 revision；扫雷竞速携带 `actionId + clientSeq + baseRevision`，允许基于旧 revision 的不同格动作按服务端收到顺序依次生效，并用有限 receipt 缓存幂等去重。
 

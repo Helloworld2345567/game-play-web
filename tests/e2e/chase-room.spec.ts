@@ -25,7 +25,7 @@ function node(page: Page, id: string) {
   return page.locator(`[data-node="${id}"]`);
 }
 
-test("two players chase on the easy map, capture, then swap roles in a rematch", async ({
+test("two players capture, switch chase difficulty, then swap roles in a rematch", async ({
   browser,
 }) => {
   const creatorContext = await browser.newContext({
@@ -136,10 +136,29 @@ test("two players chase on the easy map, capture, then swap roles in a rematch",
       "police",
     );
 
+    const creatorModePanel = creator.getByRole("region", {
+      name: "下一局模式",
+    });
+    const inviteeModePanel = invitee.getByRole("region", {
+      name: "下一局模式",
+    });
+    await expect(creatorModePanel.getByRole("radio", { name: "简单" }))
+      .toHaveAttribute("aria-checked", "true");
+    await expect(inviteeModePanel.getByRole("radio", { name: "简单" }))
+      .toHaveAttribute("aria-checked", "true");
+
     await creator.getByRole("button", { name: "再来一局" }).click();
     await expect(
       invitee.locator(".seat-card").filter({ hasText: "追逃甲" }),
     ).toContainText("已准备");
+    await inviteeModePanel.getByRole("radio", { name: "中等" }).click();
+    await expect(creatorModePanel.getByRole("radio", { name: "中等" }))
+      .toHaveAttribute("aria-checked", "true");
+    await expect(
+      invitee.locator(".seat-card").filter({ hasText: "追逃甲" }),
+    ).not.toContainText("已准备");
+
+    await creator.getByRole("button", { name: "再来一局" }).click();
     await invitee.getByRole("button", { name: "再来一局" }).click();
 
     await expect(invitee.getByRole("heading", { level: 1 })).toContainText(
@@ -160,8 +179,12 @@ test("two players chase on the easy map, capture, then swap roles in a rematch",
     await expect(
       invitee.locator(".seat-card").filter({ hasText: "追逃乙" }),
     ).toContainText("小偷");
-    await expect(node(invitee, "C")).toBeEnabled();
-    await expect(node(creator, "T")).toBeDisabled();
+    await expect(creator.locator("[data-node]")).toHaveCount(8);
+    await expect(invitee.locator("[data-node]")).toHaveCount(8);
+    await expect(creator.getByText("第 2 局 · 警察抓小偷 · 中等"))
+      .toBeVisible();
+    await expect(node(invitee, "V1")).toBeEnabled();
+    await expect(node(creator, "V1")).toBeDisabled();
   } finally {
     await inviteeContext.close();
     await creatorContext.close();

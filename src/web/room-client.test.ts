@@ -4,6 +4,7 @@ import {
   createConcurrentActionLedger,
   createGameActionCommand,
   createPrepareRoleCommand,
+  createSelectRematchRuleCommand,
   ensureBrowserSession,
   nextClientSequence,
   sendOutstandingConcurrentActions,
@@ -148,6 +149,17 @@ describe("room client action commands", () => {
       type: "prepare_role",
       expectedRevision: 7,
       roleId: "x",
+    });
+  });
+
+  it("creates a strict next-round mode command from the current revision", () => {
+    expect(
+      createSelectRematchRuleCommand(snapshot(), "minesweeper.race.9x9x10.v1"),
+    ).toEqual({
+      v: 1,
+      type: "select_rematch_rule",
+      expectedRevision: 7,
+      ruleSetId: "minesweeper.race.9x9x10.v1",
     });
   });
 

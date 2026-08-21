@@ -42,6 +42,33 @@ describe("RoomProtocol", () => {
     expect(protocol.parseServerMessage({ v: 999, type: "left" })).toBeNull();
   });
 
+  it("rejects malformed next-round mode options at the protocol boundary", () => {
+    expect(
+      protocol.parseServerMessage(snapshot({
+        rematchOptions: {
+          ruleSetIds: "chase.easy.v1",
+          selectedRuleSetId: "chase.easy.v1",
+        },
+      })),
+    ).toBeNull();
+    expect(
+      protocol.parseServerMessage(snapshot({
+        rematchOptions: {
+          ruleSetIds: ["chase.easy.v1"],
+          selectedRuleSetId: "chase.medium.v1",
+        },
+      })),
+    ).toBeNull();
+    expect(
+      protocol.parseServerMessage(snapshot({
+        rematchOptions: {
+          ruleSetIds: ["chase.easy.v1", "chase.medium.v1"],
+          selectedRuleSetId: "chase.medium.v1",
+        },
+      })),
+    ).toMatchObject({ type: "snapshot" });
+  });
+
   it("keeps WebSocket parsing separate from transport mechanics", () => {
     expect(protocol.parseWebSocketMessage("pong")).toEqual({ kind: "pong" });
     expect(protocol.parseWebSocketMessage(JSON.stringify(snapshot()))).toEqual({

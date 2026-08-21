@@ -193,6 +193,23 @@ describe("game outcome presentation", () => {
     ).toBeUndefined();
   });
 
+  it("exposes short labels for switchable rematch modes", () => {
+    expect(
+      ["chase.easy.v1", "chase.medium.v1", "chase.hard.v1"].map(
+        (ruleSetId) => getGameAdapter("chase", ruleSetId)?.modeLabel,
+      ),
+    ).toEqual(["简单", "中等", "困难"]);
+    expect(
+      [
+        "minesweeper.race.9x9x10.v1",
+        "minesweeper.race.16x16x40.v1",
+        "minesweeper.race.30x16x99.v1",
+      ].map(
+        (ruleSetId) => getGameAdapter("minesweeper", ruleSetId)?.modeLabel,
+      ),
+    ).toEqual(["小型", "中型", "大型"]);
+  });
+
   it("uses the position role assignment for chase seat swatches", () => {
     const adapter = getGameAdapter("chase", "chase.easy.v1");
     expect(adapter?.getSeatPresentations(chasePosition())).toEqual({
