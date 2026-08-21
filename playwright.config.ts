@@ -3,7 +3,9 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
-  retries: 0,
+  // A shared CI runner can transiently lose a local Worker/DO connection;
+  // retry the isolated test context without changing local developer runs.
+  retries: process.env.CI ? 2 : 0,
   reporter: "list",
   // Durable Objects are cold-started by the in-process Worker on shared CI
   // runners. Keep local assertions fast while allowing those first RPCs time
