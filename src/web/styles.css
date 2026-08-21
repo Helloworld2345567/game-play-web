@@ -753,6 +753,114 @@ button:disabled {
   background: #514b43;
 }
 
+.opening-role-panel {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: clamp(16px, 3vw, 24px);
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 20px;
+  background: var(--theme-surface-soft);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.16);
+}
+
+.opening-role-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.opening-role-heading .eyebrow {
+  margin-bottom: 5px;
+}
+
+.opening-role-heading h2 {
+  margin: 0;
+  font-size: clamp(1.3rem, 5vw, 1.7rem);
+  line-height: 1.1;
+}
+
+.opening-role-choices {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.opening-role-choice {
+  display: flex;
+  min-width: 0;
+  min-height: 76px;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 15px;
+  color: var(--theme-text);
+  background: var(--theme-surface);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.opening-role-choice:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--theme-accent) 70%, var(--theme-border));
+  background: color-mix(in srgb, var(--theme-accent) 8%, var(--theme-surface));
+  transform: translateY(-1px);
+}
+
+.opening-role-choice.is-selected {
+  border-color: var(--theme-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-accent) 34%, transparent);
+}
+
+.opening-role-choice.is-taken {
+  opacity: 0.54;
+}
+
+.opening-role-choice:disabled {
+  cursor: default;
+}
+
+.opening-role-choice .stone-swatch {
+  width: 30px;
+  height: 30px;
+}
+
+.opening-role-choice-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.opening-role-choice-copy strong,
+.opening-role-choice-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opening-role-choice-copy strong {
+  font-size: 0.94rem;
+}
+
+.opening-role-choice-copy small {
+  color: var(--theme-subtle);
+  font-size: 0.72rem;
+}
+
+.opening-role-status {
+  min-height: 1.3em;
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .board-shell,
 .board-placeholder {
   width: 100%;

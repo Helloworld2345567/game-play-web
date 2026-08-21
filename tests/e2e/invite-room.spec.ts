@@ -59,6 +59,18 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
 
     await invitee.goto(inviteUrl);
     await setDisplayName(invitee, "乙方");
+    await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
+      "请选择你的角色",
+    );
+    await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
+      "请选择你的角色",
+    );
+    await expect(creator.locator("canvas")).toHaveCount(0);
+    await creator.locator('[data-role-id="black"]').click();
+    await expect(creator.locator(".opening-role-status")).toHaveText(
+      "已选择黑方，等待对手",
+    );
+    await invitee.locator('[data-role-id="white"]').click();
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",

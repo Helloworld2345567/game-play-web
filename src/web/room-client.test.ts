@@ -3,6 +3,7 @@ import type { RoomSnapshot } from "../shared/protocol";
 import {
   createConcurrentActionLedger,
   createGameActionCommand,
+  createPrepareRoleCommand,
   ensureBrowserSession,
   nextClientSequence,
   sendOutstandingConcurrentActions,
@@ -132,6 +133,24 @@ function snapshot(
 }
 
 describe("room client action commands", () => {
+  it("creates a strict opening-role command from the current revision", () => {
+    expect(
+      createPrepareRoleCommand(
+        snapshot({
+          gameType: "tictactoe",
+          ruleSetId: "tictactoe.classic3.v1",
+          actionConsistency: "strict_revision",
+        }),
+        "x",
+      ),
+    ).toEqual({
+      v: 1,
+      type: "prepare_role",
+      expectedRevision: 7,
+      roleId: "x",
+    });
+  });
+
   it("allocates safe time-ordered sequences without resetting in one connection", () => {
     const first = nextClientSequence(0, 1_800_000_000_000, 900_000);
     const second = nextClientSequence(first, 1_800_000_000_000, 1);

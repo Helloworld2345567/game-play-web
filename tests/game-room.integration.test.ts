@@ -341,9 +341,58 @@ async function startRoom(
   const { stub } = initialized;
   const creator = await connect(stub, creatorGuestId);
   const invitee = await connect(stub, inviteeGuestId);
-  await creator.inbox.next();
+  // Turn-based rooms now expose an opening preparation phase. Keep this
+  // helper's contract as a fully started room for the many lifecycle tests
+  // below, but exercise the public role-selection commands rather than
+  // mutating the Durable Object state behind the test seam.
+  await creator.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 1,
+  );
+  const creatorRoleSnapshot = creator.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 2,
+  );
+  const inviteeRoleSnapshot = invitee.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 2,
+  );
+  creator.socket.send(
+    JSON.stringify(prepareRoleCommand(1, "black")),
+  );
+  await Promise.all([creatorRoleSnapshot, inviteeRoleSnapshot]);
+
+  const creatorStarted = creator.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 3,
+  );
+  const inviteeStarted = invitee.inbox.nextMatching(
+    (message) => message.type === "snapshot" && message.revision === 3,
+  );
+  invitee.socket.send(
+    JSON.stringify(prepareRoleCommand(2, "white")),
+  );
+  await Promise.all([creatorStarted, inviteeStarted]);
   return { ...initialized, creator, invitee };
 }
+
+function prepareRoleCommand(expectedRevision: number, roleId: string) {
+  return {
+    v: 1,
+    type: "prepare_role",
+    expectedRevision,
+    roleId,
+  };
+}
+
+function latestSnapshotRevision(connection: TestConnection): number {
+  const snapshot = [...connection.inbox.history]
+    .reverse()
+    .find((message) => message.type === "snapshot");
+  if (snapshot === undefined || typeof snapshot.revision !== "number") {
+    throw new Error("Expected a latest Room snapshot revision");
+  }
+  return snapshot.revision;
+}
+
+const STARTED_TURN_ROOM_REVISION = 3;
+const AFTER_FIRST_TURN_ACTION_REVISION = 4;
 
 function placeCommand(expectedRevision: number, x: number, y: number) {
   return {
@@ -871,7 +920,9 @@ describe("GameRoom Durable Object", () => {
       creator.socket.addEventListener("close", () => resolve(), { once: true });
     });
 
-    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+    creator.socket.send(
+      JSON.stringify(placeCommand(latestSnapshotRevision(creator), 7, 7)),
+    );
 
     await closed;
     await expect(
@@ -1017,6 +1068,39 @@ describe("GameRoom Durable Object", () => {
     });
     expect(joined.message).toMatchObject({ revision: 1, selfSeat: "seat-b" });
 
+    const creatorChoice = await postRoomHttp(
+      stub,
+      "command",
+      "guest-creator",
+      {
+        v: 1,
+        connectionId: "http-command-creator-01",
+        command: prepareRoleCommand(1, "black"),
+      },
+    );
+    expect(creatorChoice.message).toMatchObject({
+      revision: 2,
+      position: null,
+      preparation: {
+        roleBySeat: { "seat-a": "black", "seat-b": null },
+      },
+    });
+    const started = await postRoomHttp(
+      stub,
+      "command",
+      "guest-invitee",
+      {
+        v: 1,
+        connectionId: "http-command-invitee-01",
+        command: prepareRoleCommand(2, "white"),
+      },
+    );
+    expect(started.message).toMatchObject({
+      revision: 3,
+      preparation: null,
+      position: { turn: "seat-a", outcome: null },
+    });
+
     const response = await postRoomHttp(
       stub,
       "command",
@@ -1024,7 +1108,7 @@ describe("GameRoom Durable Object", () => {
       {
         v: 1,
         connectionId: "http-command-creator-01",
-        command: placeCommand(1, 7, 7),
+        command: placeCommand(3, 7, 7),
       },
     );
 
@@ -1032,7 +1116,7 @@ describe("GameRoom Durable Object", () => {
       status: 200,
       message: {
         type: "snapshot",
-        revision: 2,
+        revision: 4,
         selfSeat: "seat-a",
         position: {
           turn: "seat-b",
@@ -1047,7 +1131,7 @@ describe("GameRoom Durable Object", () => {
       { v: 1, connectionId: "http-command-invitee-01" },
     );
     expect(inviteeView.message).toMatchObject({
-      revision: 2,
+      revision: 4,
       position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
     });
   });
@@ -1064,6 +1148,26 @@ describe("GameRoom Durable Object", () => {
       v: 1,
       connectionId: "http-expired-command-b",
     });
+    await postRoomHttp(
+      stub,
+      "command",
+      "guest-creator",
+      {
+        v: 1,
+        connectionId,
+        command: prepareRoleCommand(1, "black"),
+      },
+    );
+    await postRoomHttp(
+      stub,
+      "command",
+      "guest-invitee",
+      {
+        v: 1,
+        connectionId: "http-expired-command-b",
+        command: prepareRoleCommand(2, "white"),
+      },
+    );
 
     vi.setSystemTime(syncedAt + 16_000);
     try {
@@ -1074,20 +1178,20 @@ describe("GameRoom Durable Object", () => {
         {
           v: 1,
           connectionId,
-          command: placeCommand(1, 7, 7),
+          command: placeCommand(3, 7, 7),
         },
       );
 
       expect(expired.message).toMatchObject({
         type: "error",
         code: "room.connection_required",
-        snapshot: { revision: 1, selfSeat: "seat-a" },
+        snapshot: { revision: 3, selfSeat: "seat-a" },
       });
       await expect(
         runInDurableObject(stub, (_instance, state) =>
           state.storage.get<StoredRoom>("room"),
         ),
-      ).resolves.toMatchObject({ revision: 1 });
+      ).resolves.toMatchObject({ revision: 3 });
 
       const resynced = await postRoomHttp(stub, "sync", "guest-creator", {
         v: 1,
@@ -1095,7 +1199,7 @@ describe("GameRoom Durable Object", () => {
       });
       expect(resynced.message).toMatchObject({
         type: "snapshot",
-        revision: 1,
+        revision: 3,
         selfSeat: "seat-a",
       });
       const accepted = await postRoomHttp(
@@ -1105,12 +1209,12 @@ describe("GameRoom Durable Object", () => {
         {
           v: 1,
           connectionId,
-          command: placeCommand(1, 7, 7),
+          command: placeCommand(3, 7, 7),
         },
       );
       expect(accepted.message).toMatchObject({
         type: "snapshot",
-        revision: 2,
+        revision: 4,
       });
     } finally {
       vi.useRealTimers();
@@ -1131,9 +1235,11 @@ describe("GameRoom Durable Object", () => {
     const result = creator.inbox.nextMatching(
       (message) =>
         message.type === "error" ||
-        (message.type === "snapshot" && message.revision === 2),
+        (message.type === "snapshot" && message.revision === 4),
     );
-    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+    creator.socket.send(
+      JSON.stringify(placeCommand(latestSnapshotRevision(creator), 7, 7)),
+    );
 
     await expect(result).resolves.toMatchObject({
       type: "error",
@@ -1158,7 +1264,7 @@ describe("GameRoom Durable Object", () => {
       status: 200,
       message: {
         type: "snapshot",
-        revision: 1,
+        revision: 3,
         selfSeat: null,
         seats: {
           "seat-a": { occupied: true },
@@ -1168,16 +1274,18 @@ describe("GameRoom Durable Object", () => {
     });
 
     const accepted = creator.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 2,
+      (message) => message.type === "snapshot" && message.revision === 4,
     );
-    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+    creator.socket.send(
+      JSON.stringify(placeCommand(latestSnapshotRevision(creator), 7, 7)),
+    );
     await accepted;
     const observed = await postRoomHttp(stub, "sync", "guest-spectator", {
       v: 1,
       connectionId: "http-spectator-client-01",
     });
     expect(observed.message).toMatchObject({
-      revision: 2,
+      revision: 4,
       selfSeat: null,
       position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
     });
@@ -1192,9 +1300,14 @@ describe("GameRoom Durable Object", () => {
     });
 
     const commands = [
-      placeCommand(1, 7, 7),
-      { v: 1, type: "resign", expectedRevision: 1 },
-      { v: 1, type: "rematch_ready", expectedRevision: 1, ready: true },
+      placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7),
+      { v: 1, type: "resign", expectedRevision: STARTED_TURN_ROOM_REVISION },
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: STARTED_TURN_ROOM_REVISION,
+        ready: true,
+      },
     ];
     for (const command of commands) {
       const response = await postRoomHttp(
@@ -1206,7 +1319,7 @@ describe("GameRoom Durable Object", () => {
       expect(response.message).toMatchObject({
         type: "error",
         code: "room.spectator_read_only",
-        snapshot: { revision: 1, selfSeat: null },
+        snapshot: { revision: STARTED_TURN_ROOM_REVISION, selfSeat: null },
       });
     }
   });
@@ -1769,7 +1882,7 @@ describe("GameRoom Durable Object", () => {
     await expect(left).resolves.toEqual({ v: 1, type: "left" });
     await socketClosed;
     await expect(presence).resolves.toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       seats: { "seat-a": { occupied: true, online: false } },
     });
     await expect(
@@ -2145,8 +2258,8 @@ describe("GameRoom Durable Object", () => {
     // A same-Guest reconnect only refreshes its lifecycle lease. It must not
     // manufacture a new public snapshot or broadcast an identical one.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(creator.inbox.history).toHaveLength(2);
-    expect(invitee.inbox.history).toHaveLength(1);
+    expect(creator.inbox.history).toHaveLength(4);
+    expect(invitee.inbox.history).toHaveLength(3);
     const creatorLeft = creator.inbox.nextMatching(
       (message) => message.type === "left",
     );
@@ -2172,7 +2285,7 @@ describe("GameRoom Durable Object", () => {
     expect(creatorSecondTab.socket.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("persists the creator as Seat A and starts after the invitee claims Seat B", async () => {
+  it("keeps a turn room in preparation until both players choose different roles", async () => {
     const stub = await initializeRoom("room-1");
 
     const creator = await connect(stub, "guest-creator");
@@ -2196,6 +2309,56 @@ describe("GameRoom Durable Object", () => {
         "seat-a": { occupied: true },
         "seat-b": { occupied: true },
       },
+      preparation: {
+        roleIds: ["black", "white"],
+        roleBySeat: {
+          "seat-a": null,
+          "seat-b": null,
+        },
+      },
+      position: null,
+    });
+
+    const creatorChoice = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    const inviteeChoice = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    creator.socket.send(JSON.stringify(prepareRoleCommand(1, "black")));
+    await expect(creatorChoice).resolves.toMatchObject({
+      preparation: {
+        roleIds: ["black", "white"],
+        roleBySeat: {
+          "seat-a": "black",
+          "seat-b": null,
+        },
+      },
+      position: null,
+    });
+    await expect(inviteeChoice).resolves.toMatchObject({
+      preparation: {
+        roleBySeat: {
+          "seat-a": "black",
+          "seat-b": null,
+        },
+      },
+      position: null,
+    });
+
+    const creatorStarted = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    const inviteeStarted = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    invitee.socket.send(JSON.stringify(prepareRoleCommand(2, "white")));
+    await expect(creatorStarted).resolves.toMatchObject({
+      preparation: null,
+      position: { turn: "seat-a", outcome: null },
+    });
+    await expect(inviteeStarted).resolves.toMatchObject({
+      preparation: null,
       position: { turn: "seat-a", outcome: null },
     });
 
@@ -2210,7 +2373,7 @@ describe("GameRoom Durable Object", () => {
 
     expect(spectator.firstMessage).toMatchObject({
       type: "snapshot",
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       selfSeat: null,
       seats: {
         "seat-a": { occupied: true },
@@ -2223,7 +2386,7 @@ describe("GameRoom Durable Object", () => {
         state.storage.get<StoredRoom>("room"),
       ),
     ).resolves.toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       seats: {
         "seat-a": { guestId: "guest-creator" },
         "seat-b": { guestId: "guest-invitee" },
@@ -2315,7 +2478,7 @@ describe("GameRoom Durable Object", () => {
 
     spectator.socket.send(
       JSON.stringify({
-        ...placeCommand(1, 7, 7),
+        ...placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7),
         guestId: "guest-creator",
         seat: "seat-a",
       }),
@@ -2324,14 +2487,17 @@ describe("GameRoom Durable Object", () => {
     await expect(rejection).resolves.toMatchObject({
       type: "error",
       code: "room.spectator_read_only",
-      snapshot: { revision: 1, selfSeat: null },
+      snapshot: {
+        revision: STARTED_TURN_ROOM_REVISION,
+        selfSeat: null,
+      },
     });
     await expect(
       runInDurableObject(stub, (_instance, state) =>
         state.storage.get<StoredRoom>("room"),
       ),
     ).resolves.toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       position: { data: { moveCount: 0 } },
     });
   });
@@ -2340,14 +2506,18 @@ describe("GameRoom Durable Object", () => {
     const { stub, creator } = await startRoom("room-spectator-broadcast");
     const spectator = await connect(stub, "guest-spectator");
     const observed = spectator.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 2,
+      (message) =>
+        message.type === "snapshot" &&
+        message.revision === AFTER_FIRST_TURN_ACTION_REVISION,
     );
 
-    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+    creator.socket.send(
+      JSON.stringify(placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7)),
+    );
 
     await expect(observed).resolves.toMatchObject({
       type: "snapshot",
-      revision: 2,
+      revision: AFTER_FIRST_TURN_ACTION_REVISION,
       selfSeat: null,
       position: {
         turn: "seat-b",
@@ -2740,10 +2910,23 @@ describe("GameRoom Durable Object", () => {
       "xiangqi.casual.v1",
     );
     const creator = await connect(stub, "guest-xiangqi-strict-creator");
-    await connect(stub, "guest-xiangqi-strict-invitee");
-    await creator.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 1,
+    const invitee = await connect(stub, "guest-xiangqi-strict-invitee");
+    const creatorChoice = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
     );
+    const inviteeChoice = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    creator.socket.send(JSON.stringify(prepareRoleCommand(1, "red")));
+    await Promise.all([creatorChoice, inviteeChoice]);
+    const creatorStarted = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    const inviteeStarted = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    invitee.socket.send(JSON.stringify(prepareRoleCommand(2, "black")));
+    await Promise.all([creatorStarted, inviteeStarted]);
 
     creator.socket.send(
       JSON.stringify(xiangqiMoveCommand(0, 4, 6, 4, 5)),
@@ -2754,7 +2937,7 @@ describe("GameRoom Durable Object", () => {
     ).resolves.toMatchObject({
       code: "room.revision_mismatch",
       snapshot: {
-        revision: 1,
+        revision: STARTED_TURN_ROOM_REVISION,
         position: { data: { moveCount: 0, lastMove: null } },
       },
     });
@@ -2762,7 +2945,7 @@ describe("GameRoom Durable Object", () => {
       state.storage.get<StoredRoom>("room"),
     );
     expect(stored).toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       position: { data: { moveCount: 0, lastMove: null } },
     });
   });
@@ -2791,18 +2974,23 @@ describe("GameRoom Durable Object", () => {
       (message) => message.type === "error",
     );
 
-    creator.socket.send(JSON.stringify(placeCommand(0, 7, 7)));
+    creator.socket.send(
+      JSON.stringify(placeCommand(0, 7, 7)),
+    );
 
     await expect(rejection).resolves.toMatchObject({
       type: "error",
       code: "room.revision_mismatch",
-      snapshot: { revision: 1, position: { data: { moveCount: 0 } } },
+      snapshot: {
+        revision: STARTED_TURN_ROOM_REVISION,
+        position: { data: { moveCount: 0 } },
+      },
     });
     const stored = await runInDurableObject(stub, (_instance, state) =>
       state.storage.get<StoredRoom>("room"),
     );
     expect(stored).toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       position: { data: { moveCount: 0 } },
     });
   });
@@ -2814,19 +3002,22 @@ describe("GameRoom Durable Object", () => {
     );
 
     invitee.socket.send(
-      JSON.stringify({ ...placeCommand(1, 7, 7), seat: "seat-a" }),
+      JSON.stringify({
+        ...placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7),
+        seat: "seat-a",
+      }),
     );
 
     await expect(rejection).resolves.toMatchObject({
       type: "error",
       code: "gomoku.not_your_turn",
-      snapshot: { revision: 1 },
+      snapshot: { revision: STARTED_TURN_ROOM_REVISION },
     });
     const stored = await runInDurableObject(stub, (_instance, state) =>
       state.storage.get<StoredRoom>("room"),
     );
     expect(stored).toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       position: { data: { moveCount: 0 } },
     });
   });
@@ -2839,7 +3030,7 @@ describe("GameRoom Durable Object", () => {
 
     creator.socket.send(
       JSON.stringify({
-        ...placeCommand(1, 7, 7),
+        ...placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7),
         payload: { type: "place", x: "7", y: 7 },
       }),
     );
@@ -2847,13 +3038,13 @@ describe("GameRoom Durable Object", () => {
     await expect(rejection).resolves.toMatchObject({
       type: "error",
       code: "gomoku.invalid_action",
-      snapshot: { revision: 1 },
+      snapshot: { revision: STARTED_TURN_ROOM_REVISION },
     });
     const stored = await runInDurableObject(stub, (_instance, state) =>
       state.storage.get<StoredRoom>("room"),
     );
     expect(stored).toMatchObject({
-      revision: 1,
+      revision: STARTED_TURN_ROOM_REVISION,
       position: { data: { moveCount: 0 } },
     });
   });
@@ -2875,21 +3066,25 @@ describe("GameRoom Durable Object", () => {
         await originalPersist(room);
       });
     });
-    const revisionTwoSnapshots = [creator, creatorSecondTab, invitee].map(
+    const revisionFourSnapshots = [creator, creatorSecondTab, invitee].map(
       ({ inbox }) =>
         inbox.nextMatching(
-          (message) => message.type === "snapshot" && message.revision === 2,
+          (message) =>
+            message.type === "snapshot" &&
+            message.revision === AFTER_FIRST_TURN_ACTION_REVISION,
         ),
     );
-    const command = JSON.stringify(placeCommand(1, 7, 7));
+    const command = JSON.stringify(
+      placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7),
+    );
 
     creator.socket.send(command);
     creatorSecondTab.socket.send(command);
 
     await Promise.all(
-      revisionTwoSnapshots.map((snapshot) =>
+      revisionFourSnapshots.map((snapshot) =>
         expect(snapshot).resolves.toMatchObject({
-          revision: 2,
+          revision: AFTER_FIRST_TURN_ACTION_REVISION,
           position: {
             data: { moveCount: 1, lastMove: { x: 7, y: 7, stone: 1 } },
           },
@@ -2908,7 +3103,7 @@ describe("GameRoom Durable Object", () => {
       state.storage.get<StoredRoom>("room"),
     );
     expect(stored).toMatchObject({
-      revision: 2,
+      revision: AFTER_FIRST_TURN_ACTION_REVISION,
       position: {
         data: { moveCount: 1, lastMove: { x: 7, y: 7, stone: 1 } },
       },
@@ -2928,19 +3123,23 @@ describe("GameRoom Durable Object", () => {
     const acknowledgements = rooms.flatMap(({ creator, invitee }) =>
       [creator, invitee].map(({ inbox }) =>
         inbox.nextMatching(
-          (message) => message.type === "snapshot" && message.revision === 2,
+          (message) =>
+            message.type === "snapshot" &&
+            message.revision === AFTER_FIRST_TURN_ACTION_REVISION,
         ),
       ),
     );
 
     for (const { creator } of rooms) {
-      creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+      creator.socket.send(
+        JSON.stringify(placeCommand(STARTED_TURN_ROOM_REVISION, 7, 7)),
+      );
     }
 
     await Promise.all(
       acknowledgements.map((acknowledgement) =>
         expect(acknowledgement).resolves.toMatchObject({
-          revision: 2,
+          revision: AFTER_FIRST_TURN_ACTION_REVISION,
           position: {
             turn: "seat-b",
             data: { moveCount: 1, lastMove: { x: 7, y: 7 } },
@@ -2956,7 +3155,11 @@ describe("GameRoom Durable Object", () => {
       ),
     );
     expect(storedRooms).toHaveLength(5);
-    expect(storedRooms.every((room) => room?.revision === 2)).toBe(true);
+    expect(
+      storedRooms.every(
+        (room) => room?.revision === AFTER_FIRST_TURN_ACTION_REVISION,
+      ),
+    ).toBe(true);
     expect(
       rooms
         .flatMap(({ creator, invitee }) => [creator, invitee])
@@ -2976,13 +3179,13 @@ describe("GameRoom Durable Object", () => {
         type: "game_action",
         gameType: "gomoku",
         ruleSetId: "gomoku.freestyle15.v1",
-        expectedRevision: 1,
+        expectedRevision: STARTED_TURN_ROOM_REVISION,
         payload: { type: "place", x: 7, y: 7 },
       }),
     );
     await expect(blackSnapshot).resolves.toMatchObject({
       type: "snapshot",
-      revision: 2,
+      revision: AFTER_FIRST_TURN_ACTION_REVISION,
       position: {
         turn: "seat-b",
         data: {
@@ -2991,13 +3194,15 @@ describe("GameRoom Durable Object", () => {
         },
       },
     });
-    await expect(blackAck).resolves.toMatchObject({ revision: 2 });
+    await expect(blackAck).resolves.toMatchObject({
+      revision: AFTER_FIRST_TURN_ACTION_REVISION,
+    });
     const storedAfterBroadcast = await runInDurableObject(
       stub,
       (_instance, state) => state.storage.get<StoredRoom>("room"),
     );
     expect(storedAfterBroadcast).toMatchObject({
-      revision: 2,
+      revision: AFTER_FIRST_TURN_ACTION_REVISION,
       position: {
         data: { lastMove: { x: 7, y: 7, stone: 1 } },
       },
@@ -3011,15 +3216,15 @@ describe("GameRoom Durable Object", () => {
     const inviteeAfterReconnect = await connect(stub, "guest-invitee");
 
     expect(creatorAfterReconnect.firstMessage).toMatchObject({
-      revision: 2,
+      revision: AFTER_FIRST_TURN_ACTION_REVISION,
       selfSeat: "seat-a",
       position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
     });
     const whiteSnapshot = creatorAfterReconnect.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 3,
+      (message) => message.type === "snapshot" && message.revision === 5,
     );
     const whiteAck = inviteeAfterReconnect.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 3,
+      (message) => message.type === "snapshot" && message.revision === 5,
     );
     inviteeAfterReconnect.socket.send(
       JSON.stringify({
@@ -3027,14 +3232,14 @@ describe("GameRoom Durable Object", () => {
         type: "game_action",
         gameType: "gomoku",
         ruleSetId: "gomoku.freestyle15.v1",
-        expectedRevision: 2,
+        expectedRevision: AFTER_FIRST_TURN_ACTION_REVISION,
         payload: { type: "place", x: 8, y: 7 },
       }),
     );
-    await expect(whiteAck).resolves.toMatchObject({ revision: 3 });
+    await expect(whiteAck).resolves.toMatchObject({ revision: 5 });
     await expect(whiteSnapshot).resolves.toMatchObject({
       type: "snapshot",
-      revision: 3,
+      revision: 5,
       position: {
         turn: "seat-a",
         data: {
@@ -3056,13 +3261,36 @@ describe("GameRoom Durable Object", () => {
     );
     const creator = await connect(stub, "guest-xiangqi-creator");
     const invitee = await connect(stub, "guest-xiangqi-invitee");
-    await creator.inbox.next();
+    const creatorChoice = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    const inviteeChoice = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 2,
+    );
+    creator.socket.send(JSON.stringify(prepareRoleCommand(1, "red")));
+    await Promise.all([creatorChoice, inviteeChoice]);
+    const creatorStarted = creator.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    const inviteeStarted = invitee.inbox.nextMatching(
+      (message) => message.type === "snapshot" && message.revision === 3,
+    );
+    invitee.socket.send(JSON.stringify(prepareRoleCommand(2, "black")));
+    await Promise.all([creatorStarted, inviteeStarted]);
 
     expect(invitee.firstMessage).toMatchObject({
       type: "snapshot",
       gameType: "xiangqi",
       ruleSetId: "xiangqi.casual.v1",
       revision: 1,
+      preparation: {
+        roleIds: ["red", "black"],
+        roleBySeat: { "seat-a": null, "seat-b": null },
+      },
+      position: null,
+    });
+
+    expect(inviteeStarted).resolves.toMatchObject({
       position: {
         turn: "seat-a",
         data: {
@@ -3078,19 +3306,19 @@ describe("GameRoom Durable Object", () => {
     });
 
     const creatorAck = creator.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 2,
+      (message) => message.type === "snapshot" && message.revision === 4,
     );
     const inviteeAck = invitee.inbox.nextMatching(
-      (message) => message.type === "snapshot" && message.revision === 2,
+      (message) => message.type === "snapshot" && message.revision === 4,
     );
     creator.socket.send(
-      JSON.stringify(xiangqiMoveCommand(1, 4, 6, 4, 5)),
+      JSON.stringify(xiangqiMoveCommand(3, 4, 6, 4, 5)),
     );
 
     await expect(creatorAck).resolves.toMatchObject({
       gameType: "xiangqi",
       ruleSetId: "xiangqi.casual.v1",
-      revision: 2,
+      revision: 4,
       position: {
         turn: "seat-b",
         data: {
@@ -3105,7 +3333,7 @@ describe("GameRoom Durable Object", () => {
         },
       },
     });
-    await expect(inviteeAck).resolves.toMatchObject({ revision: 2 });
+    await expect(inviteeAck).resolves.toMatchObject({ revision: 4 });
 
     creator.socket.close(1000, "test complete");
     invitee.socket.close(1000, "test complete");

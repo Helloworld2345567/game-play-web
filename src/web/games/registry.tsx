@@ -29,6 +29,13 @@ export interface SeatPresentation {
   swatchClassName: string;
 }
 
+export interface OpeningRoleChoice {
+  roleId: string;
+  label: string;
+  orderLabel: "先手" | "后手";
+  swatchClassName: string;
+}
+
 export type SeatPresentations = Readonly<
   Record<PlatformSeatId, SeatPresentation>
 >;
@@ -49,6 +56,8 @@ export interface GameAdapter {
   readonly landingLabel?: string;
   readonly createRoomLabel: string;
   readonly landingDescription: string;
+  /** Roles/colours that players may claim before the first position exists. */
+  readonly openingChoices?: readonly OpeningRoleChoice[];
   /** Kept as a component facade; the implementation is lazy. */
   readonly Renderer: FunctionComponent<GameRendererProps>;
   /** Exposed for hosts that want to preload or inspect the lazy renderer. */
@@ -359,6 +368,20 @@ export const gomokuAdapter = dynamicAdapter({
   landingLabel: "五子棋",
   createRoomLabel: "创建五子棋房",
   landingDescription: "15×15 · 黑先 · 连五获胜",
+  openingChoices: [
+    {
+      roleId: "black",
+      label: "黑方",
+      orderLabel: "先手",
+      swatchClassName: "black",
+    },
+    {
+      roleId: "white",
+      label: "白方",
+      orderLabel: "后手",
+      swatchClassName: "white",
+    },
+  ],
   getSeatPresentations(position) {
     const blackSeat =
       position === null ? "seat-a" : readGomokuPosition(position).blackSeat;
@@ -385,6 +408,20 @@ export const xiangqiAdapter = dynamicAdapter({
   displayName: "中国象棋",
   createRoomLabel: "创建中国象棋房",
   landingDescription: "9×10 · 红先 · 将死或困毙",
+  openingChoices: [
+    {
+      roleId: "red",
+      label: "红方",
+      orderLabel: "先手",
+      swatchClassName: "xiangqi-red",
+    },
+    {
+      roleId: "black",
+      label: "黑方",
+      orderLabel: "后手",
+      swatchClassName: "xiangqi-black",
+    },
+  ],
   getSeatPresentations(position) {
     const redSeat =
       position === null ? "seat-a" : readXiangqiPosition(position).redSeat;
@@ -422,6 +459,20 @@ export const ticTacToeAdapter = dynamicAdapter({
   displayName: "井字棋",
   createRoomLabel: "创建井字棋房",
   landingDescription: "3×3 · X 先 · 三连获胜",
+  openingChoices: [
+    {
+      roleId: "x",
+      label: "X 方",
+      orderLabel: "先手",
+      swatchClassName: "tictactoe-x",
+    },
+    {
+      roleId: "o",
+      label: "O 方",
+      orderLabel: "后手",
+      swatchClassName: "tictactoe-o",
+    },
+  ],
   getSeatPresentations(position) {
     const xSeat = position === null
       ? "seat-a"
@@ -634,6 +685,20 @@ function createChaseAdapter(
     landingLabel: "警察抓小偷",
     createRoomLabel: `创建${displayName}房`,
     landingDescription,
+    openingChoices: [
+      {
+        roleId: "thief",
+        label: "小偷",
+        orderLabel: "先手",
+        swatchClassName: "chase-thief",
+      },
+      {
+        roleId: "police",
+        label: "警察",
+        orderLabel: "后手",
+        swatchClassName: "chase-police",
+      },
+    ],
     getPendingCellKey: chasePendingCellKey,
     getSeatPresentations: chaseSeatPresentations,
     getErrorMessage(code) {

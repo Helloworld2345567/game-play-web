@@ -55,6 +55,18 @@ test("two players chase on the easy map, capture, then swap roles in a rematch",
 
     await invitee.goto(inviteUrl);
     await setDisplayName(invitee, "追逃乙");
+    await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
+      "请选择你的角色",
+    );
+    await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
+      "请选择你的角色",
+    );
+    await expect(creator.locator("[data-node]")).toHaveCount(0);
+    await creator.locator('[data-role-id="thief"]').click();
+    await expect(creator.locator(".opening-role-status")).toHaveText(
+      "已选择小偷，等待对手",
+    );
+    await invitee.locator('[data-role-id="police"]').click();
     await expect(creator.getByRole("heading", { level: 1 })).toContainText(
       "轮到你",
     );

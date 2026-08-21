@@ -4,6 +4,7 @@ import {
   PROTOCOL_VERSION,
   type GameActionCommand,
   type LeftMessage,
+  type PrepareRoleCommand,
   type RoomCommand,
   type RoomSnapshot,
   type ServerError,
@@ -107,6 +108,19 @@ export function createGameActionCommand(
     : command;
 }
 
+/** Creates the strict-revision command used during a room's opening phase. */
+export function createPrepareRoleCommand(
+  snapshot: Pick<RoomSnapshot, "revision">,
+  roleId: string,
+): PrepareRoleCommand {
+  return {
+    v: PROTOCOL_VERSION,
+    type: "prepare_role",
+    expectedRevision: snapshot.revision,
+    roleId,
+  };
+}
+
 export { createConcurrentActionLedger };
 export type { ConcurrentActionLedger };
 
@@ -129,6 +143,7 @@ interface RoomClientView {
   leaving: boolean;
   notice: string | null;
   fatalCode: string | null;
+  selectOpeningRole(roleId: string): boolean;
   sendGameAction(payload: JsonValue): boolean;
   resign(): boolean;
   setRematchReady(ready: boolean): boolean;
@@ -161,6 +176,10 @@ function humanizeError(
     "room.waiting_for_opponent": "请等待对手加入。",
     "room.game_finished": "本局已经结束。",
     "room.game_in_progress": "对局结束后才能准备复赛。",
+    "room.preparation_unavailable": "当前不在角色选择阶段。",
+    "room.invalid_role": "这个角色不可选择。",
+    "room.role_taken": "这个角色已经被对手选择。",
+    "room.preparation_in_progress": "角色选择完成后才能认输。",
     "room.action_expired": "这次操作已过期，请重新操作。",
     "room.action_sequence_conflict": "操作序号冲突，请刷新页面后重试。",
     "room.action_out_of_order": "操作顺序异常，请稍后重试。",
@@ -1348,6 +1367,15 @@ export function useRoom(
     [send],
   );
 
+  const selectOpeningRole = useCallback(
+    (roleId: string): boolean => {
+      const current = snapshotRef.current;
+      if (current === null) return false;
+      return send(createPrepareRoleCommand(current, roleId));
+    },
+    [send],
+  );
+
   const resign = useCallback((): boolean => {
     const current = snapshotRef.current;
     if (current === null) return false;
@@ -1382,6 +1410,7 @@ export function useRoom(
     leaving,
     notice,
     fatalCode,
+    selectOpeningRole,
     sendGameAction,
     resign,
     setRematchReady,

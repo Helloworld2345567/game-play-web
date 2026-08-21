@@ -5,7 +5,10 @@ import {
 } from "../games/minesweeper/presets";
 import { normalizeDisplayName } from "../shared/display-name";
 import { getGameManifest } from "../shared/game-manifest";
-import type { RoomSnapshot } from "../shared/protocol";
+import type {
+  RoomPreparationView,
+  RoomSnapshot,
+} from "../shared/protocol";
 import {
   GameErrorBoundary,
   GameRenderer,
@@ -13,6 +16,7 @@ import {
   projectPendingCells,
   resolveGameErrorMessage,
   type GameAdapter,
+  type SeatPresentations,
   UnsupportedGame,
   unknownSeatPresentations,
 } from "./games/registry";
@@ -29,6 +33,7 @@ import {
   type RoomTransport,
 } from "./room-client";
 import { ProfileMenu } from "./ProfileMenu";
+import { OpeningRolePanel } from "./OpeningRolePanel";
 import { ThemeToggle } from "./theme";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
@@ -806,6 +811,27 @@ function phaseText(
   return labels[phase];
 }
 
+function preparationSeatPresentations(
+  adapter: GameAdapter,
+  preparation: RoomPreparationView,
+): SeatPresentations {
+  const choices = adapter.openingChoices ?? [];
+  const presentationFor = (seat: "seat-a" | "seat-b") => {
+    const roleId = preparation.roleBySeat[seat];
+    const choice = choices.find((entry) => entry.roleId === roleId);
+    return choice === undefined
+      ? { label: "未选择", swatchClassName: "neutral" }
+      : {
+          label: choice.label,
+          swatchClassName: choice.swatchClassName,
+        };
+  };
+  return {
+    "seat-a": presentationFor("seat-a"),
+    "seat-b": presentationFor("seat-b"),
+  };
+}
+
 function mainStatus(
   snapshot: RoomSnapshot | null,
   phase: ConnectionPhase,
@@ -826,10 +852,21 @@ function mainStatus(
     if (gameMessage !== null && gameMessage !== undefined) return gameMessage;
   }
   if (snapshot.selfSeat === null) {
+    if (snapshot.preparation !== null && snapshot.preparation !== undefined) {
+      return "等待双方选择角色";
+    }
     if (outcome === null) return "正在观战";
     if (outcome.kind === "draw") return "本局和棋";
     const winnerName = snapshot.seats[outcome.winner]?.displayName ?? null;
     return winnerName === null ? "本局已分胜负" : `${winnerName}获胜`;
+  }
+  if (snapshot.preparation !== null && snapshot.preparation !== undefined) {
+    const roleId = snapshot.preparation.roleBySeat[snapshot.selfSeat] ?? null;
+    if (roleId === null) return "请选择你的角色";
+    const roleLabel = adapter?.openingChoices?.find(
+      (choice) => choice.roleId === roleId,
+    )?.label;
+    return `已选择${roleLabel ?? "角色"}，等待对手`;
   }
   if (snapshot.position === null) return "等待对手加入";
   if (outcome?.kind === "draw") return "本局和棋";
@@ -868,9 +905,12 @@ function RoomPage({
     [adapter, client.pendingActions],
   );
   const unsupportedGame = snapshot !== null && adapter === null;
-  const seatPresentations =
-    adapter?.getSeatPresentations(snapshot?.position ?? null) ??
-    unknownSeatPresentations;
+  const seatPresentations = snapshot?.preparation !== null &&
+      snapshot?.preparation !== undefined &&
+      adapter !== null
+    ? preparationSeatPresentations(adapter, snapshot.preparation)
+    : adapter?.getSeatPresentations(snapshot?.position ?? null) ??
+      unknownSeatPresentations;
   const gameName =
     adapter?.displayName ?? (snapshot === null ? "自由五子棋" : "未知棋类");
   const [shareNotice, setShareNotice] = useState<string | null>(null);
@@ -886,6 +926,9 @@ function RoomPage({
     adapter !== null &&
     isPlayer &&
     bothOccupied &&
+    snapshot?.position !== null &&
+    snapshot?.position !== undefined &&
+    (snapshot?.preparation === null || snapshot?.preparation === undefined) &&
     outcome === null;
   const ownReady =
     snapshot !== null &&
@@ -1032,6 +1075,20 @@ function RoomPage({
           </div>
         </section>
 
+        {snapshot?.preparation && adapter?.openingChoices && (
+          <OpeningRolePanel
+            preparation={snapshot.preparation}
+            openingChoices={adapter.openingChoices}
+            selfSeat={snapshot.selfSeat}
+            pending={client.pending}
+            disabled={client.phase !== "online" || client.leaving}
+            notice={client.notice}
+            onSelect={(roleId) => {
+              client.selectOpeningRole(roleId);
+            }}
+          />
+        )}
+
         {unsupportedGame ? (
           <UnsupportedGame
             gameType={snapshot.gameType}
@@ -1048,7 +1105,7 @@ function RoomPage({
             pendingCells={pendingCells}
             onAction={(payload) => client.sendGameAction(payload)}
           />
-        ) : (
+        ) : snapshot?.preparation ? null : (
           <div class="board-placeholder" aria-label="等待对手加入的空棋盘">
             <span>邀请朋友加入后开始</span>
           </div>

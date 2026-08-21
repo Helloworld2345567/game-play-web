@@ -64,6 +64,16 @@ export function projectRoomSnapshot({
       displayName: displayNames[guestId] ?? defaultDisplayName(guestId),
       isSelf: guestId === viewerGuestId,
     })),
+    preparation:
+      room.position === null && rules.definition.openingRoleIds !== undefined
+        ? {
+            roleIds: rules.definition.openingRoleIds,
+            roleBySeat: room.preparation?.roleBySeat ?? {
+              [SEAT_A]: null,
+              [SEAT_B]: null,
+            },
+          }
+        : null,
     position:
       room.position === null
         ? null

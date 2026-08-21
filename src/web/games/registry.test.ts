@@ -124,6 +124,75 @@ describe("game outcome presentation", () => {
     }
   });
 
+  it("exposes opening role choices for turn-based games only", () => {
+    expect(
+      getGameAdapter("gomoku", "gomoku.freestyle15.v1")?.openingChoices,
+    ).toEqual([
+      {
+        roleId: "black",
+        label: "黑方",
+        orderLabel: "先手",
+        swatchClassName: "black",
+      },
+      {
+        roleId: "white",
+        label: "白方",
+        orderLabel: "后手",
+        swatchClassName: "white",
+      },
+    ]);
+    expect(
+      getGameAdapter("xiangqi", "xiangqi.casual.v1")?.openingChoices,
+    ).toEqual([
+      {
+        roleId: "red",
+        label: "红方",
+        orderLabel: "先手",
+        swatchClassName: "xiangqi-red",
+      },
+      {
+        roleId: "black",
+        label: "黑方",
+        orderLabel: "后手",
+        swatchClassName: "xiangqi-black",
+      },
+    ]);
+    expect(
+      getGameAdapter("tictactoe", "tictactoe.classic3.v1")?.openingChoices,
+    ).toEqual([
+      {
+        roleId: "x",
+        label: "X 方",
+        orderLabel: "先手",
+        swatchClassName: "tictactoe-x",
+      },
+      {
+        roleId: "o",
+        label: "O 方",
+        orderLabel: "后手",
+        swatchClassName: "tictactoe-o",
+      },
+    ]);
+    expect(getGameAdapter("chase", "chase.medium.v1")?.openingChoices).toEqual([
+      {
+        roleId: "thief",
+        label: "小偷",
+        orderLabel: "先手",
+        swatchClassName: "chase-thief",
+      },
+      {
+        roleId: "police",
+        label: "警察",
+        orderLabel: "后手",
+        swatchClassName: "chase-police",
+      },
+    ]);
+    expect(
+      getGameAdapter("minesweeper", "minesweeper.duel.9x9x10.v1")
+        ?.openingChoices,
+    ).toBeUndefined();
+  });
+
   it("uses the position role assignment for chase seat swatches", () => {
     const adapter = getGameAdapter("chase", "chase.easy.v1");
     expect(adapter?.getSeatPresentations(chasePosition())).toEqual({

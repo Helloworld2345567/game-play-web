@@ -60,6 +60,18 @@ test("two Guests play tic-tac-toe while a spectator watches, then swap X", async
 
     await invitee.goto(inviteUrl);
     await setDisplayName(invitee, "井字乙");
+    await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
+      "请选择你的角色",
+    );
+    await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
+      "请选择你的角色",
+    );
+    await expect(creator.locator(".tictactoe-board")).toHaveCount(0);
+    await creator.locator('[data-role-id="x"]').click();
+    await expect(creator.locator(".opening-role-status")).toHaveText(
+      "已选择X 方，等待对手",
+    );
+    await invitee.locator('[data-role-id="o"]').click();
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText("轮到你");
     await expect(invitee.getByRole("heading", { level: 1 })).toHaveText(
       "等待对手落子",
