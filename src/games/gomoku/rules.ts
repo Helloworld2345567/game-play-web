@@ -101,6 +101,7 @@ export const gomokuRules = {
     gameType: "gomoku",
     ruleSetId: "gomoku.freestyle15.v1",
     actionConsistency: "strict_revision",
+    openingRoleIds: ["black", "white"],
   },
 
   create([blackSeat, whiteSeat]): RulePosition {

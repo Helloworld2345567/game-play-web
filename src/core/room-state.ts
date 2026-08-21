@@ -1,5 +1,9 @@
 import type { GameRules, RulePosition } from "./game-rules";
-import type { ActionReceipt, RoomCommand } from "../shared/protocol";
+import type {
+  ActionReceipt,
+  PrepareRoleCommand,
+  RoomCommand,
+} from "../shared/protocol";
 import {
   actionReceiptsFor,
   admitAction,
@@ -22,6 +26,13 @@ export const FINISHED_ROOM_TTL_MS = 24 * 60 * 60 * 1_000;
 export interface RoomSeat {
   guestId: string;
   rematchReady: boolean;
+}
+
+export interface RoomPreparationState {
+  roleBySeat: {
+    [SEAT_A]: string | null;
+    [SEAT_B]: string | null;
+  };
 }
 
 interface StoredRoomBase {
@@ -53,28 +64,51 @@ export interface LegacyStoredRoomV2 extends StoredRoomBase {
 }
 
 /** Current authoritative Room shape persisted by the Worker. */
-export interface StoredRoom extends StoredRoomBase {
+export interface LegacyStoredRoomV3 extends StoredRoomBase {
   schemaVersion: 3;
   roundStartRevision: number;
   actionJournal: ActionJournalState;
 }
 
+/** Current authoritative Room shape persisted by the Worker. */
+export interface StoredRoom extends StoredRoomBase {
+  schemaVersion: 4;
+  roundStartRevision: number;
+  actionJournal: ActionJournalState;
+  /** Non-null only while a turn-based room is choosing opening roles. */
+  preparation: RoomPreparationState | null;
+  /** Role order currently passed to GameRules.create(). */
+  activeSeatOrder: readonly [PlatformSeatId, PlatformSeatId] | null;
+}
+
 export type PersistedRoom =
   | LegacyStoredRoomV1
   | LegacyStoredRoomV2
+  | LegacyStoredRoomV3
   | StoredRoom;
 
 /** Migrates any supported persisted Room schema to the current shape. */
 export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
   const schemaVersion = (room as { schemaVersion: unknown }).schemaVersion;
-  if (schemaVersion === 3) return room as StoredRoom;
+  if (schemaVersion === 4) return room as StoredRoom;
+  if (schemaVersion === 3) {
+    const legacyRoom = room as LegacyStoredRoomV3;
+    return {
+      ...legacyRoom,
+      schemaVersion: 4,
+      preparation: null,
+      activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
+    };
+  }
   if (schemaVersion === 2) {
     const legacyRoom = room as LegacyStoredRoomV2;
     const { recentActionReceipts, ...base } = legacyRoom;
     return {
       ...base,
-      schemaVersion: 3,
+      schemaVersion: 4,
       actionJournal: migrateReceiptJournal(recentActionReceipts),
+      preparation: null,
+      activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
     };
   }
   if (schemaVersion !== 1) {
@@ -84,10 +118,58 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
 
   return {
     ...legacyRoom,
-    schemaVersion: 3,
+    schemaVersion: 4,
     roundStartRevision: legacyRoom.revision,
     actionJournal: createActionJournal(),
+    preparation: null,
+    activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
   };
+}
+
+function legacyActiveSeatOrder(
+  room: Pick<StoredRoomBase, "position" | "round">,
+): readonly [PlatformSeatId, PlatformSeatId] | null {
+  if (room.position === null) return null;
+  return room.round % 2 === 1
+    ? [SEAT_A, SEAT_B]
+    : [SEAT_B, SEAT_A];
+}
+
+function openingRoleIds(
+  rules: GameRules,
+): readonly [string, string] | null {
+  const roleIds = rules.definition.openingRoleIds;
+  if (
+    roleIds === undefined ||
+    roleIds.length !== 2 ||
+    roleIds[0] === roleIds[1]
+  ) {
+    return null;
+  }
+  return roleIds;
+}
+
+function emptyPreparation(): RoomPreparationState {
+  return {
+    roleBySeat: {
+      [SEAT_A]: null,
+      [SEAT_B]: null,
+    },
+  };
+}
+
+function activeOrderFromPreparation(
+  preparation: RoomPreparationState,
+  roleIds: readonly [string, string],
+): readonly [PlatformSeatId, PlatformSeatId] | null {
+  const firstSeat = ([SEAT_A, SEAT_B] as const).find(
+    (seat) => preparation.roleBySeat[seat] === roleIds[0],
+  );
+  const secondSeat = ([SEAT_A, SEAT_B] as const).find(
+    (seat) => preparation.roleBySeat[seat] === roleIds[1],
+  );
+  if (firstSeat === undefined || secondSeat === undefined) return null;
+  return [firstSeat, secondSeat];
 }
 
 export type RoomDecision =
@@ -156,7 +238,7 @@ export function createRoom({
   now,
 }: CreateRoomInput): StoredRoom {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     roomId,
     gameType: rules.definition.gameType,
     ruleSetId: rules.definition.ruleSetId,
@@ -169,6 +251,8 @@ export function createRoom({
     },
     position: null,
     actionJournal: createActionJournal(),
+    preparation: openingRoleIds(rules) === null ? null : emptyPreparation(),
+    activeSeatOrder: null,
     createdAt: now,
     updatedAt: now,
     expiresAt: now + WAITING_ROOM_TTL_MS,
@@ -195,7 +279,9 @@ export function joinRoom(
   if (seatForGuest(room, guestId) !== null) {
     const ttl =
       room.position === null
-        ? WAITING_ROOM_TTL_MS
+        ? room.seats[SEAT_B] === null || room.preparation === null
+          ? WAITING_ROOM_TTL_MS
+          : ACTIVE_ROOM_TTL_MS
         : room.position.outcome === null
           ? ACTIVE_ROOM_TTL_MS
           : FINISHED_ROOM_TTL_MS;
@@ -224,16 +310,23 @@ export function joinRoom(
   }
 
   const nextRevision = room.revision + 1;
+  const roleIds = openingRoleIds(rules);
   const next: StoredRoom = {
     ...room,
     revision: nextRevision,
-    roundStartRevision: nextRevision,
+    roundStartRevision: roleIds === null ? nextRevision : room.roundStartRevision,
     seats: {
       ...room.seats,
       [SEAT_B]: { guestId, rematchReady: false },
     },
-    position: rules.create([SEAT_A, SEAT_B], { now, randomSeed }),
+    position:
+      roleIds === null
+        ? rules.create([SEAT_A, SEAT_B], { now, randomSeed })
+        : null,
     actionJournal: createActionJournal(),
+    preparation:
+      roleIds === null ? null : (room.preparation ?? emptyPreparation()),
+    activeSeatOrder: roleIds === null ? [SEAT_A, SEAT_B] : null,
     updatedAt: now,
     expiresAt: now + ACTIVE_ROOM_TTL_MS,
   };
@@ -245,6 +338,63 @@ export function getGuestSeat(
   guestId: string,
 ): PlatformSeatId | null {
   return seatForGuest(room, guestId);
+}
+
+function applyPrepareRoleCommand(
+  room: StoredRoom,
+  seat: PlatformSeatId,
+  command: PrepareRoleCommand,
+  rules: GameRules,
+  now: number,
+  randomSeed: string,
+): RoomDecision {
+  const roleIds = openingRoleIds(rules);
+  if (roleIds === null) {
+    return { ok: false, room, code: "room.preparation_unavailable" };
+  }
+  if (room.position !== null) {
+    return { ok: false, room, code: "room.preparation_unavailable" };
+  }
+  if (!roleIds.includes(command.roleId)) {
+    return { ok: false, room, code: "room.invalid_role" };
+  }
+
+  const otherSeat = seat === SEAT_A ? SEAT_B : SEAT_A;
+  const currentPreparation = room.preparation ?? emptyPreparation();
+  if (currentPreparation.roleBySeat[otherSeat] === command.roleId) {
+    return { ok: false, room, code: "room.role_taken" };
+  }
+
+  const preparation: RoomPreparationState = {
+    roleBySeat: {
+      ...currentPreparation.roleBySeat,
+      [seat]: command.roleId,
+    },
+  };
+  const activeSeatOrder =
+    room.seats[SEAT_B] === null
+      ? null
+      : activeOrderFromPreparation(preparation, roleIds);
+  const nextRevision = room.revision + 1;
+  const started = activeSeatOrder !== null;
+  const next: StoredRoom = {
+    ...room,
+    revision: nextRevision,
+    roundStartRevision: started ? nextRevision : room.roundStartRevision,
+    position: started
+      ? rules.create(activeSeatOrder, { now, randomSeed })
+      : null,
+    preparation: started ? null : preparation,
+    activeSeatOrder,
+    actionJournal: started ? createActionJournal() : room.actionJournal,
+    updatedAt: now,
+    expiresAt:
+      now +
+      (room.seats[SEAT_B] === null
+        ? WAITING_ROOM_TTL_MS
+        : ACTIVE_ROOM_TTL_MS),
+  };
+  return { ok: true, room: next, changed: true };
 }
 
 export function applyRoomCommand(
@@ -273,9 +423,26 @@ export function applyRoomCommand(
   if (seat === null) {
     return { ok: false, room, code: "room.not_a_seat" };
   }
+  if (command.type === "prepare_role") {
+    return applyPrepareRoleCommand(
+      room,
+      seat,
+      command,
+      rules,
+      now,
+      randomSeed,
+    );
+  }
   if (command.type === "resign") {
     if (room.position === null) {
-      return { ok: false, room, code: "room.waiting_for_opponent" };
+      return {
+        ok: false,
+        room,
+        code:
+          room.preparation === null
+            ? "room.waiting_for_opponent"
+            : "room.preparation_in_progress",
+      };
     }
     if (room.position.outcome !== null) {
       return { ok: false, room, code: "room.game_finished" };
@@ -313,6 +480,16 @@ export function applyRoomCommand(
     const bothReady =
       seats[SEAT_A]?.rematchReady === true &&
       seats[SEAT_B]?.rematchReady === true;
+    const currentOrder =
+      room.activeSeatOrder ??
+      legacyActiveSeatOrder(room) ??
+      (room.round % 2 === 1
+        ? ([SEAT_A, SEAT_B] as const)
+        : ([SEAT_B, SEAT_A] as const));
+    const nextOrder: readonly [PlatformSeatId, PlatformSeatId] = [
+      currentOrder[1],
+      currentOrder[0],
+    ];
     const nextRevision = room.revision + 1;
     const next: StoredRoom = {
       ...room,
@@ -334,13 +511,10 @@ export function applyRoomCommand(
           }
         : seats,
       position: bothReady
-        ? rules.create(
-            room.round % 2 === 1
-              ? [SEAT_B, SEAT_A]
-              : [SEAT_A, SEAT_B],
-            { now, randomSeed },
-          )
+        ? rules.create(nextOrder, { now, randomSeed })
         : room.position,
+      preparation: null,
+      activeSeatOrder: bothReady ? nextOrder : room.activeSeatOrder,
       actionJournal: bothReady
         ? createActionJournal()
         : room.actionJournal,
@@ -360,7 +534,14 @@ export function applyRoomCommand(
     return { ok: false, room, code: "room.rule_mismatch" };
   }
   if (room.position === null) {
-    return { ok: false, room, code: "room.waiting_for_opponent" };
+    return {
+      ok: false,
+      room,
+      code:
+        room.preparation === null
+          ? "room.waiting_for_opponent"
+          : "room.preparation_in_progress",
+    };
   }
 
   if (concurrentAction) {

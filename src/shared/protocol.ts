@@ -37,10 +37,17 @@ export interface RematchReadyCommand extends CommandBase {
   ready: boolean;
 }
 
+/** Select one of a turn-based game's opening roles; selecting confirms it. */
+export interface PrepareRoleCommand extends CommandBase {
+  type: "prepare_role";
+  roleId: string;
+}
+
 export type RoomCommand =
   | GameActionCommand
   | ResignCommand
-  | RematchReadyCommand;
+  | RematchReadyCommand
+  | PrepareRoleCommand;
 
 export type ClientCommand = LeaveCommand | RoomCommand;
 
@@ -54,6 +61,11 @@ export interface RoomSeatView {
 export interface RoomSpectatorView {
   displayName: string;
   isSelf: boolean;
+}
+
+export interface RoomPreparationView {
+  roleIds: readonly [string, string];
+  roleBySeat: Record<string, string | null>;
 }
 
 export interface ActionReceipt {
@@ -78,6 +90,8 @@ export interface RoomSnapshot {
   selfSeat: string | null;
   seats: Record<string, RoomSeatView>;
   spectators: RoomSpectatorView[];
+  /** Present while a turn-based room is waiting for both opening choices. */
+  preparation?: RoomPreparationView | null;
   position: RulePosition | null;
   actionReceipts?: ActionReceipt[];
 }
@@ -195,6 +209,17 @@ export function parseClientCommand(value: unknown): ClientCommand | null {
       type: "rematch_ready",
       expectedRevision,
       ready: value.ready,
+    };
+  }
+  if (
+    value.type === "prepare_role" &&
+    isShortIdentifier(value.roleId, 80)
+  ) {
+    return {
+      v: PROTOCOL_VERSION,
+      type: "prepare_role",
+      expectedRevision,
+      roleId: value.roleId,
     };
   }
   return null;

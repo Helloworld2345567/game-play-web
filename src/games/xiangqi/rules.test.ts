@@ -77,6 +77,7 @@ describe("xiangqi rules", () => {
       gameType: "xiangqi",
       ruleSetId: "xiangqi.casual.v1",
       actionConsistency: "strict_revision",
+      openingRoleIds: ["red", "black"],
     });
     expect(data.board).toHaveLength(90);
     expect(data.redSeat).toBe("seat-a");

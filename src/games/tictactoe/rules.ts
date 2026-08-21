@@ -74,6 +74,7 @@ export const ticTacToeRules = {
     gameType: "tictactoe",
     ruleSetId: "tictactoe.classic3.v1",
     actionConsistency: "strict_revision",
+    openingRoleIds: ["x", "o"],
   } as const,
 
   create([xSeat, oSeat]: Seats, _context?: unknown): RulePosition {

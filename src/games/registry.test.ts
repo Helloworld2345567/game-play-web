@@ -69,6 +69,7 @@ describe("game rules registry", () => {
         gameType: "chase",
         ruleSetId,
         actionConsistency: "strict_revision",
+        openingRoleIds: ["thief", "police"],
       });
     }
     expect(isSupportedGame("chase", "chase.unknown.v1")).toBe(false);

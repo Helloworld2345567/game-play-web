@@ -63,4 +63,19 @@ describe("client protocol", () => {
     expect(parseClientCommand({ ...command, actionId: "not an id" }))
       .toBeNull();
   });
+
+  it("accepts a strict opening-role preparation command", () => {
+    const command = {
+      v: 1,
+      type: "prepare_role",
+      expectedRevision: 4,
+      roleId: "thief",
+    };
+
+    expect(parseClientCommand(command)).toEqual(command);
+    expect(parseClientCommand({ ...command, roleId: "" })).toBeNull();
+    expect(parseClientCommand({ ...command, roleId: "x".repeat(81) }))
+      .toBeNull();
+    expect(parseClientCommand({ ...command, roleId: 7 })).toBeNull();
+  });
 });

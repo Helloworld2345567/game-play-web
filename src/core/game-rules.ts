@@ -42,6 +42,12 @@ export interface GameRules {
     gameType: string;
     ruleSetId: string;
     actionConsistency: ActionConsistency;
+    /**
+     * Optional role order for games that need a room-level opening
+     * preparation phase. The first id is the first argument to create(),
+     * and therefore the first role/side in the initial position.
+     */
+    openingRoleIds?: readonly [string, string];
   };
   create(seats: Seats, context: RuleContext): RulePosition;
   apply(

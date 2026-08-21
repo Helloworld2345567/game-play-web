@@ -78,6 +78,7 @@ function createChaseRules(
       gameType: "chase",
       ruleSetId,
       actionConsistency: "strict_revision",
+      openingRoleIds: ["thief", "police"],
     },
 
     create(

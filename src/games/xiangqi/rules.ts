@@ -535,6 +535,7 @@ export const xiangqiRules = {
     gameType: "xiangqi",
     ruleSetId: "xiangqi.casual.v1",
     actionConsistency: "strict_revision",
+    openingRoleIds: ["red", "black"],
   },
 
   create([redSeat, blackSeat]): RulePosition {

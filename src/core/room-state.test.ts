@@ -11,6 +11,7 @@ import {
   MAX_RECENT_ACTION_RECEIPTS,
   type LegacyStoredRoomV1,
   type LegacyStoredRoomV2,
+  type LegacyStoredRoomV3,
   type PersistedRoom,
   type StoredRoom,
 } from "./room-state";
@@ -87,6 +88,51 @@ function joinedConcurrentRoom(): StoredRoom {
   return joined.room;
 }
 
+function prepareRoleCommand(expectedRevision: number, roleId: string) {
+  return {
+    v: 1 as const,
+    type: "prepare_role" as const,
+    expectedRevision,
+    roleId,
+  };
+}
+
+function joinedGomokuRoom(
+  creatorRole = "black",
+  inviteeRole = "white",
+): StoredRoom {
+  const created = createRoom({
+    roomId: "gomoku-room",
+    creatorGuestId: "guest-creator",
+    rules: gomokuRules,
+    now: 1_000,
+  });
+  const joined = joinRoom(
+    created,
+    "guest-invitee",
+    gomokuRules,
+    2_000,
+  );
+  if (!joined.ok) throw new Error(joined.code);
+  const creatorChoice = applyRoomCommand(
+    joined.room,
+    "guest-creator",
+    prepareRoleCommand(joined.room.revision, creatorRole),
+    gomokuRules,
+    3_000,
+  );
+  if (!creatorChoice.ok) throw new Error(creatorChoice.code);
+  const inviteeChoice = applyRoomCommand(
+    creatorChoice.room,
+    "guest-invitee",
+    prepareRoleCommand(creatorChoice.room.revision, inviteeRole),
+    gomokuRules,
+    4_000,
+  );
+  if (!inviteeChoice.ok) throw new Error(inviteeChoice.code);
+  return inviteeChoice.room;
+}
+
 describe("room state", () => {
   it("creates rooms using the current persisted schema", () => {
     const room = createRoom({
@@ -96,7 +142,7 @@ describe("room state", () => {
       now: 1_000,
     });
 
-    expect(room.schemaVersion).toBe(3);
+    expect(room.schemaVersion).toBe(4);
   });
 
   it("applies concurrent Actions from the same base revision to the latest state", () => {
@@ -502,7 +548,7 @@ describe("room state", () => {
 
     const hydrated = hydrateStoredRoom(persistedRoom);
 
-    expect(hydrated.schemaVersion).toBe(3);
+    expect(hydrated.schemaVersion).toBe(4);
     expect(hydrated.roundStartRevision).toBe(legacyRoom.revision);
     expect(hydrated.actionJournal).toEqual({
       "seat-a": { compactedThrough: -1, receipts: [] },
@@ -570,14 +616,34 @@ describe("room state", () => {
     });
   });
 
+  it("migrates an opened schema v3 room with its legacy role order", () => {
+    const current = joinedGomokuRoom();
+    const {
+      activeSeatOrder: _activeSeatOrder,
+      preparation: _preparation,
+      schemaVersion: _schemaVersion,
+      ...base
+    } = current;
+    const legacyRoom: LegacyStoredRoomV3 = {
+      ...base,
+      schemaVersion: 3,
+    };
+
+    const hydrated = hydrateStoredRoom(legacyRoom);
+
+    expect(hydrated.schemaVersion).toBe(4);
+    expect(hydrated.preparation).toBeNull();
+    expect(hydrated.activeSeatOrder).toEqual(["seat-a", "seat-b"]);
+  });
+
   it("fails closed instead of downgrading an unknown future schema", () => {
     const futureRoom = {
-      schemaVersion: 4,
+      schemaVersion: 5,
       roomId: "future-room",
     } as unknown as PersistedRoom;
 
     expect(() => hydrateStoredRoom(futureRoom)).toThrow(
-      "Unsupported Room schema version: 4",
+      "Unsupported Room schema version: 5",
     );
   });
 
@@ -665,11 +731,92 @@ describe("room state", () => {
     const room: StoredRoom = joined.room;
     expect(room.seats["seat-a"]?.guestId).toBe("guest-creator");
     expect(room.seats["seat-b"]?.guestId).toBe("guest-invitee");
-    expect(room.position?.turn).toBe("seat-a");
+    expect(room.position).toBeNull();
+    expect(room.preparation).toEqual({
+      roleBySeat: {
+        "seat-a": null,
+        "seat-b": null,
+      },
+    });
     expect(room.revision).toBe(1);
   });
 
-  it("accepts an Action only for the authenticated Seat and expected revision", () => {
+  it("lets the creator choose before Seat B joins and starts after distinct roles are chosen", () => {
+    const created = createRoom({
+      roomId: "room-1",
+      creatorGuestId: "guest-creator",
+      rules: gomokuRules,
+      now: 1_000,
+    });
+    const creatorChoice = applyRoomCommand(
+      created,
+      "guest-creator",
+      prepareRoleCommand(0, "black"),
+      gomokuRules,
+      1_500,
+    );
+    expect(creatorChoice.ok).toBe(true);
+    if (!creatorChoice.ok) return;
+    expect(creatorChoice.room.position).toBeNull();
+    expect(creatorChoice.room.preparation?.roleBySeat).toEqual({
+      "seat-a": "black",
+      "seat-b": null,
+    });
+    expect(creatorChoice.room.expiresAt).toBe(
+      1_500 + 60 * 60 * 1_000,
+    );
+
+    const joined = joinRoom(
+      creatorChoice.room,
+      "guest-invitee",
+      gomokuRules,
+      2_000,
+    );
+    expect(joined.ok).toBe(true);
+    if (!joined.ok) return;
+    expect(joined.room.preparation?.roleBySeat["seat-a"]).toBe("black");
+
+    const conflict = applyRoomCommand(
+      joined.room,
+      "guest-invitee",
+      prepareRoleCommand(joined.room.revision, "black"),
+      gomokuRules,
+      2_500,
+    );
+    expect(conflict).toEqual({
+      ok: false,
+      room: joined.room,
+      code: "room.role_taken",
+    });
+
+    const invalid = applyRoomCommand(
+      joined.room,
+      "guest-invitee",
+      prepareRoleCommand(joined.room.revision, "green"),
+      gomokuRules,
+      2_500,
+    );
+    expect(invalid).toEqual({
+      ok: false,
+      room: joined.room,
+      code: "room.invalid_role",
+    });
+
+    const started = applyRoomCommand(
+      joined.room,
+      "guest-invitee",
+      prepareRoleCommand(joined.room.revision, "white"),
+      gomokuRules,
+      3_000,
+    );
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    expect(started.room.preparation).toBeNull();
+    expect(started.room.activeSeatOrder).toEqual(["seat-a", "seat-b"]);
+    expect(started.room.position?.turn).toBe("seat-a");
+  });
+
+  it("swaps an arbitrary opening role assignment on the next rematch", () => {
     const created = createRoom({
       roomId: "room-1",
       creatorGuestId: "guest-creator",
@@ -678,16 +825,76 @@ describe("room state", () => {
     });
     const joined = joinRoom(created, "guest-invitee", gomokuRules, 2_000);
     if (!joined.ok) throw new Error(joined.code);
+    const inviteeChoice = applyRoomCommand(
+      joined.room,
+      "guest-invitee",
+      prepareRoleCommand(joined.room.revision, "black"),
+      gomokuRules,
+      2_100,
+    );
+    if (!inviteeChoice.ok) throw new Error(inviteeChoice.code);
+    const started = applyRoomCommand(
+      inviteeChoice.room,
+      "guest-creator",
+      prepareRoleCommand(inviteeChoice.room.revision, "white"),
+      gomokuRules,
+      2_200,
+    );
+    if (!started.ok) throw new Error(started.code);
+    expect(started.room.activeSeatOrder).toEqual(["seat-b", "seat-a"]);
+    expect(started.room.position?.turn).toBe("seat-b");
+
+    const resigned = applyRoomCommand(
+      started.room,
+      "guest-creator",
+      { v: 1, type: "resign", expectedRevision: started.room.revision },
+      gomokuRules,
+      3_000,
+    );
+    if (!resigned.ok) throw new Error(resigned.code);
+    const firstReady = applyRoomCommand(
+      resigned.room,
+      "guest-creator",
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: resigned.room.revision,
+        ready: true,
+      },
+      gomokuRules,
+      3_100,
+    );
+    if (!firstReady.ok) throw new Error(firstReady.code);
+    const secondReady = applyRoomCommand(
+      firstReady.room,
+      "guest-invitee",
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: firstReady.room.revision,
+        ready: true,
+      },
+      gomokuRules,
+      3_200,
+    );
+    expect(secondReady.ok).toBe(true);
+    if (!secondReady.ok) return;
+    expect(secondReady.room.activeSeatOrder).toEqual(["seat-a", "seat-b"]);
+    expect(secondReady.room.position?.turn).toBe("seat-a");
+  });
+
+  it("accepts an Action only for the authenticated Seat and expected revision", () => {
+    const room = joinedGomokuRoom();
 
     const decision = applyRoomCommand(
-      joined.room,
+      room,
       "guest-creator",
       {
         v: 1,
         type: "game_action",
         gameType: "gomoku",
         ruleSetId: "gomoku.freestyle15.v1",
-        expectedRevision: 1,
+        expectedRevision: room.revision,
         payload: { type: "place", x: 7, y: 7 },
       },
       gomokuRules,
@@ -696,7 +903,7 @@ describe("room state", () => {
 
     expect(decision.ok).toBe(true);
     if (!decision.ok) return;
-    expect(decision.room.revision).toBe(2);
+    expect(decision.room.revision).toBe(room.revision + 1);
     expect(decision.room.position?.turn).toBe("seat-b");
     expect(
       readGomokuPosition(decision.room.position!).board[7 + 7 * 15],
@@ -704,24 +911,17 @@ describe("room state", () => {
   });
 
   it("rejects a stale revision without changing the Room", () => {
-    const created = createRoom({
-      roomId: "room-1",
-      creatorGuestId: "guest-creator",
-      rules: gomokuRules,
-      now: 1_000,
-    });
-    const joined = joinRoom(created, "guest-invitee", gomokuRules, 2_000);
-    if (!joined.ok) throw new Error(joined.code);
+    const room = joinedGomokuRoom();
 
     const decision = applyRoomCommand(
-      joined.room,
+      room,
       "guest-creator",
       {
         v: 1,
         type: "game_action",
         gameType: "gomoku",
         ruleSetId: "gomoku.freestyle15.v1",
-        expectedRevision: 0,
+        expectedRevision: room.revision - 1,
         payload: { type: "place", x: 7, y: 7 },
       },
       gomokuRules,
@@ -730,30 +930,23 @@ describe("room state", () => {
 
     expect(decision).toEqual({
       ok: false,
-      room: joined.room,
+      room,
       code: "room.revision_mismatch",
     });
   });
 
   it("never selects a rules Adapter from the client command", () => {
-    const created = createRoom({
-      roomId: "room-1",
-      creatorGuestId: "guest-creator",
-      rules: gomokuRules,
-      now: 1_000,
-    });
-    const joined = joinRoom(created, "guest-invitee", gomokuRules, 2_000);
-    if (!joined.ok) throw new Error(joined.code);
+    const room = joinedGomokuRoom();
 
     const decision = applyRoomCommand(
-      joined.room,
+      room,
       "guest-creator",
       {
         v: 1,
         type: "game_action",
         gameType: "xiangqi",
         ruleSetId: "xiangqi.casual.v1",
-        expectedRevision: 1,
+        expectedRevision: room.revision,
         payload: { type: "place", x: 7, y: 7 },
       },
       gomokuRules,
@@ -763,7 +956,7 @@ describe("room state", () => {
     expect(decision.ok).toBe(false);
     if (decision.ok) return;
     expect(decision.code).toBe("room.rule_mismatch");
-    expect(decision.room).toBe(joined.room);
+    expect(decision.room).toBe(room);
   });
 
   it("restores known Guests to their Seat and rejects a third Guest", () => {
@@ -802,19 +995,12 @@ describe("room state", () => {
   });
 
   it("ends the Game when a seated Guest resigns", () => {
-    const created = createRoom({
-      roomId: "room-1",
-      creatorGuestId: "guest-creator",
-      rules: gomokuRules,
-      now: 1_000,
-    });
-    const joined = joinRoom(created, "guest-invitee", gomokuRules, 2_000);
-    if (!joined.ok) throw new Error(joined.code);
+    const room = joinedGomokuRoom();
 
     const decision = applyRoomCommand(
-      joined.room,
+      room,
       "guest-invitee",
-      { v: 1, type: "resign", expectedRevision: 1 },
+      { v: 1, type: "resign", expectedRevision: room.revision },
       gomokuRules,
       3_000,
     );
@@ -829,22 +1015,15 @@ describe("room state", () => {
         reason: "resign",
       },
     });
-    expect(decision.room.revision).toBe(2);
+    expect(decision.room.revision).toBe(room.revision + 1);
   });
 
   it("starts a rematch only after both Seats are ready and swaps first move", () => {
-    const created = createRoom({
-      roomId: "room-1",
-      creatorGuestId: "guest-creator",
-      rules: gomokuRules,
-      now: 1_000,
-    });
-    const joined = joinRoom(created, "guest-invitee", gomokuRules, 2_000);
-    if (!joined.ok) throw new Error(joined.code);
+    const room = joinedGomokuRoom();
     const resigned = applyRoomCommand(
-      joined.room,
+      room,
       "guest-invitee",
-      { v: 1, type: "resign", expectedRevision: 1 },
+      { v: 1, type: "resign", expectedRevision: room.revision },
       gomokuRules,
       3_000,
     );
@@ -856,7 +1035,7 @@ describe("room state", () => {
       {
         v: 1,
         type: "rematch_ready",
-        expectedRevision: 2,
+        expectedRevision: resigned.room.revision,
         ready: true,
       },
       gomokuRules,
@@ -873,7 +1052,7 @@ describe("room state", () => {
       {
         v: 1,
         type: "rematch_ready",
-        expectedRevision: 3,
+        expectedRevision: firstReady.room.revision,
         ready: true,
       },
       gomokuRules,
@@ -882,7 +1061,7 @@ describe("room state", () => {
     expect(secondReady.ok).toBe(true);
     if (!secondReady.ok) return;
     expect(secondReady.room.round).toBe(2);
-    expect(secondReady.room.revision).toBe(4);
+    expect(secondReady.room.revision).toBe(room.revision + 3);
     expect(secondReady.room.position?.turn).toBe("seat-b");
     expect(secondReady.room.position?.outcome).toBeNull();
     expect(secondReady.room.seats["seat-a"]?.rematchReady).toBe(false);
