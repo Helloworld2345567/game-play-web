@@ -305,3 +305,11 @@ test("submits one leaderboard result after a completed solo game", async ({
   await page.waitForTimeout(300);
   expect(recorded).toHaveLength(1);
 });
+
+test("keeps the top navigation icon without rendering the brand wordmark", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".brand")).toBeVisible();
+  await expect(page.getByText("ym0v0 棋局", { exact: true })).toHaveCount(0);
+});

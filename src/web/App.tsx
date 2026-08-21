@@ -273,9 +273,8 @@ function loadDisplayName(): string {
 
 function Brand() {
   return (
-    <a class="brand" href="/" aria-label="ym0v0 棋局首页">
+    <a class="brand" href="/" aria-label="返回首页">
       <span class="brand-mark" aria-hidden="true">棋</span>
-      <span>ym0v0 棋局</span>
     </a>
   );
 }
