@@ -9,7 +9,7 @@ export default defineConfig({
   // runners. Keep local assertions fast while allowing those first RPCs time
   // to complete instead of turning a slow startup into a cascading failure.
   expect: {
-    timeout: process.env.CI === "1" ? 15_000 : 5_000,
+    timeout: process.env.CI ? 15_000 : 5_000,
   },
   use: {
     baseURL: "http://localhost:5173",
