@@ -81,6 +81,7 @@ jobs:
           set -euo pipefail
           headers="$(curl --fail --silent --show-error --location \
             --retry 5 --retry-delay 5 --retry-all-errors --max-time 30 \
+            --user-agent 'Mozilla/5.0 (compatible; game-play-web-security-check/1.0)' \
             -D - -o /dev/null https://play.ym0v0.com/)"
           grep -Fqi 'strict-transport-security: max-age=31536000' <<< "$headers"
           grep -Fqi 'cross-origin-resource-policy: same-origin' <<< "$headers"
