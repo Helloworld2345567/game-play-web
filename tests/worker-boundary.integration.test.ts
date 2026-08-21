@@ -161,6 +161,117 @@ describe("Worker request boundary", () => {
     });
   });
 
+  it("does not let a late bootstrap request overwrite an existing nickname", async () => {
+    const origin = "http://localhost:5173";
+    const bootstrapId = crypto.randomUUID();
+    const first = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "棋友0001", bootstrapId }),
+      }),
+    );
+    const firstCookie = first.headers.get("Set-Cookie")?.split(";", 1)[0];
+    expect(firstCookie).toBeTruthy();
+
+    const lateBootstrap = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: {
+          Cookie: firstCookie!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ displayName: "棋友0002", bootstrapId }),
+      }),
+    );
+
+    expect(lateBootstrap.status).toBe(200);
+    expect(lateBootstrap.headers.get("Set-Cookie")?.split(";", 1)[0]).toBe(
+      firstCookie,
+    );
+    await expect(lateBootstrap.json()).resolves.toEqual({
+      ok: true,
+      displayName: "棋友0001",
+    });
+  });
+
+  it("allows an explicit nickname save after a session is established", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "棋友0001" }),
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    expect(cookie).toBeTruthy();
+
+    const renamed = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: {
+          Cookie: cookie!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ displayName: "棋友0002" }),
+      }),
+    );
+
+    expect(renamed.status).toBe(200);
+    await expect(renamed.json()).resolves.toEqual({
+      ok: true,
+      displayName: "棋友0002",
+    });
+  });
+
+  it("preserves an explicit nickname when a later page reuses its bootstrap", async () => {
+    const origin = "http://localhost:5173";
+    const bootstrapId = crypto.randomUUID();
+    const initial = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "棋友0001", bootstrapId }),
+      }),
+    );
+    const initialCookie = initial.headers.get("Set-Cookie")?.split(";", 1)[0];
+    expect(initialCookie).toBeTruthy();
+
+    const renamed = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: {
+          Cookie: initialCookie!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ displayName: "已保存昵称" }),
+      }),
+    );
+    const renamedCookie = renamed.headers.get("Set-Cookie")?.split(";", 1)[0];
+    expect(renamedCookie).toBeTruthy();
+    await expect(renamed.json()).resolves.toEqual({
+      ok: true,
+      displayName: "已保存昵称",
+    });
+
+    const reloaded = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: {
+          Cookie: renamedCookie!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ displayName: "另一页面默认昵称", bootstrapId }),
+      }),
+    );
+
+    await expect(reloaded.json()).resolves.toEqual({
+      ok: true,
+      displayName: "已保存昵称",
+    });
+  });
+
   it("does not let an expired browser bootstrap recreate a Guest identity", async () => {
     const origin = "http://localhost:5173";
     const bootstrapId = crypto.randomUUID();

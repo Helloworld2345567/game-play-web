@@ -204,6 +204,11 @@ let pendingBrowserSession: PendingBrowserSession | null = null;
 // nickname.  Cross-tab serialization remains the responsibility of Web Locks
 // (with the server-side bootstrap claim as the fallback).
 let browserSessionTail: Promise<void> = Promise.resolve();
+// The bootstrap identifier is only needed while a page establishes its first
+// signed session.  Once that request succeeds, later calls (including an
+// intentional nickname change) must not be treated as a cross-tab bootstrap
+// claim; otherwise another tab's random draft name could win over the change.
+let browserSessionEstablished = false;
 
 function browserBootstrapId(): Promise<string | undefined> {
   return new Promise((resolve) => {
@@ -304,8 +309,14 @@ async function postBrowserSession(
     BROWSER_SESSION_TIMEOUT_MS,
   );
   const requestSignal = requestController.signal;
-  const bootstrapId = await browserBootstrapId();
   const send = async () => {
+    // Resolve this as late as possible.  A nickname change can be queued
+    // while the first bootstrap is waiting for a lock or a response; looking
+    // up the id before entering the queue would make that later request look
+    // like another first-session claim.
+    const bootstrapId = browserSessionEstablished
+      ? undefined
+      : await browserBootstrapId();
     const response = await fetch("/api/session", {
       method: "POST",
       headers: {
@@ -319,6 +330,7 @@ async function postBrowserSession(
       signal: requestSignal,
     });
     if (!response.ok) throw new Error("session_failed");
+    browserSessionEstablished = true;
   };
   try {
     const locks = typeof navigator === "undefined"

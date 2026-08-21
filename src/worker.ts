@@ -557,6 +557,11 @@ export default {
           "profile.invalid_display_name",
         );
       }
+      // Only a request without a valid cookie may claim a browser bootstrap.
+      // A second tab can start after the first tab's response has installed
+      // that cookie but before it has acquired Web Locks; the claim then
+      // supplies the canonical Guest identity. Once a signed cookie exists,
+      // a bootstrap marker must not undo an explicit nickname save.
       const bootstrapClaim =
         existing === null && requested.bootstrapId !== undefined
           ? await env.ROOM_DIRECTORY.getByName(
@@ -567,11 +572,15 @@ export default {
             requested.displayName,
           )
           : undefined;
+      const sessionDisplayName =
+        existing !== null && requested.bootstrapId !== undefined
+          ? existing.displayName
+          : bootstrapClaim?.displayName ?? requested.displayName;
       const session = await ensureGuestSession(
         request,
         env.SESSION_SECRET,
-        bootstrapClaim?.displayName ?? requested.displayName,
-        bootstrapClaim?.guestId,
+        sessionDisplayName,
+        existing === null ? bootstrapClaim?.guestId : undefined,
       );
       return json(
         { ok: true, displayName: session.displayName },
