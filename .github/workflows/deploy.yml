@@ -49,12 +49,10 @@ jobs:
         run: npx playwright install --with-deps chrome
 
       - name: Run browser end-to-end tests
-        # Keep the local Vite/Worker test server responsive on shared runners.
-        # The suite is intentionally not fully parallel and is stable with two
-        # browser workers; the runner's default CPU count can otherwise starve
-        # the in-process Durable Object test server and cause unrelated pages
-        # to remain on the landing route.
-        run: npm run test:e2e -- --workers=2
+        # Keep the local Vite/Worker test server and its in-process Durable
+        # Objects responsive on shared runners. A single browser worker avoids
+        # cross-test state contention while preserving the full production gate.
+        run: npm run test:e2e -- --workers=1
         env:
           SESSION_SECRET: github-actions-e2e-only-secret-with-enough-entropy
 
