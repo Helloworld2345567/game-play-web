@@ -125,9 +125,9 @@ describe("MinefieldEngine", () => {
   it("replays the same seed and action sequence to the same result", () => {
     const actions = [
       { type: "reveal" as const, x: 4, y: 4 },
-      { type: "toggle_flag" as const, x: 0, y: 0 },
+      { type: "set_flag" as const, flagged: true, x: 0, y: 0 },
       { type: "reveal" as const, x: 8, y: 8 },
-      { type: "toggle_flag" as const, x: 0, y: 0 },
+      { type: "set_flag" as const, flagged: false, x: 0, y: 0 },
     ];
     const replay = () => {
       const field = generateMinefield(
@@ -165,16 +165,26 @@ describe("MinefieldEngine", () => {
     expect(initial.revealed.every((value) => !value)).toBe(true);
   });
 
-  it("toggles private flags while protecting flagged and revealed cells", () => {
+  it("sets private flags idempotently while protecting revealed cells", () => {
     const field = fieldWithMines(3, 3, [0]);
     const initial = createMinefieldProgress(field);
     const flagged = applyMinefieldAction(field, initial, {
-      type: "toggle_flag",
+      type: "set_flag",
+      flagged: true,
       x: 0,
       y: 0,
     });
     expect(flagged.status).toBe("flag_added");
     expect(flagged.progress.flags[0]).toBe(true);
+
+    const repeated = applyMinefieldAction(field, flagged.progress, {
+      type: "set_flag",
+      flagged: true,
+      x: 0,
+      y: 0,
+    });
+    expect(repeated.status).toBe("flag_unchanged");
+    expect(repeated.progress.flags[0]).toBe(true);
 
     const blocked = applyMinefieldAction(field, flagged.progress, {
       type: "reveal",
@@ -185,7 +195,8 @@ describe("MinefieldEngine", () => {
     expect(blocked.newlyRevealed).toEqual([]);
 
     const unflagged = applyMinefieldAction(field, flagged.progress, {
-      type: "toggle_flag",
+      type: "set_flag",
+      flagged: false,
       x: 0,
       y: 0,
     });
@@ -198,7 +209,8 @@ describe("MinefieldEngine", () => {
     });
     expect(
       applyMinefieldAction(field, revealed.progress, {
-        type: "toggle_flag",
+        type: "set_flag",
+        flagged: true,
         x: 1,
         y: 1,
       }).status,
@@ -221,7 +233,8 @@ describe("MinefieldEngine", () => {
       }).status,
     ).toBe("flag_count_mismatch");
     progress = applyMinefieldAction(field, progress, {
-      type: "toggle_flag",
+      type: "set_flag",
+      flagged: true,
       x: 0,
       y: 0,
     }).progress;

@@ -1,0 +1,61 @@
+name: Security checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: Boundary, tests, and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Run Worker boundary tests
+        run: npm run test:worker -- tests/worker-boundary.integration.test.ts
+        env:
+          SESSION_SECRET: github-actions-worker-boundary-secret-with-enough-entropy
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Fail if public source maps are emitted
+        shell: bash
+        run: |
+          if find dist -type f -name '*.map' -print -quit | grep -q .; then
+            echo 'Production source maps must not be publicly deployed.' >&2
+            exit 1
+          fi
+
+      - name: Verify static security headers
+        shell: bash
+        run: |
+          grep -Fq 'Strict-Transport-Security:' public/_headers
+          grep -Fq 'Cross-Origin-Resource-Policy: same-origin' public/_headers

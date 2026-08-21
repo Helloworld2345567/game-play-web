@@ -1,5 +1,16 @@
 import type { GameRules, RulePosition } from "./game-rules";
 import type { ActionReceipt, RoomCommand } from "../shared/protocol";
+import {
+  actionReceiptsFor,
+  admitAction,
+  createActionJournal,
+  MAX_RECENT_ACTION_RECEIPTS,
+  migrateReceiptJournal,
+  recordActionReceipt,
+  type ActionJournalState,
+} from "./action-journal";
+
+export { MAX_RECENT_ACTION_RECEIPTS } from "./action-journal";
 
 export const SEAT_A = "seat-a";
 export const SEAT_B = "seat-b";
@@ -7,7 +18,6 @@ export type PlatformSeatId = typeof SEAT_A | typeof SEAT_B;
 export const WAITING_ROOM_TTL_MS = 60 * 60 * 1_000;
 export const ACTIVE_ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const FINISHED_ROOM_TTL_MS = 24 * 60 * 60 * 1_000;
-export const MAX_RECENT_ACTION_RECEIPTS = 128;
 
 export interface RoomSeat {
   guestId: string;
@@ -35,19 +45,38 @@ export interface LegacyStoredRoomV1 extends StoredRoomBase {
   schemaVersion: 1;
 }
 
-/** Current authoritative Room shape persisted by the Worker. */
-export interface StoredRoom extends StoredRoomBase {
+/** Room shape written before ActionJournal compaction metadata was added. */
+export interface LegacyStoredRoomV2 extends StoredRoomBase {
   schemaVersion: 2;
   roundStartRevision: number;
   recentActionReceipts: Record<PlatformSeatId, ActionReceipt[]>;
 }
 
-export type PersistedRoom = LegacyStoredRoomV1 | StoredRoom;
+/** Current authoritative Room shape persisted by the Worker. */
+export interface StoredRoom extends StoredRoomBase {
+  schemaVersion: 3;
+  roundStartRevision: number;
+  actionJournal: ActionJournalState;
+}
+
+export type PersistedRoom =
+  | LegacyStoredRoomV1
+  | LegacyStoredRoomV2
+  | StoredRoom;
 
 /** Migrates any supported persisted Room schema to the current shape. */
 export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
   const schemaVersion = (room as { schemaVersion: unknown }).schemaVersion;
-  if (schemaVersion === 2) return room as StoredRoom;
+  if (schemaVersion === 3) return room as StoredRoom;
+  if (schemaVersion === 2) {
+    const legacyRoom = room as LegacyStoredRoomV2;
+    const { recentActionReceipts, ...base } = legacyRoom;
+    return {
+      ...base,
+      schemaVersion: 3,
+      actionJournal: migrateReceiptJournal(recentActionReceipts),
+    };
+  }
   if (schemaVersion !== 1) {
     throw new Error(`Unsupported Room schema version: ${String(schemaVersion)}`);
   }
@@ -55,12 +84,9 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
 
   return {
     ...legacyRoom,
-    schemaVersion: 2,
+    schemaVersion: 3,
     roundStartRevision: legacyRoom.revision,
-    recentActionReceipts: {
-      [SEAT_A]: [],
-      [SEAT_B]: [],
-    },
+    actionJournal: createActionJournal(),
   };
 }
 
@@ -69,6 +95,7 @@ export type RoomDecision =
       ok: true;
       room: StoredRoom;
       changed: boolean;
+      broadcast?: boolean;
       receipt?: ActionReceipt;
     }
   | {
@@ -76,44 +103,37 @@ export type RoomDecision =
       room: StoredRoom;
       code: string;
       changed?: boolean;
+      broadcast?: boolean;
       receipt?: ActionReceipt;
     };
 
 function recordRejectedConcurrentAction(
   room: StoredRoom,
   seat: PlatformSeatId,
-  existingReceipts: ActionReceipt[],
   actionId: string,
   clientSeq: number,
   code: string,
   now: number,
 ): Extract<RoomDecision, { ok: false }> {
-  const nextRevision = room.revision + 1;
   const receipt: ActionReceipt = {
     actionId,
     clientSeq,
     status: "rejected",
     code,
-    revision: nextRevision,
+    revision: room.revision,
   };
-  const nextReceipts = [...existingReceipts, receipt].slice(
-    -MAX_RECENT_ACTION_RECEIPTS,
-  );
   const next: StoredRoom = {
     ...room,
-    revision: nextRevision,
-    recentActionReceipts: {
-      ...room.recentActionReceipts,
-      [seat]: nextReceipts,
-    },
-    updatedAt: now,
-    expiresAt:
-      now +
-      (room.position?.outcome === null
-        ? ACTIVE_ROOM_TTL_MS
-        : FINISHED_ROOM_TTL_MS),
+    actionJournal: recordActionReceipt(room.actionJournal, seat, receipt),
   };
-  return { ok: false, room: next, code, changed: true, receipt };
+  return {
+    ok: false,
+    room: next,
+    code,
+    changed: true,
+    broadcast: false,
+    receipt,
+  };
 }
 
 interface CreateRoomInput {
@@ -130,7 +150,7 @@ export function createRoom({
   now,
 }: CreateRoomInput): StoredRoom {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     roomId,
     gameType: rules.definition.gameType,
     ruleSetId: rules.definition.ruleSetId,
@@ -142,10 +162,7 @@ export function createRoom({
       [SEAT_B]: null,
     },
     position: null,
-    recentActionReceipts: {
-      [SEAT_A]: [],
-      [SEAT_B]: [],
-    },
+    actionJournal: createActionJournal(),
     createdAt: now,
     updatedAt: now,
     expiresAt: now + WAITING_ROOM_TTL_MS,
@@ -184,6 +201,10 @@ export function joinRoom(
         expiresAt: now + ttl,
       },
       changed: true,
+      // Reconnecting a known Guest only refreshes lifecycle metadata. The
+      // caller must persist it without advancing the public snapshot revision;
+      // the new transport connection is responsible for any Presence update.
+      broadcast: false,
     };
   }
   if (room.seats[SEAT_B] !== null) {
@@ -206,10 +227,7 @@ export function joinRoom(
       [SEAT_B]: { guestId, rematchReady: false },
     },
     position: rules.create([SEAT_A, SEAT_B], { now, randomSeed }),
-    recentActionReceipts: {
-      [SEAT_A]: [],
-      [SEAT_B]: [],
-    },
+    actionJournal: createActionJournal(),
     updatedAt: now,
     expiresAt: now + ACTIVE_ROOM_TTL_MS,
   };
@@ -316,9 +334,9 @@ export function applyRoomCommand(
             { now, randomSeed },
           )
         : room.position,
-      recentActionReceipts: bothReady
-        ? { [SEAT_A]: [], [SEAT_B]: [] }
-        : room.recentActionReceipts,
+      actionJournal: bothReady
+        ? createActionJournal()
+        : room.actionJournal,
       updatedAt: now,
       expiresAt:
         now + (bothReady ? ACTIVE_ROOM_TTL_MS : FINISHED_ROOM_TTL_MS),
@@ -338,7 +356,6 @@ export function applyRoomCommand(
     return { ok: false, room, code: "room.waiting_for_opponent" };
   }
 
-  let existingReceipts = room.recentActionReceipts?.[seat] ?? [];
   if (concurrentAction) {
     const { actionId, clientSeq, baseRevision } = command;
     if (
@@ -351,17 +368,38 @@ export function applyRoomCommand(
     ) {
       return { ok: false, room, code: "room.revision_mismatch" };
     }
-    const duplicate = existingReceipts.find(
-      (receipt) => receipt.actionId === actionId,
-    );
-    if (duplicate !== undefined) {
-      return { ok: true, room, changed: false, receipt: duplicate };
+    const journalAdmission = admitAction(room.actionJournal, seat, {
+      actionId,
+      clientSeq,
+    });
+    if (journalAdmission.kind === "duplicate") {
+      return {
+        ok: true,
+        room,
+        changed: false,
+        receipt: journalAdmission.receipt,
+      };
+    }
+    if (journalAdmission.kind === "expired") {
+      return {
+        ok: false,
+        room,
+        changed: false,
+        code: "room.action_expired",
+      };
+    }
+    if (journalAdmission.kind === "sequence_conflict") {
+      return {
+        ok: false,
+        room,
+        changed: false,
+        code: "room.action_sequence_conflict",
+      };
     }
     if (baseRevision > room.revision) {
       return recordRejectedConcurrentAction(
         room,
         seat,
-        existingReceipts,
         actionId,
         clientSeq,
         "room.revision_mismatch",
@@ -369,7 +407,14 @@ export function applyRoomCommand(
       );
     }
     if (baseRevision < room.roundStartRevision) {
-      return { ok: false, room, code: "room.revision_mismatch" };
+      return recordRejectedConcurrentAction(
+        room,
+        seat,
+        actionId,
+        clientSeq,
+        "room.revision_mismatch",
+        now,
+      );
     }
   }
 
@@ -382,7 +427,6 @@ export function applyRoomCommand(
       return recordRejectedConcurrentAction(
         room,
         seat,
-        existingReceipts,
         command.actionId!,
         command.clientSeq!,
         ruleDecision.code,
@@ -402,24 +446,14 @@ export function applyRoomCommand(
         revision: nextRevision,
       }
     : undefined;
-  if (receipt !== undefined) {
-    existingReceipts = [...existingReceipts, receipt].slice(
-      -MAX_RECENT_ACTION_RECEIPTS,
-    );
-  }
   const next: StoredRoom = {
     ...room,
     revision: nextRevision,
     position: ruleDecision.next,
-    recentActionReceipts: receipt === undefined
-      ? room.recentActionReceipts
-      : {
-          ...(room.recentActionReceipts ?? {
-            [SEAT_A]: [],
-            [SEAT_B]: [],
-          }),
-          [seat]: existingReceipts,
-        },
+    actionJournal:
+      receipt === undefined
+        ? room.actionJournal
+        : recordActionReceipt(room.actionJournal, seat, receipt),
     updatedAt: now,
     expiresAt:
       now + (finished ? FINISHED_ROOM_TTL_MS : ACTIVE_ROOM_TTL_MS),
@@ -430,4 +464,11 @@ export function applyRoomCommand(
     changed: true,
     ...(receipt === undefined ? {} : { receipt }),
   };
+}
+
+export function getRecentActionReceipts(
+  room: StoredRoom,
+  seat: PlatformSeatId,
+): readonly ActionReceipt[] {
+  return actionReceiptsFor(room.actionJournal, seat);
 }

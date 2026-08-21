@@ -5,11 +5,43 @@ export type MinesweeperBoardMode = "disabled" | "select-start" | "playing";
 export type MinesweeperBoardAction =
   | { type: "select_start"; x: number; y: number }
   | { type: "reveal"; x: number; y: number }
-  | { type: "toggle_flag"; x: number; y: number }
+  | { type: "set_flag"; x: number; y: number; flagged: boolean }
   | { type: "chord"; x: number; y: number };
 
 export function minefieldCellKey(x: number, y: number): string {
   return `${x},${y}`;
+}
+
+export type MinefieldNavigationKey =
+  | "ArrowLeft"
+  | "ArrowRight"
+  | "ArrowUp"
+  | "ArrowDown";
+
+export function nextMinefieldCellIndex(
+  index: number,
+  width: number,
+  height: number,
+  key: MinefieldNavigationKey,
+): number {
+  if (
+    !Number.isInteger(index) ||
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    index < 0 ||
+    index >= width * height
+  ) {
+    return index;
+  }
+  const x = index % width;
+  const y = Math.floor(index / width);
+  if (key === "ArrowLeft" && x > 0) return index - 1;
+  if (key === "ArrowRight" && x + 1 < width) return index + 1;
+  if (key === "ArrowUp" && y > 0) return index - width;
+  if (key === "ArrowDown" && y + 1 < height) return index + width;
+  return index;
 }
 
 export function primaryActionForCell(
@@ -42,7 +74,7 @@ export function secondaryActionForCell(
   y: number,
 ): MinesweeperBoardAction | null {
   return mode === "playing" && cell.state === "hidden"
-    ? { type: "toggle_flag", x, y }
+    ? { type: "set_flag", x, y, flagged: !cell.flagged }
     : null;
 }
 

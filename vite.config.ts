@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => ({
     cloudflare({ persistState: mode !== "e2e" }),
   ],
   build: {
-    sourcemap: true,
+    // Production assets are public; keep source maps out of the deployed site.
+    sourcemap: mode === "development",
   },
 }));

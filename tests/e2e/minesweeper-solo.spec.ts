@@ -108,12 +108,17 @@ test("opens a selected difficulty and shows personal and top-10 records", async 
 }) => {
   const requestedPresets: string[] = [];
   await page.route("**/api/minesweeper/leaderboard", async (route) => {
-    const body = route.request().postDataJSON() as { presetId: string };
+    const body = route.request().postDataJSON() as {
+      ruleVersion: string;
+      presetId: string;
+    };
+    expect(body.ruleVersion).toBe("minesweeper.solo.v1");
     requestedPresets.push(body.presetId);
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
+        ruleVersion: body.ruleVersion,
         presetId: body.presetId,
         personalBestMs: 42_340,
         top: [
@@ -152,9 +157,11 @@ test("submits one leaderboard result after a completed solo game", async ({
   const recorded: Array<{ presetId: string; elapsedMs: number }> = [];
   await page.route("**/api/minesweeper/leaderboard**", async (route) => {
     const body = route.request().postDataJSON() as {
+      ruleVersion: string;
       presetId: string;
       elapsedMs?: number;
     };
+    expect(body.ruleVersion).toBe("minesweeper.solo.v1");
     if (new URL(route.request().url()).pathname.endsWith("/record")) {
       recorded.push({ presetId: body.presetId, elapsedMs: body.elapsedMs! });
     }
@@ -162,6 +169,7 @@ test("submits one leaderboard result after a completed solo game", async ({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
+        ruleVersion: body.ruleVersion,
         presetId: body.presetId,
         personalBestMs: body.elapsedMs ?? null,
         top: body.elapsedMs === undefined

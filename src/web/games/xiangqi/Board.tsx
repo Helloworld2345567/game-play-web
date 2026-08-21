@@ -595,7 +595,6 @@ export function XiangqiBoard({
         <canvas
           ref={canvasRef}
           class={`xiangqi-board ${canInteract ? "is-interactive" : ""}`}
-          style={{ width: `${width}px`, height: `${height}px` }}
           tabIndex={0}
           role="application"
           aria-label={`中国象棋棋盘。当前位置第 ${keyboardPoint.x + 1} 列第 ${keyboardPoint.y + 1} 行，${currentCellDescription}。`}

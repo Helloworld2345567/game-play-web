@@ -7,7 +7,12 @@ import type {
   SeatId,
   Seats,
 } from "../../core/game-rules";
-import type { Minefield, MinefieldPoint } from "./engine";
+import type {
+  LegacyMinefieldToggleAction,
+  Minefield,
+  MinefieldAction,
+  MinefieldPoint,
+} from "./engine";
 import {
   applyMinefieldAction,
   createMinefieldProgress,
@@ -91,20 +96,18 @@ function isPointPayload(
 
 function isPlayPayload(
   value: JsonValue,
-): value is {
-  type: "reveal" | "toggle_flag" | "chord";
-  x: number;
-  y: number;
-} {
+): value is MinefieldAction | LegacyMinefieldToggleAction {
   return (
     isRecord(value) &&
     (value.type === "reveal" ||
       value.type === "toggle_flag" ||
+      value.type === "set_flag" ||
       value.type === "chord") &&
     typeof value.x === "number" &&
     Number.isInteger(value.x) &&
     typeof value.y === "number" &&
-    Number.isInteger(value.y)
+    Number.isInteger(value.y) &&
+    (value.type !== "set_flag" || typeof value.flagged === "boolean")
   );
 }
 
@@ -321,7 +324,10 @@ function createRules(presetId: MinefieldPresetId): GameRules {
         if (transition.status === "out_of_bounds") {
           return { ok: false, code: "minesweeper.out_of_bounds" };
         }
-        if (command.payload.type === "toggle_flag") {
+        if (
+          command.payload.type === "toggle_flag" ||
+          command.payload.type === "set_flag"
+        ) {
           if (transition.status === "already_revealed") {
             return {
               ok: true,

@@ -7,7 +7,12 @@ import type {
   SeatId,
   Seats,
 } from "../../core/game-rules";
-import type { Minefield, MinefieldPoint, MinefieldProgress } from "./engine";
+import type {
+  Minefield,
+  MinefieldAction,
+  MinefieldPoint,
+  MinefieldProgress,
+} from "./engine";
 import {
   applyMinefieldAction,
   createMinefieldProgress,
@@ -130,22 +135,19 @@ function isReadyPayload(
 
 function isPlayPayload(
   value: JsonValue,
-): value is {
-  type: "reveal" | "toggle_flag" | "chord";
-  x: number;
-  y: number;
-} {
+): value is MinefieldAction {
   return (
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
     (value.type === "reveal" ||
-      value.type === "toggle_flag" ||
+      value.type === "set_flag" ||
       value.type === "chord") &&
     typeof value.x === "number" &&
     Number.isInteger(value.x) &&
     typeof value.y === "number" &&
-    Number.isInteger(value.y)
+    Number.isInteger(value.y) &&
+    (value.type !== "set_flag" || typeof value.flagged === "boolean")
   );
 }
 

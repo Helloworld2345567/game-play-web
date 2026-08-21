@@ -702,6 +702,8 @@ button:disabled {
 
 .gomoku-board {
   display: block;
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   touch-action: none;
 }
@@ -717,6 +719,8 @@ button:disabled {
 
 .xiangqi-board {
   display: block;
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   touch-action: none;
 }

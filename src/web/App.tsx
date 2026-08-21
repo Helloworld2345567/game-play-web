@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   getMinesweeperRuleSetId,
   type MinefieldPresetId,
@@ -6,14 +6,21 @@ import {
 import { normalizeDisplayName } from "../shared/display-name";
 import type { RoomSnapshot } from "../shared/protocol";
 import {
-  availableGameAdapters,
+  GameErrorBoundary,
   GameRenderer,
   getGameAdapter,
+  projectPendingCells,
+  resolveGameErrorMessage,
   type GameAdapter,
   UnsupportedGame,
   unknownSeatPresentations,
 } from "./games/registry";
-import { SoloPage } from "./games/minesweeper/SoloPage";
+import {
+  clientGameCatalog,
+  getClientGameCatalogEntry,
+  type ClientGamePage,
+  type LocalGamePageProps,
+} from "./games/catalog";
 import {
   ensureBrowserSession,
   useRoom,
@@ -33,19 +40,31 @@ interface PlatformStats {
   activeRooms: number;
 }
 
-const LANDING_ROOM_ENTRIES = availableGameAdapters
-  .filter((adapter) => adapter.gameType !== "minesweeper")
-  .map((adapter) => ({
-    id: adapter.gameType,
-    label: adapter.landingLabel ?? adapter.displayName,
+const LANDING_ROOM_ENTRIES = clientGameCatalog.flatMap((manifest) => {
+  if (
+    manifest.launchKind !== "turn-room" ||
+    manifest.creationPolicy !== "enabled"
+  ) {
+    return [];
+  }
+  const ruleSetId = manifest.creatableRuleSetIds[0];
+  if (ruleSetId === undefined) return [];
+  const adapter = getGameAdapter(manifest.gameId, ruleSetId);
+  // A manifest without a registered client adapter is not a launch target.
+  // This keeps stale/unknown metadata fail closed on the landing page.
+  if (adapter === null) return [];
+  return [{
+    id: manifest.gameId,
+    label: adapter.landingLabel ?? manifest.title,
     ariaLabel: adapter.createRoomLabel,
-    description: adapter.landingDescription,
+    description: manifest.description,
     launch: {
       kind: "room" as const,
-      gameType: adapter.gameType,
-      ruleSetId: adapter.ruleSetId,
+      gameType: manifest.gameId,
+      ruleSetId,
     },
-  }));
+  }];
+});
 
 export const LANDING_GAME_CATALOG = [
   ...LANDING_ROOM_ENTRIES,
@@ -648,12 +667,18 @@ function RoomPage({
   onDisplayNameChange(displayName: string): void;
   onExit(): void;
 }) {
-  const client = useRoom(roomId, displayName);
+  const client = useRoom(roomId, displayName, {
+    resolveErrorMessage: resolveGameErrorMessage,
+  });
   const snapshot = client.snapshot;
   const adapter =
     snapshot === null
       ? null
       : getGameAdapter(snapshot.gameType, snapshot.ruleSetId);
+  const pendingCells = useMemo(
+    () => projectPendingCells(adapter, client.pendingActions),
+    [adapter, client.pendingActions],
+  );
   const unsupportedGame = snapshot !== null && adapter === null;
   const seatPresentations =
     adapter?.getSeatPresentations(snapshot?.position ?? null) ??
@@ -824,7 +849,7 @@ function RoomPage({
             selfSeat={snapshot.selfSeat}
             disabled={!canPlace}
             pending={client.pending}
-            pendingCells={client.pendingCells}
+            pendingCells={pendingCells}
             onAction={(payload) => client.sendGameAction(payload)}
           />
         ) : (
@@ -912,6 +937,69 @@ function NotFoundPage() {
   );
 }
 
+/** Load a local-game page only when its route is actually visited. */
+function LocalGamePageRoute({
+  gameId,
+  ...pageProps
+}: LocalGamePageProps & { gameId: string }) {
+  const [Page, setPage] = useState<ClientGamePage | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const loader = getClientGameCatalogEntry(gameId)?.loadPage;
+    if (loader === undefined) {
+      setFailed(true);
+      return () => {
+        active = false;
+      };
+    }
+    void loader().then(
+      (nextPage) => {
+        if (!active) return;
+        setPage(() => nextPage);
+      },
+      () => {
+        if (!active) return;
+        setFailed(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [gameId]);
+
+  if (failed) {
+    return (
+      <main class="landing">
+        <nav class="topbar"><Brand /></nav>
+        <section class="fatal-card" role="alert">
+          <p class="eyebrow">游戏不可用</p>
+          <h1>暂时无法加载这个游戏</h1>
+          <p>请刷新页面后重试。</p>
+          <a class="primary-button link-button" href="/">返回首页</a>
+        </section>
+      </main>
+    );
+  }
+  if (Page === null) {
+    return (
+      <main class="landing">
+        <nav class="topbar"><Brand /></nav>
+        <section class="fatal-card" role="status" aria-live="polite">
+          <p class="eyebrow">正在加载</p>
+          <h1>正在准备游戏…</h1>
+        </section>
+      </main>
+    );
+  }
+  return (
+    <GameErrorBoundary gameName={gameId}>
+      <Page {...pageProps} />
+    </GameErrorBoundary>
+  );
+}
+
 export function App() {
   const [path, setPath] = useState(location.pathname);
   const [displayName, setDisplayName] = useState(loadDisplayName);
@@ -938,7 +1026,8 @@ export function App() {
   }
   if (path === "/minesweeper" || path === "/minesweeper/") {
     return (
-      <SoloPage
+      <LocalGamePageRoute
+        gameId="minesweeper"
         displayName={displayName}
         initiallyOpenProfile={displayNameNeedsPrompt}
         onDisplayNameChange={saveDisplayName}

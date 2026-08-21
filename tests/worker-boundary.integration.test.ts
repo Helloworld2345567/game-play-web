@@ -10,6 +10,7 @@ import {
   ROOM_DIRECTORY_NAME,
   type RoomDirectory,
 } from "../src/room-directory";
+import { MINESWEEPER_SOLO_RULE_VERSION } from "../src/shared/minesweeper-leaderboard";
 
 interface TestExports {
   default: Fetcher;
@@ -97,6 +98,30 @@ describe("Worker request boundary", () => {
       expect(response.headers.get("Set-Cookie")).toContain("ym_session=");
     },
   );
+
+  it("rejects new legacy-only Rooms at the public creation boundary", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const response = await app.default.fetch(
+      apiRequest(origin, "/api/rooms", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gameType: "minesweeper",
+          ruleSetId: "minesweeper.duel.9x9x10.v1",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "room.unsupported_game",
+    });
+  });
 
   it("deduplicates concurrent first sessions from one browser bootstrap", async () => {
     const origin = "http://localhost:5173";
@@ -663,6 +688,100 @@ describe("Worker request boundary", () => {
     }
 
     expect(statuses).toEqual([201, 201, 201, 201, 201, 429]);
+    const limited = await app.default.fetch(
+      apiRequest(origin, "/api/rooms", {
+        method: "POST",
+        headers: {
+          "CF-Connecting-IP": "203.0.113.42",
+          Cookie: (await app.default.fetch(
+            apiRequest(origin, "/api/session", { method: "POST" }),
+          )).headers.get("Set-Cookie")?.split(";", 1)[0] ?? "",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+        }),
+      }),
+    );
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toMatch(/^\d+$/u);
+  });
+
+  it("soft-limits session renewal by the signed Guest identity", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const responses: Response[] = [];
+    for (let index = 0; index < 21; index += 1) {
+      responses.push(
+        await app.default.fetch(
+          apiRequest(origin, "/api/session", {
+            method: "POST",
+            headers: { Cookie: cookie! },
+          }),
+        ),
+      );
+    }
+
+    expect(responses.slice(0, 20).every((response) => response.status === 200)).toBe(
+      true,
+    );
+    expect(responses[20]?.status).toBe(429);
+    expect(responses[20]?.headers.get("Retry-After")).toMatch(/^\d+$/u);
+  });
+
+  it.each([
+    ["/api/stats", 60, (index: number) => ({
+      presenceId: crypto.randomUUID(),
+      clientSeq: index + 1,
+    })],
+    ["/api/presence/leave", 60, (index: number) => ({
+      presenceId: crypto.randomUUID(),
+      clientSeq: index + 1,
+    })],
+    ["/api/minesweeper/leaderboard", 30, () => ({
+      ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
+      presetId: "small",
+    })],
+    ["/api/minesweeper/leaderboard/record", 10, () => ({
+      ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
+      presetId: "small",
+      elapsedMs: 12_345,
+    })],
+  ] as const)("soft-limits %s and returns Retry-After", async (path, capacity, makeBody) => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    // Use an isolated edge identity so this test is independent of the
+    // process-wide best-effort bucket state retained by the Worker isolate.
+    const clientIp = `test-${crypto.randomUUID()}`;
+    const responses: Response[] = [];
+    for (let index = 0; index <= capacity; index += 1) {
+      responses.push(
+        await app.default.fetch(
+          apiRequest(origin, path, {
+            method: "POST",
+            headers: {
+              Cookie: cookie!,
+              "Content-Type": "application/json",
+              "CF-Connecting-IP": clientIp,
+            },
+            body: JSON.stringify(makeBody(index)),
+          }),
+        ),
+      );
+    }
+
+    expect(responses.slice(0, capacity).every((response) => response.status === 200)).toBe(
+      true,
+    );
+    expect(responses[capacity]?.status).toBe(429);
+    expect(responses[capacity]?.headers.get("Retry-After")).toMatch(/^\d+$/u);
   });
 
   it("records and reads a Minesweeper score using only the signed session nickname", async () => {
@@ -681,6 +800,7 @@ describe("Worker request boundary", () => {
         method: "POST",
         headers: { Cookie: cookie!, "Content-Type": "application/json" },
         body: JSON.stringify({
+          ruleVersion: "minesweeper.solo.v1",
           presetId: "small",
           elapsedMs: 12_345,
           displayName: "伪造昵称",
@@ -690,6 +810,7 @@ describe("Worker request boundary", () => {
     expect(recorded.status).toBe(200);
     expect(recorded.headers.get("Cache-Control")).toBe("no-store");
     await expect(recorded.json()).resolves.toEqual({
+      ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
       presetId: "small",
       personalBestMs: 12_345,
       top: [{ rank: 1, displayName: "签名昵称", elapsedMs: 12_345 }],
@@ -699,12 +820,16 @@ describe("Worker request boundary", () => {
       apiRequest(origin, "/api/minesweeper/leaderboard", {
         method: "POST",
         headers: { Cookie: cookie!, "Content-Type": "application/json" },
-        body: JSON.stringify({ presetId: "small" }),
+        body: JSON.stringify({
+          ruleVersion: "minesweeper.solo.v1",
+          presetId: "small",
+        }),
       }),
     );
     expect(snapshot.status).toBe(200);
     expect(snapshot.headers.get("Cache-Control")).toBe("no-store");
     await expect(snapshot.json()).resolves.toEqual({
+      ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
       presetId: "small",
       personalBestMs: 12_345,
       top: [{ rank: 1, displayName: "签名昵称", elapsedMs: 12_345 }],
@@ -712,10 +837,17 @@ describe("Worker request boundary", () => {
   });
 
   it.each([
-    ["/api/minesweeper/leaderboard", { presetId: "small" }],
+    [
+      "/api/minesweeper/leaderboard",
+      { ruleVersion: "minesweeper.solo.v1", presetId: "small" },
+    ],
     [
       "/api/minesweeper/leaderboard/record",
-      { presetId: "small", elapsedMs: 1_000 },
+      {
+        ruleVersion: "minesweeper.solo.v1",
+        presetId: "small",
+        elapsedMs: 1_000,
+      },
     ],
   ])("requires a signed session for %s", async (path, body) => {
     const origin = "http://localhost:5173";
@@ -735,10 +867,18 @@ describe("Worker request boundary", () => {
 
   it.each([
     ["/api/minesweeper/leaderboard", {}],
+    [
+      "/api/minesweeper/leaderboard",
+      { ruleVersion: "minesweeper.solo.v0", presetId: "small" },
+    ],
     ["/api/minesweeper/leaderboard", { presetId: "expert" }],
     [
       "/api/minesweeper/leaderboard/record",
       { presetId: "small", elapsedMs: 0 },
+    ],
+    [
+      "/api/minesweeper/leaderboard/record",
+      { ruleVersion: "minesweeper.solo.v0", presetId: "small", elapsedMs: 1_000 },
     ],
     [
       "/api/minesweeper/leaderboard/record",
@@ -763,5 +903,115 @@ describe("Worker request boundary", () => {
     await expect(response.json()).resolves.toEqual({
       error: "leaderboard.invalid_request",
     });
+  });
+
+  it("rejects a non-JSON session body before parsing it", async () => {
+    const response = await app.default.fetch(
+      apiRequest("http://localhost:5173", "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "{}",
+      }),
+    );
+
+    expect(response.status).toBe(415);
+    await expect(response.json()).resolves.toEqual({
+      error: "request.unsupported_media_type",
+    });
+  });
+
+  it.each([
+    "/api/rooms",
+    "/api/stats",
+    "/api/presence/leave",
+    "/api/minesweeper/leaderboard",
+    "/api/minesweeper/leaderboard/record",
+    "/api/rooms/AAAAAAAAAAAAAAAA/sync",
+  ])("requires application/json for %s", async (path) => {
+    const session = await app.default.fetch(
+      apiRequest("http://localhost:5173", "/api/session", {
+        method: "POST",
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const response = await app.default.fetch(
+      apiRequest("http://localhost:5173", path, {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "text/plain" },
+        body: "{}",
+      }),
+    );
+
+    expect(response.status).toBe(415);
+    await expect(response.json()).resolves.toEqual({
+      error: "request.unsupported_media_type",
+    });
+  });
+
+  it("rejects a declared oversized JSON body before reading the stream", async () => {
+    const response = await app.default.fetch(
+      apiRequest("http://localhost:5173", "/api/session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": "2049",
+        },
+        body: "{}",
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "request.body_too_large",
+    });
+  });
+
+  it("bounds a JSON stream when Content-Length is absent", async () => {
+    const body = JSON.stringify({ displayName: "x".repeat(2_100) });
+    const response = await app.default.fetch(
+      apiRequest("http://localhost:5173", "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "request.body_too_large",
+    });
+  });
+
+  it("rejects a mismatched Content-Length instead of forwarding the body", async () => {
+    const response = await app.default.fetch(
+      apiRequest("http://localhost:5173", "/api/session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": "1",
+        },
+        body: "{}",
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "request.invalid_content_length",
+    });
+  });
+
+  it("returns security headers on API responses", async () => {
+    const response = await app.default.fetch(
+      apiRequest("http://localhost:5173", "/api/session", { method: "POST" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Strict-Transport-Security")).toContain(
+      "max-age=31536000",
+    );
+    expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe(
+      "same-origin",
+    );
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
   });
 });

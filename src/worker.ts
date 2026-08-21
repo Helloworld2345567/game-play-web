@@ -5,13 +5,24 @@ import {
   MinesweeperLeaderboard,
 } from "./minesweeper-leaderboard";
 import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
-import { isSupportedGame } from "./games/registry";
+import { isCreatableRuleSet } from "./games/registry";
 import { normalizeDisplayName } from "./shared/display-name";
+import { MINESWEEPER_SOLO_RULE_VERSION } from "./shared/minesweeper-leaderboard";
 import {
   ensureGuestSession,
   readGuestSession,
   type GuestSession,
 } from "./worker/session";
+import {
+  readBoundedJson,
+  type JsonBodyFailure,
+  type JsonBodyResult,
+} from "./worker/request-boundary";
+import {
+  checkSoftRateLimit,
+  type SoftRateLimitConfig,
+  type SoftRateLimitDecision,
+} from "./worker/rate-limit";
 
 export { GameRoom, MinesweeperLeaderboard, RoomDirectory };
 
@@ -29,11 +40,29 @@ const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
 const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
 const MAX_LEADERBOARD_ELAPSED_MS = 24 * 60 * 60_000;
+const MIN_SESSION_SECRET_BYTES = 32;
 const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
-const creationBuckets = new Map<
-  string,
-  { tokens: number; lastRefillAt: number }
->();
+
+const SESSION_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 20,
+  windowMs: 60_000,
+};
+const PRESENCE_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 60,
+  windowMs: 60_000,
+};
+const LEADERBOARD_QUERY_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 30,
+  windowMs: 60_000,
+};
+const LEADERBOARD_RECORD_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 10,
+  windowMs: 60_000,
+};
+const ROOM_CREATION_RATE_LIMIT: SoftRateLimitConfig = {
+  capacity: 5,
+  windowMs: 60_000,
+};
 
 function json(
   value: unknown,
@@ -44,7 +73,57 @@ function json(
   headers.set("Cache-Control", "no-store");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Referrer-Policy", "same-origin");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  headers.set("Cross-Origin-Resource-Policy", "same-origin");
+  headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  headers.set(
+    "Strict-Transport-Security",
+    "max-age=31536000; includeSubDomains; preload",
+  );
   return Response.json(value, { ...init, headers });
+}
+
+function hasSufficientSessionSecret(secret: unknown): secret is string {
+  return (
+    typeof secret === "string" &&
+    new TextEncoder().encode(secret).byteLength >= MIN_SESSION_SECRET_BYTES
+  );
+}
+
+function rateLimitResponse(
+  error: string,
+  decision: SoftRateLimitDecision,
+): Response {
+  return json(
+    { error },
+    {
+      status: 429,
+      headers: { "Retry-After": String(decision.retryAfterSeconds) },
+    },
+  );
+}
+
+function jsonBodyFailureResponse(
+  failure: JsonBodyFailure,
+  invalidError: string,
+): Response {
+  if (failure.kind === "content_type") {
+    return json({ error: "request.unsupported_media_type" }, { status: 415 });
+  }
+  if (failure.kind === "too_large") {
+    return json({ error: "request.body_too_large" }, { status: 413 });
+  }
+  if (failure.kind === "content_length") {
+    return json({ error: "request.invalid_content_length" }, { status: 400 });
+  }
+  return json({ error: invalidError }, { status: 400 });
+}
+
+function isJsonResultFailure(
+  result: JsonBodyResult,
+): result is Extract<JsonBodyResult, { ok: false }> {
+  return !result.ok;
 }
 
 function trustedOrigin(request: Request): boolean {
@@ -69,75 +148,24 @@ function randomRoomId(): string {
     .replace(/=+$/u, "");
 }
 
-function allowRoomCreation(request: Request, guestId: string): boolean {
-  const now = Date.now();
-  const connectingIp = request.headers.get("CF-Connecting-IP")?.trim();
-  const keys = [
-    `guest:${guestId}`,
-    ...(connectingIp && connectingIp.length <= 64 ? [`ip:${connectingIp}`] : []),
-  ];
-  const buckets = keys.map((key) => {
-    const current = creationBuckets.get(key) ?? {
-      tokens: 5,
-      lastRefillAt: now,
-    };
-    return {
-      key,
-      tokens: Math.min(
-        5,
-        current.tokens + ((now - current.lastRefillAt) / 60_000) * 5,
-      ),
-    };
-  });
-  if (buckets.some((bucket) => bucket.tokens < 1)) {
-    for (const bucket of buckets) {
-      creationBuckets.set(bucket.key, {
-        tokens: bucket.tokens,
-        lastRefillAt: now,
-      });
-    }
-    return false;
-  }
-  for (const bucket of buckets) {
-    creationBuckets.set(bucket.key, {
-      tokens: bucket.tokens - 1,
-      lastRefillAt: now,
-    });
-  }
-  if (creationBuckets.size > 1_000) creationBuckets.clear();
-  return true;
-}
-
-async function readSmallJson(request: Request): Promise<unknown | null> {
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_CREATE_BODY_BYTES) {
-    return null;
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
+async function readSmallJson(request: Request): Promise<JsonBodyResult> {
+  return readBoundedJson(request, MAX_CREATE_BODY_BYTES);
 }
 
 async function readRequestedDisplayName(
   request: Request,
 ): Promise<
-  { ok: true; displayName?: string; bootstrapId?: string } | { ok: false }
+  | { ok: true; displayName?: string; bootstrapId?: string }
+  | { ok: false; failure: JsonBodyFailure }
 > {
-  const text = await request.text();
-  if (text.length === 0) return { ok: true };
-  if (new TextEncoder().encode(text).byteLength > MAX_CREATE_BODY_BYTES) {
-    return { ok: false };
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return { ok: false };
-  }
+  const result = await readBoundedJson(request, MAX_CREATE_BODY_BYTES, {
+    allowEmpty: true,
+  });
+  if (isJsonResultFailure(result)) return result;
+  const value = result.value;
+  if (value === undefined) return { ok: true };
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { ok: false };
+    return { ok: false, failure: { kind: "invalid_json" } };
   }
   const body = value as Record<string, unknown>;
   const normalized = normalizeDisplayName(body.displayName);
@@ -148,7 +176,7 @@ async function readRequestedDisplayName(
       (typeof bootstrapId !== "string" ||
         !BROWSER_BOOTSTRAP_ID_PATTERN.test(bootstrapId)))
   ) {
-    return { ok: false };
+    return { ok: false, failure: { kind: "invalid_json" } };
   }
   return {
     ok: true,
@@ -159,10 +187,15 @@ async function readRequestedDisplayName(
 
 async function readPresenceCommand(
   request: Request,
-): Promise<{ presenceId: string; clientSeq: number } | null> {
-  const value = await readSmallJson(request);
+): Promise<
+  | { ok: true; presenceId: string; clientSeq: number }
+  | { ok: false; failure: JsonBodyFailure }
+> {
+  const result = await readSmallJson(request);
+  if (isJsonResultFailure(result)) return result;
+  const value = result.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
+    return { ok: false, failure: { kind: "invalid_json" } };
   }
   const body = value as Record<string, unknown>;
   const presenceId = body.presenceId;
@@ -171,8 +204,8 @@ async function readPresenceCommand(
       PRESENCE_ID_PATTERN.test(presenceId) &&
       Number.isSafeInteger(clientSeq) &&
       (clientSeq as number) >= 1
-    ? { presenceId, clientSeq: clientSeq as number }
-    : null;
+    ? { ok: true, presenceId, clientSeq: clientSeq as number }
+    : { ok: false, failure: { kind: "invalid_json" } };
 }
 
 function isMinefieldPresetId(value: unknown): value is MinefieldPresetId {
@@ -182,23 +215,49 @@ function isMinefieldPresetId(value: unknown): value is MinefieldPresetId {
 async function readLeaderboardCommand(
   request: Request,
   includeElapsedMs: boolean,
-): Promise<{ presetId: MinefieldPresetId; elapsedMs?: number } | null> {
-  const value = await readSmallJson(request);
+): Promise<
+  | {
+    ok: true;
+    ruleVersion: typeof MINESWEEPER_SOLO_RULE_VERSION;
+    presetId: MinefieldPresetId;
+    elapsedMs?: number;
+  }
+  | { ok: false; failure: JsonBodyFailure }
+> {
+  const result = await readSmallJson(request);
+  if (isJsonResultFailure(result)) return result;
+  const value = result.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
+    return { ok: false, failure: { kind: "invalid_json" } };
   }
   const body = value as Record<string, unknown>;
-  if (!isMinefieldPresetId(body.presetId)) return null;
-  if (!includeElapsedMs) return { presetId: body.presetId };
+  if (body.ruleVersion !== MINESWEEPER_SOLO_RULE_VERSION) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  if (!isMinefieldPresetId(body.presetId)) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  if (!includeElapsedMs) {
+    return {
+      ok: true,
+      ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
+      presetId: body.presetId,
+    };
+  }
   const elapsedMs = body.elapsedMs;
   if (
     !Number.isSafeInteger(elapsedMs) ||
     (elapsedMs as number) < 1 ||
     (elapsedMs as number) > MAX_LEADERBOARD_ELAPSED_MS
   ) {
-    return null;
+    return { ok: false, failure: { kind: "invalid_json" } };
   }
-  return { presetId: body.presetId, elapsedMs: elapsedMs as number };
+  return {
+    ok: true,
+    ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
+    presetId: body.presetId,
+    elapsedMs: elapsedMs as number,
+  };
 }
 
 function minesweeperLeaderboard(
@@ -223,10 +282,20 @@ async function createRoom(
   env: WorkerEnv,
   guest: GuestSession,
 ): Promise<Response> {
-  if (!allowRoomCreation(request, guest.guestId)) {
-    return json({ error: "room.rate_limited" }, { status: 429 });
+  const rateLimit = checkSoftRateLimit(
+    request,
+    "room:create",
+    guest.guestId,
+    ROOM_CREATION_RATE_LIMIT,
+  );
+  if (!rateLimit.allowed) {
+    return rateLimitResponse("room.rate_limited", rateLimit);
   }
-  const value = await readSmallJson(request);
+  const result = await readSmallJson(request);
+  if (isJsonResultFailure(result)) {
+    return jsonBodyFailureResponse(result.failure, "room.invalid_request");
+  }
+  const value = result.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return json({ error: "room.invalid_request" }, { status: 400 });
   }
@@ -236,7 +305,7 @@ async function createRoom(
   if (
     typeof gameType !== "string" ||
     typeof ruleSetId !== "string" ||
-    !isSupportedGame(gameType, ruleSetId)
+    !isCreatableRuleSet(gameType, ruleSetId)
   ) {
     return json({ error: "room.unsupported_game" }, { status: 400 });
   }
@@ -334,10 +403,14 @@ async function forwardRoomHttp(
   if (request.method !== "POST" || !ROOM_ID_PATTERN.test(roomId)) {
     return json({ error: "room.invalid_request" }, { status: 400 });
   }
-  const body = await request.text();
-  if (new TextEncoder().encode(body).byteLength > MAX_ROOM_HTTP_BODY_BYTES) {
-    return json({ error: "protocol.message_too_large" }, { status: 413 });
+  const result = await readBoundedJson(request, MAX_ROOM_HTTP_BODY_BYTES);
+  if (isJsonResultFailure(result)) {
+    if (result.failure.kind === "too_large") {
+      return json({ error: "protocol.message_too_large" }, { status: 413 });
+    }
+    return jsonBodyFailureResponse(result.failure, "protocol.invalid_request");
   }
+  const body = result.text;
   const id = env.ROOMS.idFromName(roomId);
   const stub = env.ROOMS.get(id, { locationHint: "apac" });
   const internalHeaders = new Headers({
@@ -355,6 +428,14 @@ async function forwardRoomHttp(
   headers.set("Cache-Control", "no-store");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Referrer-Policy", "same-origin");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  headers.set("Cross-Origin-Resource-Policy", "same-origin");
+  headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  headers.set(
+    "Strict-Transport-Security",
+    "max-age=31536000; includeSubDomains; preload",
+  );
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -374,28 +455,43 @@ export default {
     if (!env.SESSION_SECRET) {
       return json({ error: "server.missing_secret" }, { status: 500 });
     }
+    if (!hasSufficientSessionSecret(env.SESSION_SECRET)) {
+      return json({ error: "server.invalid_secret" }, { status: 500 });
+    }
 
     if (url.pathname === "/api/session" && request.method === "POST") {
+      const existing = await readGuestSession(request, env.SESSION_SECRET);
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "session",
+        existing?.guestId,
+        SESSION_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("session.rate_limited", rateLimit);
+      }
       const requested = await readRequestedDisplayName(request);
       if (!requested.ok) {
-        return json(
-          { error: "profile.invalid_display_name" },
-          { status: 400 },
+        return jsonBodyFailureResponse(
+          requested.failure,
+          "profile.invalid_display_name",
         );
       }
-      const existing = await readGuestSession(request, env.SESSION_SECRET);
-      const bootstrapGuestId =
+      const bootstrapClaim =
         existing === null && requested.bootstrapId !== undefined
           ? await env.ROOM_DIRECTORY.getByName(
             ROOM_DIRECTORY_NAME,
             { locationHint: "apac" },
-          ).claimBrowserBootstrap(requested.bootstrapId)
+          ).claimBrowserBootstrap(
+            requested.bootstrapId,
+            requested.displayName,
+          )
           : undefined;
       const session = await ensureGuestSession(
         request,
         env.SESSION_SECRET,
-        requested.displayName,
-        bootstrapGuestId,
+        bootstrapClaim?.displayName ?? requested.displayName,
+        bootstrapClaim?.guestId,
       );
       return json(
         { ok: true, displayName: session.displayName },
@@ -405,17 +501,63 @@ export default {
 
     const guest = await readGuestSession(request, env.SESSION_SECRET);
     if (guest === null) {
+      const unauthenticatedRateLimit =
+        request.method !== "POST"
+          ? null
+          : url.pathname === "/api/stats"
+            ? {
+              scope: "presence:heartbeat",
+              config: PRESENCE_RATE_LIMIT,
+            }
+            : url.pathname === "/api/presence/leave"
+              ? { scope: "presence:leave", config: PRESENCE_RATE_LIMIT }
+              : url.pathname === "/api/minesweeper/leaderboard"
+                ? {
+                  scope: "leaderboard:query",
+                  config: LEADERBOARD_QUERY_RATE_LIMIT,
+                }
+                : url.pathname === "/api/minesweeper/leaderboard/record"
+                  ? {
+                    scope: "leaderboard:record",
+                    config: LEADERBOARD_RECORD_RATE_LIMIT,
+                  }
+                  : url.pathname === "/api/rooms"
+                    ? {
+                      scope: "room:create",
+                      config: ROOM_CREATION_RATE_LIMIT,
+                    }
+                    : null;
+      if (unauthenticatedRateLimit !== null) {
+        const rateLimit = checkSoftRateLimit(
+          request,
+          unauthenticatedRateLimit.scope,
+          undefined,
+          unauthenticatedRateLimit.config,
+        );
+        if (!rateLimit.allowed) {
+          return rateLimitResponse("request.rate_limited", rateLimit);
+        }
+      }
       return json({ error: "session.required" }, { status: 401 });
     }
     if (
       url.pathname === "/api/minesweeper/leaderboard" &&
       request.method === "POST"
     ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "leaderboard:query",
+        guest.guestId,
+        LEADERBOARD_QUERY_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("leaderboard.rate_limited", rateLimit);
+      }
       const command = await readLeaderboardCommand(request, false);
-      if (command === null) {
-        return json(
-          { error: "leaderboard.invalid_request" },
-          { status: 400 },
+      if (!command.ok) {
+        return jsonBodyFailureResponse(
+          command.failure,
+          "leaderboard.invalid_request",
         );
       }
       return json(
@@ -429,12 +571,23 @@ export default {
       url.pathname === "/api/minesweeper/leaderboard/record" &&
       request.method === "POST"
     ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "leaderboard:record",
+        guest.guestId,
+        LEADERBOARD_RECORD_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("leaderboard.rate_limited", rateLimit);
+      }
       const command = await readLeaderboardCommand(request, true);
-      if (command === null || command.elapsedMs === undefined) {
-        return json(
-          { error: "leaderboard.invalid_request" },
-          { status: 400 },
-        );
+      if (!command.ok || command.elapsedMs === undefined) {
+        return !command.ok
+          ? jsonBodyFailureResponse(
+            command.failure,
+            "leaderboard.invalid_request",
+          )
+          : json({ error: "leaderboard.invalid_request" }, { status: 400 });
       }
       return json(
         await minesweeperLeaderboard(env).recordWin(
@@ -446,9 +599,21 @@ export default {
       );
     }
     if (url.pathname === "/api/stats" && request.method === "POST") {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "presence:heartbeat",
+        guest.guestId,
+        PRESENCE_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("presence.rate_limited", rateLimit);
+      }
       const presence = await readPresenceCommand(request);
-      if (presence === null) {
-        return json({ error: "presence.invalid_request" }, { status: 400 });
+      if (!presence.ok) {
+        return jsonBodyFailureResponse(
+          presence.failure,
+          "presence.invalid_request",
+        );
       }
       const directory = env.ROOM_DIRECTORY.getByName(
         ROOM_DIRECTORY_NAME,
@@ -466,9 +631,21 @@ export default {
       url.pathname === "/api/presence/leave" &&
       request.method === "POST"
     ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "presence:leave",
+        guest.guestId,
+        PRESENCE_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("presence.rate_limited", rateLimit);
+      }
       const presence = await readPresenceCommand(request);
-      if (presence === null) {
-        return json({ error: "presence.invalid_request" }, { status: 400 });
+      if (!presence.ok) {
+        return jsonBodyFailureResponse(
+          presence.failure,
+          "presence.invalid_request",
+        );
       }
       const directory = env.ROOM_DIRECTORY.getByName(
         ROOM_DIRECTORY_NAME,

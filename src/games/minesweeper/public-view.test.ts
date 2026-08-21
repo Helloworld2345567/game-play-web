@@ -19,7 +19,8 @@ describe("minesweeper public view", () => {
     );
     let progress = createMinefieldProgress(field);
     progress = applyMinefieldAction(field, progress, {
-      type: "toggle_flag",
+      type: "set_flag",
+      flagged: true,
       x: 2,
       y: 1,
     }).progress;

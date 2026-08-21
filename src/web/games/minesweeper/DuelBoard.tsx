@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RuleOutcome } from "../../../core/game-rules";
 import {
   readPublicDuelPosition,
@@ -53,9 +53,69 @@ export function toPublicMinefieldView(
   return { ...data.config, cells };
 }
 
-function countdownSeconds(data: PublicMinesweeperDuelData, now: number): number {
+export function countdownSeconds(data: PublicMinesweeperDuelData, now: number): number {
   if (data.countdownEndsAt === null) return 0;
   return Math.max(0, Math.ceil((data.countdownEndsAt - now) / 1_000));
+}
+
+/** Keep the countdown clock out of the board's render path. */
+function useCountdownExpired(
+  phase: PublicMinesweeperDuelData["phase"],
+  countdownEndsAt: number | null,
+): boolean {
+  const [expired, setExpired] = useState(false);
+
+  useEffect(() => {
+    if (phase !== "countdown" || countdownEndsAt === null) {
+      setExpired(true);
+      return;
+    }
+    const delay = Math.max(0, countdownEndsAt - Date.now());
+    setExpired(delay === 0);
+    if (delay === 0) return;
+    const timeout = window.setTimeout(() => setExpired(true), delay);
+    return () => window.clearTimeout(timeout);
+  }, [phase, countdownEndsAt]);
+
+  return expired;
+}
+
+function DuelCountdownMessage({
+  data,
+  outcome,
+  selfSeat,
+}: {
+  data: PublicMinesweeperDuelData;
+  outcome: RuleOutcome | null;
+  selfSeat: string | null;
+}) {
+  const [now, setNow] = useState(Date.now);
+
+  useEffect(() => {
+    const refresh = () => setNow(Date.now());
+    refresh();
+    if (data.phase !== "countdown" || data.countdownEndsAt === null) return;
+
+    let timer: number | undefined;
+    const tick = () => {
+      const nextNow = Date.now();
+      setNow(nextNow);
+      if (data.countdownEndsAt !== null && nextNow >= data.countdownEndsAt) {
+        if (timer !== undefined) window.clearInterval(timer);
+      }
+    };
+    timer = window.setInterval(tick, 100);
+    tick();
+    return () => {
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [data.phase, data.countdownEndsAt]);
+
+  return (
+    <p aria-live="polite">
+      {minesweeperDuelToolbarMessage(data, outcome, selfSeat, now)}
+    </p>
+  );
 }
 
 export function minesweeperDuelToolbarMessage(
@@ -96,23 +156,25 @@ export function MinesweeperDuelBoard({
   pendingCells = EMPTY_PENDING_CELLS,
   onAction,
 }: GameRendererProps) {
-  const data = readPublicDuelPosition(position);
-  const [now, setNow] = useState(Date.now());
-  const remaining = countdownSeconds(data, now);
+  const data = useMemo(() => readPublicDuelPosition(position), [position]);
+  const view = useMemo(() => toPublicMinefieldView(data), [data]);
+  const countdownExpired = useCountdownExpired(
+    data.phase,
+    data.countdownEndsAt,
+  );
+  const countdownComplete =
+    data.phase !== "countdown" ||
+    data.countdownEndsAt === null ||
+    data.countdownEndsAt <= Date.now() ||
+    countdownExpired;
   const isPlayer = selfSeat !== null && selfSeat in data.ready;
   const ownReady = isPlayer ? data.ready[selfSeat] === true : false;
-
-  useEffect(() => {
-    if (data.phase !== "countdown" || remaining === 0) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 100);
-    return () => window.clearInterval(timer);
-  }, [data.phase, remaining]);
 
   const canChooseStart =
     isPlayer &&
     data.ownStart === null &&
     (data.phase === "selecting" ||
-      (data.phase === "countdown" && remaining === 0));
+      (data.phase === "countdown" && countdownComplete));
   const boardMode =
     !disabled && !pending && canChooseStart
       ? "select-start" as const
@@ -120,17 +182,14 @@ export function MinesweeperDuelBoard({
         ? "playing" as const
         : "disabled" as const;
 
-  const phaseMessage = minesweeperDuelToolbarMessage(
-    data,
-    position.outcome,
-    selfSeat,
-    now,
-  );
-
   return (
     <section class="minesweeper-duel" aria-label="双人同时扫雷">
       <div class="minesweeper-duel-toolbar">
-        <p aria-live="polite">{phaseMessage}</p>
+        <DuelCountdownMessage
+          data={data}
+          outcome={position.outcome}
+          selfSeat={selfSeat}
+        />
         <div class="minesweeper-duel-scores" aria-label="双方得分">
           <span>席位 A <strong>{data.scores["seat-a"] ?? 0}</strong></span>
           <span>席位 B <strong>{data.scores["seat-b"] ?? 0}</strong></span>
@@ -147,7 +206,7 @@ export function MinesweeperDuelBoard({
         ) : null}
       </div>
       <MinesweeperBoard
-        view={toPublicMinefieldView(data)}
+        view={view}
         mode={boardMode}
         pendingCells={pendingCells}
         onAction={onAction}

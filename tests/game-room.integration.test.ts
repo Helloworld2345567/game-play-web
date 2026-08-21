@@ -7,7 +7,10 @@ import {
   runInDurableObject,
 } from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
-import type { StoredRoom } from "../src/core/room-state";
+import {
+  getRecentActionReceipts,
+  type StoredRoom,
+} from "../src/core/room-state";
 import {
   ROOM_DIRECTORY_NAME,
   type RoomDirectory,
@@ -244,6 +247,24 @@ async function postRoomHttp(
     status: response.status,
     message: (await response.json()) as JsonMessage,
   };
+}
+
+async function postRoomHttpRaw(
+  stub: DurableObjectStub<GameRoom>,
+  path: "sync" | "command" | "leave",
+  guestId: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return stub.fetch(
+    new Request(`https://room.internal/${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Guest-Id": guestId,
+      },
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 async function startRoom(
@@ -795,6 +816,64 @@ describe("GameRoom Durable Object", () => {
     });
   });
 
+  it("returns a lightweight heartbeat when HTTP fallback already has the latest snapshot", async () => {
+    const stub = await initializeRoom("room-http-unchanged-sync");
+    const connectionId = "http-unchanged-client-01";
+    const initial = await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId,
+    });
+    const snapshotRevision = initial.message.snapshotRevision;
+    expect(snapshotRevision).toEqual(expect.any(Number));
+
+    const heartbeat = await postRoomHttpRaw(
+      stub,
+      "sync",
+      "guest-creator",
+      { v: 1, connectionId, sinceSnapshotRevision: snapshotRevision },
+    );
+
+    expect(heartbeat.status).toBe(204);
+    expect(heartbeat.headers.get("X-Snapshot-Revision")).toBe(
+      String(snapshotRevision),
+    );
+    await expect(heartbeat.text()).resolves.toBe("");
+  });
+
+  it("does not advance the snapshot for a second HTTP connection of the same Guest", async () => {
+    const stub = await initializeRoom("room-http-duplicate-connection");
+    const connectionId = "http-duplicate-client-01";
+    const first = await postRoomHttp(
+      stub,
+      "sync",
+      "guest-creator",
+      { v: 1, connectionId },
+    );
+    const snapshotRevision = first.message.snapshotRevision;
+    expect(snapshotRevision).toEqual(expect.any(Number));
+
+    const second = await postRoomHttpRaw(
+      stub,
+      "sync",
+      "guest-creator",
+      {
+        v: 1,
+        connectionId: "http-duplicate-client-02",
+        sinceSnapshotRevision: snapshotRevision,
+      },
+    );
+
+    expect(second.status).toBe(204);
+    expect(second.headers.get("X-Snapshot-Revision")).toBe(
+      String(snapshotRevision),
+    );
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get<number>("snapshotRevision"),
+      ),
+    ).resolves.toBe(snapshotRevision);
+  });
+
   it("applies an HTTP command and returns its authoritative snapshot", async () => {
     const stub = await initializeRoom("room-http-command");
     await postRoomHttp(stub, "sync", "guest-creator", {
@@ -840,6 +919,100 @@ describe("GameRoom Durable Object", () => {
       revision: 2,
       position: { data: { lastMove: { x: 7, y: 7, stone: 1 } } },
     });
+  });
+
+  it("requires HTTP sync again after a connection lease expires", async () => {
+    const stub = await initializeRoom("room-http-expired-command-lease");
+    const connectionId = "http-expired-command-01";
+    const syncedAt = Date.now();
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId,
+    });
+    await postRoomHttp(stub, "sync", "guest-invitee", {
+      v: 1,
+      connectionId: "http-expired-command-b",
+    });
+
+    vi.setSystemTime(syncedAt + 16_000);
+    try {
+      const expired = await postRoomHttp(
+        stub,
+        "command",
+        "guest-creator",
+        {
+          v: 1,
+          connectionId,
+          command: placeCommand(1, 7, 7),
+        },
+      );
+
+      expect(expired.message).toMatchObject({
+        type: "error",
+        code: "room.connection_required",
+        snapshot: { revision: 1, selfSeat: "seat-a" },
+      });
+      await expect(
+        runInDurableObject(stub, (_instance, state) =>
+          state.storage.get<StoredRoom>("room"),
+        ),
+      ).resolves.toMatchObject({ revision: 1 });
+
+      const resynced = await postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId,
+      });
+      expect(resynced.message).toMatchObject({
+        type: "snapshot",
+        revision: 1,
+        selfSeat: "seat-a",
+      });
+      const accepted = await postRoomHttp(
+        stub,
+        "command",
+        "guest-creator",
+        {
+          v: 1,
+          connectionId,
+          command: placeCommand(1, 7, 7),
+        },
+      );
+      expect(accepted.message).toMatchObject({
+        type: "snapshot",
+        revision: 2,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a WebSocket command after Room TTL even when its alarm is delayed", async () => {
+    const { stub, creator } = await startRoom("room-ws-expired-before-alarm");
+    await runInDurableObject(stub, async (instance, state) => {
+      const room = await state.storage.get<StoredRoom>("room");
+      if (room === undefined) throw new Error("Expected a stored Room");
+      const expiredRoom = { ...room, expiresAt: Date.now() - 1 };
+      await state.storage.put("room", expiredRoom);
+      await state.storage.setAlarm(Date.now() + 60_000);
+      (instance as unknown as { room: StoredRoom }).room = expiredRoom;
+    });
+
+    const result = creator.inbox.nextMatching(
+      (message) =>
+        message.type === "error" ||
+        (message.type === "snapshot" && message.revision === 2),
+    );
+    creator.socket.send(JSON.stringify(placeCommand(1, 7, 7)));
+
+    await expect(result).resolves.toMatchObject({
+      type: "error",
+      code: "room.expired",
+    });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it("admits an HTTP client as a Spectator after both Seats are occupied", async () => {
@@ -1771,26 +1944,18 @@ describe("GameRoom Durable Object", () => {
   it("keeps a Seat online when only one of its browser tabs leaves", async () => {
     const { stub, creator, invitee } = await startRoom("room-multiple-tabs");
     const creatorSecondTab = await connect(stub, "guest-creator");
-    await Promise.all([
-      creator.inbox.nextMatching((message) => message.type === "snapshot"),
-      invitee.inbox.nextMatching((message) => message.type === "snapshot"),
-    ]);
+    // A same-Guest reconnect only refreshes its lifecycle lease. It must not
+    // manufacture a new public snapshot or broadcast an identical one.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(creator.inbox.history).toHaveLength(2);
+    expect(invitee.inbox.history).toHaveLength(1);
     const creatorLeft = creator.inbox.nextMatching(
       (message) => message.type === "left",
-    );
-    const presence = invitee.inbox.nextMatching(
-      (message) =>
-        message.type === "snapshot" &&
-        (message.seats as Record<string, { online?: boolean }>)["seat-a"]
-          ?.online === true,
     );
 
     creator.socket.send(JSON.stringify(leaveCommand()));
 
     await expect(creatorLeft).resolves.toMatchObject({ type: "left" });
-    await expect(presence).resolves.toMatchObject({
-      seats: { "seat-a": { occupied: true, online: true } },
-    });
     const lifecycle = await runInDurableObject(
       stub,
       async (_instance, state) => ({
@@ -2201,7 +2366,7 @@ describe("GameRoom Durable Object", () => {
       expect(afterDuplicate.room.revision).toBe(9);
       expect(afterDuplicate.data.scores).toEqual(afterSameCell.data.scores);
       expect(
-        afterDuplicate.room.recentActionReceipts["seat-b"].filter(
+        getRecentActionReceipts(afterDuplicate.room, "seat-b").filter(
           (receipt) => receipt.actionId === "mine-b-same-cell",
         ),
       ).toHaveLength(1);
@@ -2218,7 +2383,8 @@ describe("GameRoom Durable Object", () => {
       started.creator.socket.send(
         JSON.stringify(
           minesweeperCommand(9, "mine-a-private-flag", 5, {
-            type: "toggle_flag",
+            type: "set_flag",
+            flagged: true,
             ...cellPoint(creatorFlag!),
           }),
         ),
@@ -2234,7 +2400,8 @@ describe("GameRoom Durable Object", () => {
           v: 1,
           connectionId: httpConnectionId,
           command: minesweeperCommand(9, "mine-b-private-flag", 5, {
-            type: "toggle_flag",
+            type: "set_flag",
+            flagged: true,
             ...cellPoint(inviteeFlag!),
           }),
         },
@@ -2339,7 +2506,7 @@ describe("GameRoom Durable Object", () => {
         code: "minesweeper.game_finished",
         actionId: "mine-a-arrives-after-finish",
         snapshot: {
-          revision: 13,
+          revision: 12,
           position: {
             outcome: { kind: "win", winner: "seat-a" },
             data: { exploded: creatorFlag, mines: expect.any(Array) },
@@ -2354,7 +2521,7 @@ describe("GameRoom Durable Object", () => {
         },
       });
       const final = await readStoredMinesweeper(started.stub);
-      expect(final.room.revision).toBe(13);
+      expect(final.room.revision).toBe(12);
       expect(final.room.position?.outcome).toEqual({
         kind: "win",
         winner: "seat-a",

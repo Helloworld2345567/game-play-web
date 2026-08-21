@@ -29,7 +29,8 @@ describe("SoloController", () => {
   it("allows pre-game flags without letting flags or chord lay the field", () => {
     const initial = createSoloGame(MINEFIELD_PRESETS.small, "flags-seed");
     const flagged = applySoloAction(initial, {
-      type: "toggle_flag",
+      type: "set_flag",
+      flagged: true,
       x: 4,
       y: 4,
     });

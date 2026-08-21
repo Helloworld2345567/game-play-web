@@ -4,6 +4,7 @@ import {
   createConcurrentActionLedger,
   createGameActionCommand,
   ensureBrowserSession,
+  nextClientSequence,
   sendOutstandingConcurrentActions,
 } from "./room-client";
 
@@ -39,35 +40,39 @@ describe("browser Guest session", () => {
     await Promise.all([presenceSession, roomSession]);
   });
 
-  it("lets the latest Display Name supersede a pending bootstrap", async () => {
-    let finishLatest: ((response: Response) => void) | undefined;
-    const signals: AbortSignal[] = [];
+  it("serializes a nickname change behind a delayed bootstrap response", async () => {
+    const finishRequest: Array<(response: Response) => void> = [];
+    const requestBodies: string[] = [];
     const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
       const signal = init?.signal;
       if (!(signal instanceof AbortSignal)) {
         throw new Error("Expected a session request AbortSignal");
       }
-      signals.push(signal);
-      return new Promise<Response>((resolve, reject) => {
-        signal.addEventListener(
-          "abort",
-          () => reject(new DOMException("Aborted", "AbortError")),
-          { once: true },
-        );
-        if (signals.length === 2) finishLatest = resolve;
+      requestBodies.push(String(init?.body));
+      return new Promise<Response>((resolve) => {
+        finishRequest.push(resolve);
       });
     });
     vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("navigator", { locks: undefined });
 
-    const stale = ensureBrowserSession("旧昵称").catch((error: unknown) => error);
+    const stale = ensureBrowserSession("旧昵称");
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const latest = ensureBrowserSession("新昵称");
 
+    // The old response may already have reached the server and set a cookie;
+    // do not start the new request until that response has settled locally.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    finishRequest[0]?.(Response.json({ ok: true }));
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(signals[0]?.aborted).toBe(true);
-    finishLatest?.(Response.json({ ok: true }));
+    finishRequest[1]?.(Response.json({ ok: true }));
+    await stale;
     await latest;
-    await expect(stale).resolves.toBeInstanceOf(DOMException);
+    expect(requestBodies).toEqual([
+      JSON.stringify({ displayName: "旧昵称" }),
+      JSON.stringify({ displayName: "新昵称" }),
+    ]);
   });
 
   it("releases a stalled cross-tab session bootstrap after its timeout", async () => {
@@ -127,6 +132,14 @@ function snapshot(
 }
 
 describe("room client action commands", () => {
+  it("allocates safe time-ordered sequences without resetting in one connection", () => {
+    const first = nextClientSequence(0, 1_800_000_000_000, 900_000);
+    const second = nextClientSequence(first, 1_800_000_000_000, 1);
+
+    expect(Number.isSafeInteger(first)).toBe(true);
+    expect(second).toBe(first + 1);
+  });
+
   it("adds idempotency metadata to every simultaneous minesweeper action", () => {
     expect(
       createGameActionCommand(

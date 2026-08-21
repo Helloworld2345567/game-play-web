@@ -24,7 +24,8 @@
 .minesweeper-board {
   --minesweeper-cell-size: clamp(1.85rem, 5.8vw, 2.25rem);
 
-  display: inline-grid;
+  display: inline-flex;
+  flex-direction: column;
   width: max-content;
   min-width: max-content;
   padding: clamp(7px, 2vw, 12px);
@@ -33,6 +34,12 @@
   background: #302b25;
   user-select: none;
   -webkit-touch-callout: none;
+}
+
+.minesweeper-board-row {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 1px;
 }
 
 .minesweeper-cell {

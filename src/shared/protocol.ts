@@ -71,6 +71,8 @@ export interface RoomSnapshot {
   gameType: string;
   ruleSetId: string;
   actionConsistency?: ActionConsistency;
+  /** Opaque transport projection revision, including presence changes. */
+  snapshotRevision?: number;
   revision: number;
   round: number;
   selfSeat: string | null;

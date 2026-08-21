@@ -2,9 +2,12 @@ import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, reset } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  MINESWEEPER_LEADERBOARD_RETENTION_MS,
   MINESWEEPER_LEADERBOARD_NAME,
   type MinesweeperLeaderboard,
 } from "../src/minesweeper-leaderboard";
+
+const RULE_VERSION = "minesweeper.solo.v1";
 
 interface TestEnv {
   MINESWEEPER_LEADERBOARD: DurableObjectNamespace<MinesweeperLeaderboard>;
@@ -38,6 +41,7 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     const stub = leaderboard();
 
     await expect(stub.snapshot("small", "guest-alice")).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: null,
       top: [],
@@ -51,6 +55,7 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     );
 
     expect(snapshot).toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: 12_345,
       top: [{ rank: 1, displayName: "棋友甲", elapsedMs: 12_345 }],
@@ -65,6 +70,7 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     await expect(
       stub.recordWin("small", "guest-alice", "同分昵称", 12_345),
     ).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: 12_345,
       top: [{ rank: 1, displayName: "旧昵称", elapsedMs: 12_345 }],
@@ -73,6 +79,7 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     await expect(
       stub.recordWin("small", "guest-alice", "较慢昵称", 20_000),
     ).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: 12_345,
       top: [{ rank: 1, displayName: "旧昵称", elapsedMs: 12_345 }],
@@ -81,6 +88,7 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     await expect(
       stub.recordWin("small", "guest-alice", "新纪录昵称", 10_000),
     ).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: 10_000,
       top: [{ rank: 1, displayName: "新纪录昵称", elapsedMs: 10_000 }],
@@ -128,16 +136,19 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     await stub.recordWin("medium", "guest-alice", "棋友甲", 20_000);
 
     await expect(stub.snapshot("small", "guest-alice")).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: 10_000,
       top: [{ rank: 1, displayName: "棋友甲", elapsedMs: 10_000 }],
     });
     await expect(stub.snapshot("medium", "guest-alice")).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "medium",
       personalBestMs: 20_000,
       top: [{ rank: 1, displayName: "棋友甲", elapsedMs: 20_000 }],
     });
     await expect(stub.snapshot("large", "guest-alice")).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "large",
       personalBestMs: null,
       top: [],
@@ -193,6 +204,7 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     await expect(
       restartedStub.snapshot("large", "guest-alice"),
     ).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "large",
       personalBestMs: 30_000,
       top: [{ rank: 1, displayName: "棋友甲", elapsedMs: 30_000 }],
@@ -210,12 +222,29 @@ describe("MinesweeperLeaderboard Durable Object", () => {
     );
 
     await expect(stub.snapshot("small", "guest-slow")).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
       presetId: "small",
       personalBestMs: 24 * 60 * 60_000,
       top: [
         { rank: 1, displayName: "最快", elapsedMs: 1 },
         { rank: 2, displayName: "最慢", elapsedMs: 24 * 60 * 60_000 },
       ],
+    });
+  });
+
+  it("removes records once the documented retention window has elapsed", async () => {
+    const clock = vi.spyOn(Date, "now");
+    clock.mockReturnValue(1_000);
+    const stub = leaderboard();
+    await stub.recordWin("small", "guest-alice", "棋友甲", 12_345);
+
+    clock.mockReturnValue(1_000 + MINESWEEPER_LEADERBOARD_RETENTION_MS + 1);
+
+    await expect(stub.snapshot("small", "guest-alice")).resolves.toEqual({
+      ruleVersion: RULE_VERSION,
+      presetId: "small",
+      personalBestMs: null,
+      top: [],
     });
   });
 });

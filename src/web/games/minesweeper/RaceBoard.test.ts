@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RulePosition } from "../../../core/game-rules";
 import type { PublicMinesweeperRaceData } from "../../../games/minesweeper/race-rules";
 import {
+  countdownSeconds,
   minesweeperRaceAdapters,
   minesweeperRaceToolbarMessage,
   toPublicRaceMinefieldView,
@@ -34,6 +35,15 @@ function publicData(
 }
 
 describe("Minesweeper race board", () => {
+  it("clamps the countdown at zero without requiring a board render", () => {
+    const data = publicData({
+      phase: "countdown",
+      countdownEndsAt: 4_000,
+    });
+    expect(countdownSeconds(data, 1_500)).toBe(3);
+    expect(countdownSeconds(data, 4_100)).toBe(0);
+  });
+
   it("builds only the viewer's independent board from the public projection", () => {
     expect(toPublicRaceMinefieldView(publicData()).cells).toEqual([
       { state: "revealed", flagged: false, adjacentMines: 1 },

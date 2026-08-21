@@ -1,4 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  defaultDisplayName,
+  normalizeDisplayName,
+} from "./shared/display-name";
 
 export type RoomReservationResult =
   | { ok: true; leaseId: string }
@@ -27,6 +31,8 @@ type PresenceLeases = Record<string, Record<string, PresenceLease>>;
 
 interface BrowserBootstrapClaim {
   guestId: string;
+  /** The first requested nickname wins for concurrent tabs sharing a claim. */
+  displayName?: string;
   expiresAt: number;
 }
 
@@ -177,9 +183,19 @@ function preparePresenceActivation(
 }
 
 export class RoomDirectory extends DurableObject {
-  async claimBrowserBootstrap(bootstrapId: string): Promise<string> {
+  async claimBrowserBootstrap(
+    bootstrapId: string,
+    requestedDisplayName?: string,
+  ): Promise<{ guestId: string; displayName: string }> {
     if (!PRESENCE_ID_PATTERN.test(bootstrapId)) {
       throw new TypeError("Invalid browser bootstrap");
+    }
+    const normalizedRequestedName =
+      requestedDisplayName === undefined
+        ? null
+        : normalizeDisplayName(requestedDisplayName);
+    if (requestedDisplayName !== undefined && normalizedRequestedName === null) {
+      throw new TypeError("Invalid browser bootstrap display name");
     }
 
     const now = Date.now();
@@ -187,22 +203,30 @@ export class RoomDirectory extends DurableObject {
       const state = await readCurrentState(transaction, now);
       const existing = state.browserBootstraps[bootstrapId];
       if (existing !== undefined) {
+        const displayName =
+          existing.displayName ?? defaultDisplayName(existing.guestId);
+        if (existing.displayName === undefined) {
+          existing.displayName = displayName;
+        }
         await persistState(transaction, state);
-        return existing.guestId;
+        return { guestId: existing.guestId, displayName };
       }
 
       const guestId = crypto.randomUUID();
+      const displayName =
+        normalizedRequestedName ?? defaultDisplayName(guestId);
       if (
         Object.keys(state.browserBootstraps).length <
           MAX_BROWSER_BOOTSTRAP_CLAIMS
       ) {
         state.browserBootstraps[bootstrapId] = {
           guestId,
+          displayName,
           expiresAt: now + BROWSER_BOOTSTRAP_LEASE_MS,
         };
       }
       await persistState(transaction, state);
-      return guestId;
+      return { guestId, displayName };
     });
   }
 

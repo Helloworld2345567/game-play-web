@@ -266,7 +266,6 @@ export function GomokuBoard({
         <canvas
           ref={canvasRef}
           class={`gomoku-board ${canInteract ? "is-interactive" : ""}`}
-          style={{ width: `${size}px`, height: `${size}px` }}
           tabIndex={0}
           role="application"
           aria-label={`五子棋棋盘。当前位置第 ${keyboardPoint.x + 1} 列第 ${keyboardPoint.y + 1} 行，${cellDescription}。`}

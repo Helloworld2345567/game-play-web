@@ -24,8 +24,15 @@ export interface MinefieldProgress {
 
 export type MinefieldAction =
   | { type: "reveal"; x: number; y: number }
-  | { type: "toggle_flag"; x: number; y: number }
+  | { type: "set_flag"; x: number; y: number; flagged: boolean }
   | { type: "chord"; x: number; y: number };
+
+/** Accepted only by legacy multiplayer rules during the migration window. */
+export type LegacyMinefieldToggleAction = {
+  type: "toggle_flag";
+  x: number;
+  y: number;
+};
 
 export type MinefieldActionStatus =
   | "revealed"
@@ -33,6 +40,7 @@ export type MinefieldActionStatus =
   | "flagged"
   | "flag_added"
   | "flag_removed"
+  | "flag_unchanged"
   | "flag_count_mismatch"
   | "not_revealed_number"
   | "hit_mine"
@@ -49,7 +57,12 @@ export interface MinefieldTransition {
 
 export interface MinefieldFlagTransition {
   progress: MinefieldProgress;
-  status: "flag_added" | "flag_removed" | "already_revealed" | "out_of_bounds";
+  status:
+    | "flag_added"
+    | "flag_removed"
+    | "flag_unchanged"
+    | "already_revealed"
+    | "out_of_bounds";
 }
 
 function assertConfig(config: Readonly<MinefieldConfig>): void {
@@ -200,6 +213,31 @@ function assertProgress(field: Minefield, progress: MinefieldProgress): void {
   }
 }
 
+export function setMinefieldFlag(
+  field: Pick<Minefield, "width" | "height">,
+  progress: MinefieldProgress,
+  action: MinefieldPoint & { flagged: boolean },
+): MinefieldFlagTransition {
+  assertProgressDimensions(field, progress);
+  if (!inBounds(field, action.x, action.y)) {
+    return { progress, status: "out_of_bounds" };
+  }
+  const index = indexOf(field, action.x, action.y);
+  if (progress.revealed[index]) {
+    return { progress, status: "already_revealed" };
+  }
+  if (progress.flags[index] === action.flagged) {
+    return { progress, status: "flag_unchanged" };
+  }
+  const flags = progress.flags.slice();
+  flags[index] = action.flagged;
+  return {
+    progress: { revealed: progress.revealed.slice(), flags },
+    status: flags[index] ? "flag_added" : "flag_removed",
+  };
+}
+
+/** @deprecated Compatibility for actions sent before explicit set_flag. */
 export function toggleMinefieldFlag(
   field: Pick<Minefield, "width" | "height">,
   progress: MinefieldProgress,
@@ -209,16 +247,10 @@ export function toggleMinefieldFlag(
   if (!inBounds(field, point.x, point.y)) {
     return { progress, status: "out_of_bounds" };
   }
-  const index = indexOf(field, point.x, point.y);
-  if (progress.revealed[index]) {
-    return { progress, status: "already_revealed" };
-  }
-  const flags = progress.flags.slice();
-  flags[index] = !flags[index];
-  return {
-    progress: { revealed: progress.revealed.slice(), flags },
-    status: flags[index] ? "flag_added" : "flag_removed",
-  };
+  return setMinefieldFlag(field, progress, {
+    ...point,
+    flagged: !progress.flags[indexOf(field, point.x, point.y)],
+  });
 }
 
 export function isMinefieldCompleted(
@@ -282,7 +314,7 @@ function revealSafeRegion(
 export function applyMinefieldAction(
   field: Minefield,
   progress: MinefieldProgress,
-  action: MinefieldAction,
+  action: MinefieldAction | LegacyMinefieldToggleAction,
 ): MinefieldTransition {
   assertProgress(field, progress);
   if (!inBounds(field, action.x, action.y)) {
@@ -292,6 +324,10 @@ export function applyMinefieldAction(
 
   if (action.type === "toggle_flag") {
     const result = toggleMinefieldFlag(field, progress, action);
+    return transition(field, result.progress, result.status);
+  }
+  if (action.type === "set_flag") {
+    const result = setMinefieldFlag(field, progress, action);
     return transition(field, result.progress, result.status);
   }
 

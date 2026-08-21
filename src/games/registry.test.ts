@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { getGameRules, isSupportedGame } from "./registry";
+import {
+  getGameRules,
+  isCreatableRuleSet,
+  isSupportedGame,
+} from "./registry";
 
 describe("game rules registry", () => {
   it("registers every standard minesweeper duel preset", () => {
@@ -32,5 +36,24 @@ describe("game rules registry", () => {
     }
 
     expect(getGameRules("minesweeper.duel.9x9x10.v1")).not.toBeNull();
+  });
+
+  it("loads legacy duel Rooms without allowing new duel creation", () => {
+    expect(
+      isCreatableRuleSet(
+        "minesweeper",
+        "minesweeper.duel.9x9x10.v1",
+      ),
+    ).toBe(false);
+    expect(getGameRules("minesweeper.duel.9x9x10.v1")).not.toBeNull();
+    expect(
+      isCreatableRuleSet(
+        "minesweeper",
+        "minesweeper.race.9x9x10.v1",
+      ),
+    ).toBe(true);
+    expect(
+      isCreatableRuleSet("gomoku", "gomoku.freestyle15.v1"),
+    ).toBe(true);
   });
 });

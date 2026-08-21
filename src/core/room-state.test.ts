@@ -5,9 +5,12 @@ import {
   ACTIVE_ROOM_TTL_MS,
   applyRoomCommand,
   createRoom,
+  getRecentActionReceipts,
   hydrateStoredRoom,
   joinRoom,
+  MAX_RECENT_ACTION_RECEIPTS,
   type LegacyStoredRoomV1,
+  type LegacyStoredRoomV2,
   type PersistedRoom,
   type StoredRoom,
 } from "./room-state";
@@ -93,7 +96,7 @@ describe("room state", () => {
       now: 1_000,
     });
 
-    expect(room.schemaVersion).toBe(2);
+    expect(room.schemaVersion).toBe(3);
   });
 
   it("applies concurrent Actions from the same base revision to the latest state", () => {
@@ -165,6 +168,52 @@ describe("room state", () => {
     });
   });
 
+  it("rejects an old Action after its visible receipt is compacted", () => {
+    const first = applyRoomCommand(
+      joinedConcurrentRoom(),
+      "guest-creator",
+      concurrentCommand("compacted-action", 0, 1, 999),
+      concurrentRules,
+      3_000,
+    );
+    if (!first.ok) throw new Error(first.code);
+    let current = first.room;
+    for (let sequence = 1; sequence <= MAX_RECENT_ACTION_RECEIPTS; sequence += 1) {
+      const advanced = applyRoomCommand(
+        current,
+        "guest-creator",
+        concurrentCommand(`recent-${sequence}`, sequence, 1, sequence),
+        concurrentRules,
+        3_000 + sequence,
+      );
+      if (!advanced.ok) throw new Error(advanced.code);
+      current = advanced.room;
+    }
+    expect(
+      getRecentActionReceipts(current, "seat-a").some(
+        (receipt) => receipt.actionId === "compacted-action",
+      ),
+    ).toBe(false);
+
+    const replayed = applyRoomCommand(
+      current,
+      "guest-creator",
+      concurrentCommand("compacted-action", 0, 1, 1_000),
+      concurrentRules,
+      4_000,
+    );
+
+    expect(replayed).toMatchObject({
+      ok: false,
+      changed: false,
+      code: "room.action_expired",
+      room: { revision: current.revision },
+    });
+    expect(replayed.room.position?.data).not.toMatchObject({
+      revealed: expect.arrayContaining([1_000]),
+    });
+  });
+
   it("consumes a rejected concurrent Action ID so a replay can never execute", () => {
     const room = joinedConcurrentRoom();
     const rejected = applyRoomCommand(
@@ -177,13 +226,14 @@ describe("room state", () => {
     expect(rejected).toMatchObject({
       ok: false,
       changed: true,
+      broadcast: false,
       code: "fake.blocked",
-      room: { revision: 2 },
+      room: { revision: 1 },
       receipt: {
         actionId: "rejected-action",
         status: "rejected",
         code: "fake.blocked",
-        revision: 2,
+        revision: 1,
       },
     });
 
@@ -216,13 +266,14 @@ describe("room state", () => {
     expect(rejected).toMatchObject({
       ok: false,
       changed: true,
+      broadcast: false,
       code: "room.revision_mismatch",
-      room: { revision: 2 },
+      room: { revision: 1 },
       receipt: {
         actionId: "future-action",
         status: "rejected",
         code: "room.revision_mismatch",
-        revision: 2,
+        revision: 1,
       },
     });
 
@@ -238,7 +289,7 @@ describe("room state", () => {
       if (!advanced.ok) throw new Error(advanced.code);
       advancedRoom = advanced.room;
     }
-    expect(advancedRoom.revision).toBe(5);
+    expect(advancedRoom.revision).toBe(4);
 
     const replayed = applyRoomCommand(
       advancedRoom,
@@ -250,12 +301,12 @@ describe("room state", () => {
     expect(replayed).toMatchObject({
       ok: true,
       changed: false,
-      room: { revision: 5 },
+      room: { revision: 4 },
       receipt: {
         actionId: "future-action",
         status: "rejected",
         code: "room.revision_mismatch",
-        revision: 2,
+        revision: 1,
       },
     });
     expect(replayed.room.position?.data).toMatchObject({
@@ -284,11 +335,11 @@ describe("room state", () => {
 
     const hydrated = hydrateStoredRoom(persistedRoom);
 
-    expect(hydrated.schemaVersion).toBe(2);
+    expect(hydrated.schemaVersion).toBe(3);
     expect(hydrated.roundStartRevision).toBe(legacyRoom.revision);
-    expect(hydrated.recentActionReceipts).toEqual({
-      "seat-a": [],
-      "seat-b": [],
+    expect(hydrated.actionJournal).toEqual({
+      "seat-a": { compactedThrough: -1, receipts: [] },
+      "seat-b": { compactedThrough: -1, receipts: [] },
     });
     expect(legacyRoom).not.toHaveProperty("roundStartRevision");
     expect(legacyRoom).not.toHaveProperty("recentActionReceipts");
@@ -310,14 +361,56 @@ describe("room state", () => {
     ).toMatchObject({ ok: true, room: { revision: hydrated.revision + 1 } });
   });
 
+  it("migrates a full schema v2 receipt window with a safe compaction floor", () => {
+    const current = joinedConcurrentRoom();
+    const { actionJournal: _actionJournal, schemaVersion: _schema, ...base } =
+      current;
+    const legacyRoom: LegacyStoredRoomV2 = {
+      ...base,
+      schemaVersion: 2,
+      recentActionReceipts: {
+        "seat-a": Array.from(
+          { length: MAX_RECENT_ACTION_RECEIPTS },
+          (_, index) => ({
+            actionId: `legacy-${index + 10}`,
+            clientSeq: index + 10,
+            status: "applied" as const,
+            revision: index + 2,
+          }),
+        ),
+        "seat-b": [],
+      },
+    };
+
+    const hydrated = hydrateStoredRoom(legacyRoom);
+
+    expect(hydrated.actionJournal["seat-a"]).toMatchObject({
+      compactedThrough: 9,
+      receipts: { length: MAX_RECENT_ACTION_RECEIPTS },
+    });
+    expect(
+      applyRoomCommand(
+        hydrated,
+        "guest-creator",
+        concurrentCommand("already-compacted", 9, 1, 999),
+        concurrentRules,
+        4_000,
+      ),
+    ).toMatchObject({
+      ok: false,
+      changed: false,
+      code: "room.action_expired",
+    });
+  });
+
   it("fails closed instead of downgrading an unknown future schema", () => {
     const futureRoom = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       roomId: "future-room",
     } as unknown as PersistedRoom;
 
     expect(() => hydrateStoredRoom(futureRoom)).toThrow(
-      "Unsupported Room schema version: 3",
+      "Unsupported Room schema version: 4",
     );
   });
 
@@ -368,9 +461,9 @@ describe("room state", () => {
     if (!rematch.ok) throw new Error(rematch.code);
 
     expect(rematch.room.roundStartRevision).toBe(5);
-    expect(rematch.room.recentActionReceipts).toEqual({
-      "seat-a": [],
-      "seat-b": [],
+    expect(rematch.room.actionJournal).toEqual({
+      "seat-a": { compactedThrough: -1, receipts: [] },
+      "seat-b": { compactedThrough: -1, receipts: [] },
     });
     expect(rematch.room.position?.data).toMatchObject({ seed: "round-two-seed" });
     expect(
@@ -525,6 +618,7 @@ describe("room state", () => {
     expect(reconnect.ok).toBe(true);
     if (!reconnect.ok) return;
     expect(reconnect.changed).toBe(true);
+    expect(reconnect.broadcast).toBe(false);
     expect(reconnect.room).toMatchObject({
       revision: joined.room.revision,
       updatedAt: 3_000,

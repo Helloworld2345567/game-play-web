@@ -8,11 +8,18 @@ import {
   advancePlayingClock,
   formatElapsedTime,
   formatLeaderboardTime,
+  getDisplayedElapsedMs,
   isNewPersonalBest,
   presetFromSearch,
 } from "./SoloPage";
 
 describe("SoloPage", () => {
+  it("keeps the live clock calculation local to the timer display", () => {
+    expect(getDisplayedElapsedMs(500, "playing", 1_000, 1_250)).toBe(750);
+    expect(getDisplayedElapsedMs(500, "paused", 1_000, 1_250)).toBe(500);
+    expect(getDisplayedElapsedMs(500, "playing", 1_000, 900)).toBe(500);
+  });
+
   it("renders its monotonic elapsed duration as minutes and seconds", () => {
     expect(formatElapsedTime(0)).toBe("00:00");
     expect(formatElapsedTime(999)).toBe("00:00");

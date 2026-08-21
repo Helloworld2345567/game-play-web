@@ -16,7 +16,7 @@
 
 ## #4：需要哪些 Cloudflare 产品？
 
-**结论**：只需 Worker Static Assets、Worker，以及两个 DO 类：每房一个 `GameRoom`，单例 `RoomDirectory` 原子管理全站 10 个房间的容量。当前不需要 D1、Queue、KV、R2、Pages 或第二个 Worker。以后只在真实功能触发时逐项增加。
+**结论**：只需 Worker Static Assets、Worker，以及三个 DO 类：每房一个 `GameRoom`，单例 `RoomDirectory` 原子管理全站 10 个房间的容量与 Presence，单例 `MinesweeperLeaderboard` 保存带规则版本和保留期限的单人休闲榜。当前不需要 D1、Queue、KV、R2、Pages 或第二个 Worker。以后只在真实功能触发时逐项增加。
 
 ## #5：如何持续增加棋类？
 
@@ -24,7 +24,7 @@
 
 ## #6：前端怎样兼顾小、快和易用？
 
-**结论**：Preact + Vite + 每棋种独立 renderer。交叉点棋盘继续使用 Canvas 2D；井字棋和扫雷使用可访问的 DOM Grid。首屏 JS gzip 目标小于 100 KB；严格棋类由服务端确认后落为实子，双人扫雷逐格显示 pending；断线时保留局面并自动恢复。
+**结论**：Preact + Vite + 共享 `GameManifest` 和客户端静态 allowlist `GameCatalog`，按入口动态加载每棋种页面/renderer。交叉点棋盘继续使用 Canvas 2D；井字棋和扫雷使用可访问的 DOM Grid。首屏 JS gzip 目标小于 100 KB；严格棋类由服务端确认后落为实子，双人扫雷逐格显示 pending；断线时保留局面并自动恢复。
 
 ## #7：怎样部署到 ym0v0.com？
 

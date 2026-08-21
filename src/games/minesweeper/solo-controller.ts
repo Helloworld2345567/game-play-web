@@ -2,7 +2,7 @@ import {
   applyMinefieldAction,
   createMinefieldProgress,
   generateMinefield,
-  toggleMinefieldFlag,
+  setMinefieldFlag,
   type Minefield,
   type MinefieldAction,
   type MinefieldActionStatus,
@@ -112,8 +112,8 @@ export function applySoloAction(
     return { state: current, status: "game_paused", newlyRevealed: [] };
   }
   if (current.field === null) {
-    if (action.type === "toggle_flag") {
-      const result = toggleMinefieldFlag(current.config, current.progress, action);
+    if (action.type === "set_flag") {
+      const result = setMinefieldFlag(current.config, current.progress, action);
       return {
         state: { ...current, progress: result.progress },
         status: result.status,

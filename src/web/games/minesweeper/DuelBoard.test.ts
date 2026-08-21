@@ -2,12 +2,31 @@ import { describe, expect, it } from "vitest";
 import type { RulePosition } from "../../../core/game-rules";
 import type { PublicMinesweeperDuelData } from "../../../games/minesweeper/duel-rules";
 import {
+  countdownSeconds,
   minesweeperDuelAdapters,
   minesweeperDuelToolbarMessage,
   toPublicMinefieldView,
 } from "./DuelBoard";
 
 describe("Minesweeper duel board", () => {
+  it("clamps the countdown at zero while the board projection stays stable", () => {
+    const data: PublicMinesweeperDuelData = {
+      kind: "minesweeper-duel-public",
+      presetId: "small",
+      config: { width: 2, height: 2, mineCount: 1 },
+      phase: "countdown",
+      ready: { "seat-a": true, "seat-b": true },
+      countdownEndsAt: 4_000,
+      ownStart: null,
+      revealed: [],
+      flags: [],
+      scores: { "seat-a": 0, "seat-b": 0 },
+      exploded: null,
+    };
+    expect(countdownSeconds(data, 1_500)).toBe(3);
+    expect(countdownSeconds(data, 4_100)).toBe(0);
+  });
+
   it("builds the shared board from only the viewer-specific public projection", () => {
     const data: PublicMinesweeperDuelData = {
       kind: "minesweeper-duel-public",

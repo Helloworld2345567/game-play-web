@@ -68,7 +68,7 @@ describe("Minesweeper race rules", () => {
       apply(
         secondReady.next,
         "seat-a",
-        { type: "toggle_flag", x: 0, y: 0 },
+        { type: "set_flag", flagged: true, x: 0, y: 0 },
         3_019,
       ),
     ).toMatchObject({
@@ -128,7 +128,7 @@ describe("Minesweeper race rules", () => {
     const flagged = apply(
       position,
       "seat-a",
-      { type: "toggle_flag", ...point },
+      { type: "set_flag", flagged: true, ...point },
       3_020,
     );
     expect(flagged.ok).toBe(true);
@@ -142,8 +142,19 @@ describe("Minesweeper race rules", () => {
     expect(readPublicRacePosition(rules.project(flagged.next, "seat-b")).flags)
       .toEqual([]);
 
-    const opponentReveal = apply(
+    const repeated = apply(
       flagged.next,
+      "seat-a",
+      { type: "set_flag", flagged: true, ...point },
+      3_020,
+    );
+    expect(repeated.ok).toBe(true);
+    if (!repeated.ok) return;
+    expect(readRacePosition(repeated.next).progress["seat-a"]!.flags[target])
+      .toBe(true);
+
+    const opponentReveal = apply(
+      repeated.next,
       "seat-b",
       { type: "reveal", ...point },
       3_021,
@@ -154,6 +165,18 @@ describe("Minesweeper race rules", () => {
     expect(after.progress["seat-b"]!.revealed[target]).toBe(true);
     expect(after.progress["seat-a"]!.revealed[target]).toBe(false);
     expect(after.progress["seat-a"]!.flags[target]).toBe(true);
+  });
+
+  it("rejects the legacy toggle flag action", () => {
+    const position = startRace("reject-legacy-toggle");
+    expect(
+      apply(
+        position,
+        "seat-a",
+        { type: "toggle_flag", x: 0, y: 0 },
+        3_020,
+      ),
+    ).toMatchObject({ ok: false, code: "minesweeper.invalid_action" });
   });
 
   it("awards the first complete independent board using server order and time", () => {

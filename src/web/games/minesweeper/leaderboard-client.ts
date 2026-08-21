@@ -1,4 +1,5 @@
 import type { MinefieldPresetId } from "../../../games/minesweeper/presets";
+import { MINESWEEPER_SOLO_RULE_VERSION } from "../../../shared/minesweeper-leaderboard";
 import { ensureBrowserSession } from "../../room-client";
 
 export interface MinesweeperLeaderboardEntry {
@@ -8,6 +9,7 @@ export interface MinesweeperLeaderboardEntry {
 }
 
 export interface MinesweeperLeaderboardSnapshot {
+  ruleVersion: typeof MINESWEEPER_SOLO_RULE_VERSION;
   presetId: MinefieldPresetId;
   personalBestMs: number | null;
   top: MinesweeperLeaderboardEntry[];
@@ -26,6 +28,7 @@ function parseSnapshot(
   }
   const record = value as Record<string, unknown>;
   if (
+    record.ruleVersion !== MINESWEEPER_SOLO_RULE_VERSION ||
     record.presetId !== expectedPresetId ||
     (record.personalBestMs !== null &&
       !positiveDuration(record.personalBestMs)) ||
@@ -54,6 +57,7 @@ function parseSnapshot(
   });
   if (top.length > 10) throw new Error("leaderboard_invalid_response");
   return {
+    ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
     presetId: expectedPresetId,
     personalBestMs: record.personalBestMs as number | null,
     top,
@@ -91,7 +95,7 @@ export function loadMinesweeperLeaderboard(
     displayName,
     presetId,
     "/api/minesweeper/leaderboard",
-    { presetId },
+    { ruleVersion: MINESWEEPER_SOLO_RULE_VERSION, presetId },
     signal,
   );
 }
@@ -110,7 +114,11 @@ export function recordMinesweeperWin(
     displayName,
     presetId,
     "/api/minesweeper/leaderboard/record",
-    { presetId, elapsedMs: roundedElapsedMs },
+    {
+      ruleVersion: MINESWEEPER_SOLO_RULE_VERSION,
+      presetId,
+      elapsedMs: roundedElapsedMs,
+    },
     signal,
   );
 }

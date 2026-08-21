@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { reset, runInDurableObject } from "cloudflare:test";
 import type { GameRoom } from "../src/game-room";
-import type { StoredRoom } from "../src/core/room-state";
+import {
+  getRecentActionReceipts,
+  type StoredRoom,
+} from "../src/core/room-state";
 import {
   ROOM_DIRECTORY_NAME,
   type RoomDirectory,
@@ -445,7 +448,7 @@ describe("Minesweeper race through GameRoom", () => {
     const storedAfterDuplicate = await readRaceData(started.stub);
     expect(storedAfterDuplicate.room.revision).toBe(7);
     expect(
-      storedAfterDuplicate.room.recentActionReceipts["seat-b"].filter(
+      getRecentActionReceipts(storedAfterDuplicate.room, "seat-b").filter(
         (receipt) => receipt.actionId === "race-b-own",
       ),
     ).toHaveLength(1);
@@ -453,7 +456,8 @@ describe("Minesweeper race through GameRoom", () => {
     started.creator.socket.send(
       JSON.stringify(
         raceCommand(3, "race-a-private-flag", 4, {
-          type: "toggle_flag",
+          type: "set_flag",
+          flagged: true,
           ...point(creatorFlag!),
         }),
       ),
@@ -569,7 +573,7 @@ describe("Minesweeper race through GameRoom", () => {
       code: "minesweeper.game_finished",
       actionId: "race-b-after-terminal",
       snapshot: {
-        revision: 5,
+        revision: 4,
         position: {
           outcome: {
             kind: "win",

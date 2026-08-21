@@ -2,14 +2,32 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { JsonValue } from "../core/game-rules";
 import {
   PROTOCOL_VERSION,
-  type ActionReceipt,
   type GameActionCommand,
   type LeftMessage,
   type RoomCommand,
   type RoomSnapshot,
   type ServerError,
 } from "../shared/protocol";
-import { getGameAdapter } from "./games/registry";
+import {
+  createConcurrentActionTracker,
+  sendOutstandingConcurrentActions as sendOutstandingTrackedActions,
+  type ConcurrentActionTracker,
+} from "./room-session/concurrent-action-tracker";
+import {
+  createConcurrentActionLedger,
+  type ConcurrentActionLedger,
+} from "./room-session/legacy-action-ledger";
+import {
+  HttpProtocolError,
+  HttpStatusError,
+  parseServerMessage,
+  roomProtocol,
+} from "./room-session/room-protocol";
+import {
+  HttpPollingTransport,
+  type HttpTransportResult,
+} from "./room-session/http-polling-transport";
+import { WebSocketTransport } from "./room-session/websocket-transport";
 
 export type ConnectionPhase =
   | "connecting"
@@ -24,12 +42,37 @@ export type RoomTransport = "websocket" | "http";
 const HTTP_REQUEST_TIMEOUT_MS = 8_000;
 const CONNECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/u;
 const CONNECTION_STORAGE_PREFIX = "ym0v0.room.connection.";
+const ACTION_SEQUENCE_STORAGE_PREFIX = "ym0v0.room.action-sequence.";
+const ACTION_SEQUENCE_BUCKET_SIZE = 1_048_576;
 const HTTP_COMPATIBILITY_NOTICE =
   "当前网络不支持 WebSocket，已自动使用 HTTPS 兼容连接。";
 
 interface GameActionIdentity {
   actionId: string;
   clientSeq: number;
+}
+
+/**
+ * Produces a safe, roughly time-ordered sequence with one million entropy
+ * slots per second. The previous value keeps a single connection monotonic;
+ * the server treats the value as a finite-window de-duplication key and does
+ * not impose ordering across independent browser connections.
+ */
+export function nextClientSequence(
+  previous: number,
+  now = Date.now(),
+  entropy?: number,
+): number {
+  const random = entropy ??
+    (crypto.getRandomValues(new Uint32Array(1))[0] ?? 0);
+  const candidate =
+    Math.floor(now / 1_000) * ACTION_SEQUENCE_BUCKET_SIZE +
+    (random % ACTION_SEQUENCE_BUCKET_SIZE);
+  const next = Math.max(previous + 1, candidate);
+  if (!Number.isSafeInteger(next) || next < 0) {
+    throw new RangeError("Unable to allocate a safe client sequence");
+  }
+  return next;
 }
 
 export function isConcurrentRoom(
@@ -64,122 +107,15 @@ export function createGameActionCommand(
     : command;
 }
 
-interface PendingConcurrentAction {
-  command: GameActionCommand;
-  cellKey: string | null;
-}
-
-export interface ConcurrentActionLedger {
-  add(command: GameActionCommand): boolean;
-  acknowledge(receipts: readonly ActionReceipt[]): boolean;
-  reconcileSnapshot(
-    snapshot: Pick<RoomSnapshot, "actionReceipts">,
-  ): { changed: boolean; rejectedCodes: string[] };
-  reject(actionId: string): boolean;
-  commands(): readonly GameActionCommand[];
-  clear(): void;
-  actionIds(): ReadonlySet<string>;
-  cellKeys(): ReadonlySet<string>;
-}
-
-function commandCellKey(command: GameActionCommand): string | null {
-  if (
-    !isRecord(command.payload) ||
-    !Number.isInteger(command.payload.x) ||
-    !Number.isInteger(command.payload.y)
-  ) {
-    return null;
-  }
-  return `${String(command.payload.x)},${String(command.payload.y)}`;
-}
-
-export function createConcurrentActionLedger(): ConcurrentActionLedger {
-  const entries = new Map<string, PendingConcurrentAction>();
-  const acknowledge = (receipts: readonly ActionReceipt[]): boolean => {
-    let changed = false;
-    for (const receipt of receipts) {
-      changed = entries.delete(receipt.actionId) || changed;
-    }
-    return changed;
-  };
-  return {
-    add(command) {
-      if (command.actionId === undefined || entries.has(command.actionId)) {
-        return false;
-      }
-      entries.set(command.actionId, {
-        command,
-        cellKey: commandCellKey(command),
-      });
-      return true;
-    },
-    acknowledge,
-    reconcileSnapshot(snapshot) {
-      const receipts = snapshot.actionReceipts ?? [];
-      let changed = false;
-      const rejectedCodes: string[] = [];
-      for (const receipt of receipts) {
-        const settled = entries.delete(receipt.actionId);
-        changed = settled || changed;
-        if (
-          settled &&
-          receipt.status === "rejected" &&
-          receipt.code !== undefined
-        ) {
-          rejectedCodes.push(receipt.code);
-        }
-      }
-      return {
-        changed,
-        rejectedCodes,
-      };
-    },
-    reject: (actionId) => entries.delete(actionId),
-    commands: () => [...entries.values()].map(({ command }) => command),
-    clear: () => entries.clear(),
-    actionIds: () => new Set(entries.keys()),
-    cellKeys: () =>
-      new Set(
-        [...entries.values()].flatMap(({ cellKey }) =>
-          cellKey === null ? [] : [cellKey],
-        ),
-      ),
-  };
-}
+export { createConcurrentActionLedger };
+export type { ConcurrentActionLedger };
 
 export function sendOutstandingConcurrentActions(
   ledger: Pick<ConcurrentActionLedger, "commands">,
   sentActionIds: Set<string>,
   send: (command: GameActionCommand) => void,
 ): boolean {
-  try {
-    for (const command of ledger.commands()) {
-      const actionId = command.actionId;
-      if (actionId === undefined || sentActionIds.has(actionId)) continue;
-      send(command);
-      sentActionIds.add(actionId);
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    readonly serverCode: string | null,
-  ) {
-    super(`http_status_${status}`);
-    this.name = "HttpStatusError";
-  }
-}
-
-class HttpProtocolError extends Error {
-  constructor() {
-    super("invalid_http_protocol");
-    this.name = "HttpProtocolError";
-  }
+  return sendOutstandingTrackedActions(ledger, sentActionIds, send);
 }
 
 interface RoomClientView {
@@ -188,7 +124,8 @@ interface RoomClientView {
   snapshot: RoomSnapshot | null;
   pending: boolean;
   pendingActionIds: ReadonlySet<string>;
-  pendingCells: ReadonlySet<string>;
+  /** Opaque in-flight concurrent commands; games may project them for UI. */
+  pendingActions: readonly GameActionCommand[];
   leaving: boolean;
   notice: string | null;
   fatalCode: string | null;
@@ -210,33 +147,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseServerMessage(
-  value: unknown,
-): RoomSnapshot | ServerError | LeftMessage | null {
-  if (!isRecord(value) || value.v !== PROTOCOL_VERSION) return null;
-  if (
-    value.type === "snapshot" &&
-    typeof value.roomId === "string" &&
-    typeof value.gameType === "string" &&
-    typeof value.ruleSetId === "string" &&
-    Number.isSafeInteger(value.revision) &&
-    Number.isSafeInteger(value.round) &&
-    isRecord(value.seats)
-  ) {
-    return value as unknown as RoomSnapshot;
-  }
-  if (value.type === "error" && typeof value.code === "string") {
-    return value as unknown as ServerError;
-  }
-  if (value.type === "left") {
-    return { v: PROTOCOL_VERSION, type: "left" };
-  }
-  return null;
-}
-
 function humanizeError(
   code: string,
   snapshot: RoomSnapshot | null,
+  resolveErrorMessage?: RoomErrorMessageResolver,
 ): string {
   const messages: Record<string, string> = {
     "room.full": "房间已有两位玩家。",
@@ -247,6 +161,8 @@ function humanizeError(
     "room.waiting_for_opponent": "请等待对手加入。",
     "room.game_finished": "本局已经结束。",
     "room.game_in_progress": "对局结束后才能准备复赛。",
+    "room.action_expired": "这次操作已过期，请重新操作。",
+    "room.action_sequence_conflict": "操作序号冲突，请刷新页面后重试。",
     "room.rule_mismatch": "客户端与房间规则版本不一致，请刷新页面。",
     "protocol.invalid_message": "消息格式无效，请刷新后重试。",
     "protocol.message_too_large": "消息过大。",
@@ -254,17 +170,22 @@ function humanizeError(
   };
   const platformMessage = messages[code];
   if (platformMessage !== undefined) return platformMessage;
-  if (snapshot !== null) {
-    const adapter = getGameAdapter(snapshot.gameType, snapshot.ruleSetId);
-    const gameMessage = adapter?.getErrorMessage(code);
-    if (gameMessage) return gameMessage;
-  }
+  const gameMessage = resolveErrorMessage?.(code, snapshot);
+  if (gameMessage) return gameMessage;
   return "操作未完成，请重试。";
+}
+
+export type RoomErrorMessageResolver = (
+  code: string,
+  snapshot: RoomSnapshot | null,
+) => string | null;
+
+export interface UseRoomOptions {
+  resolveErrorMessage?: RoomErrorMessageResolver;
 }
 
 interface PendingBrowserSession {
   displayName: string;
-  controller: AbortController;
   request: Promise<void>;
 }
 
@@ -276,6 +197,12 @@ const BROWSER_BOOTSTRAP_KEY = "bootstrap-id";
 const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const BROWSER_BOOTSTRAP_LIFETIME_MS = 60_000;
 let pendingBrowserSession: PendingBrowserSession | null = null;
+// A cancelled fetch can still have been processed by the server and may
+// later install its Set-Cookie response.  Keep same-page nickname changes in
+// request order so an older bootstrap response cannot overwrite the latest
+// nickname.  Cross-tab serialization remains the responsibility of Web Locks
+// (with the server-side bootstrap claim as the fallback).
+let browserSessionTail: Promise<void> = Promise.resolve();
 
 function browserBootstrapId(): Promise<string | undefined> {
   return new Promise((resolve) => {
@@ -415,10 +342,15 @@ function startBrowserSessionRequest(displayName: string): Promise<void> {
   if (pendingBrowserSession?.displayName === displayName) {
     return pendingBrowserSession.request;
   }
-  pendingBrowserSession?.controller.abort();
   const controller = new AbortController();
-  const request = postBrowserSession(displayName, controller.signal);
-  const pending = { displayName, controller, request };
+  const request = browserSessionTail.then(
+    () => postBrowserSession(displayName, controller.signal),
+    () => postBrowserSession(displayName, controller.signal),
+  );
+  // Keep the queue alive after a failed request; callers still receive the
+  // original rejection, while a later nickname can proceed normally.
+  browserSessionTail = request.catch(() => undefined);
+  const pending = { displayName, request };
   pendingBrowserSession = pending;
   const clear = () => {
     if (pendingBrowserSession === pending) pendingBrowserSession = null;
@@ -471,15 +403,38 @@ function websocketUrl(roomId: string): string {
   return url.href;
 }
 
-function httpTransportUrl(
-  roomId: string,
-  operation: "sync" | "command" | "leave",
-): string {
-  return `/api/rooms/${encodeURIComponent(roomId)}/${operation}`;
-}
-
 function connectionStorageKey(roomId: string): string {
   return `${CONNECTION_STORAGE_PREFIX}${roomId}`;
+}
+
+function actionSequenceStorageKey(roomId: string, connectionId: string): string {
+  return `${ACTION_SEQUENCE_STORAGE_PREFIX}${roomId}.${connectionId}`;
+}
+
+function loadActionSequence(roomId: string, connectionId: string): number {
+  try {
+    const value = Number(
+      sessionStorage.getItem(actionSequenceStorageKey(roomId, connectionId)),
+    );
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function storeActionSequence(
+  roomId: string,
+  connectionId: string,
+  sequence: number,
+): void {
+  try {
+    sessionStorage.setItem(
+      actionSequenceStorageKey(roomId, connectionId),
+      String(sequence),
+    );
+  } catch {
+    // Sequence entropy still prevents practical cross-page collisions.
+  }
 }
 
 function browserConnection(roomId: string): {
@@ -503,12 +458,6 @@ function browserConnection(roomId: string): {
     // Fall back to the page-local ID created above.
   }
   return { id, storageKey };
-}
-
-function boundaryErrorCode(value: unknown): string | null {
-  return isRecord(value) && typeof value.error === "string"
-    ? value.error
-    : null;
 }
 
 function isPermanentHttpFailure(error: unknown): boolean {
@@ -566,7 +515,11 @@ function permanentHttpFailureView(error: unknown): {
   };
 }
 
-export function useRoom(roomId: string, displayName: string): RoomClientView {
+export function useRoom(
+  roomId: string,
+  displayName: string,
+  options: UseRoomOptions = {},
+): RoomClientView {
   const [phase, setPhase] = useState<ConnectionPhase>("connecting");
   const [transport, setTransport] = useState<RoomTransport>("websocket");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
@@ -574,16 +527,20 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
   const [pendingActionIds, setPendingActionIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const [pendingCells, setPendingCells] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  const [pendingActions, setPendingActions] = useState<
+    readonly GameActionCommand[]
+  >(() => []);
   const [leaving, setLeaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [fatalCode, setFatalCode] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const snapshotRef = useRef<RoomSnapshot | null>(null);
   const pendingRevisionRef = useRef<number | null>(null);
-  const actionSequenceRef = useRef({ roomId, next: 1 });
+  const actionSequenceRef = useRef({
+    roomId: "",
+    connectionId: "",
+    last: 0,
+  });
   const retryRef = useRef<() => void>(() => undefined);
   const leaveRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const sendRef = useRef<(command: RoomCommand) => boolean>(() => false);
@@ -592,14 +549,22 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
     id: string;
     storageKey: string;
   } | null>(null);
+  const resolveErrorMessage = options.resolveErrorMessage;
   if (
     connectionRef.current === null ||
     connectionRef.current.roomId !== roomId
   ) {
     connectionRef.current = { roomId, ...browserConnection(roomId) };
   }
-  if (actionSequenceRef.current.roomId !== roomId) {
-    actionSequenceRef.current = { roomId, next: 1 };
+  if (
+    actionSequenceRef.current.roomId !== roomId ||
+    actionSequenceRef.current.connectionId !== connectionRef.current.id
+  ) {
+    actionSequenceRef.current = {
+      roomId,
+      connectionId: connectionRef.current.id,
+      last: loadActionSequence(roomId, connectionRef.current.id),
+    };
   }
 
   useEffect(() => {
@@ -608,9 +573,6 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
     let webSocketAttempt = 0;
     let httpAttempt = 0;
     let retryTimer: number | null = null;
-    let heartbeatTimer: number | null = null;
-    let connectTimer: number | null = null;
-    let pollTimer: number | null = null;
     let leaveTimer: number | null = null;
     let terminal = false;
     let fallbackActive = false;
@@ -625,8 +587,8 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
     let resolveLeave: (() => void) | null = null;
     let lastServerMessageAt = Date.now();
     let sessionReady: Promise<void> | null = null;
-    const httpControllers = new Set<AbortController>();
-    const concurrentActions = createConcurrentActionLedger();
+    let websocketTransport: WebSocketTransport | null = null;
+    const concurrentActions = createConcurrentActionTracker();
     const concurrentHttpInFlight = new Set<string>();
     const concurrentWebSocketSent = new Set<string>();
     const connection = connectionRef.current!;
@@ -634,8 +596,9 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
 
     const publishPending = () => {
       const actionIds = concurrentActions.actionIds();
+      const actions = concurrentActions.commands();
       setPendingActionIds(actionIds);
-      setPendingCells(concurrentActions.cellKeys());
+      setPendingActions(actions);
       setPending(
         pendingRevisionRef.current !== null || actionIds.size > 0,
       );
@@ -649,7 +612,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
     };
 
     setPendingActionIds(new Set());
-    setPendingCells(new Set());
+    setPendingActions([]);
 
     const ensureSession = async (signal?: AbortSignal) => {
       sessionReady ??= ensureBrowserSession(displayName, signal);
@@ -661,11 +624,31 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       }
     };
 
+    const httpTransport = new HttpPollingTransport({
+      roomId,
+      connectionId,
+      ensureSession,
+      invalidateSession: () => {
+        sessionReady = null;
+      },
+      getSnapshotRevision: () => {
+        const current = snapshotRef.current;
+        if (current === null) return null;
+        const candidate = (current as unknown as Record<string, unknown>)
+          .snapshotRevision;
+        return typeof candidate === "number" ? candidate : null;
+      },
+      requestTimeoutMs: HTTP_REQUEST_TIMEOUT_MS,
+    });
+
     const forgetConnection = () => {
       try {
         if (sessionStorage.getItem(connection.storageKey) === connectionId) {
           sessionStorage.removeItem(connection.storageKey);
         }
+        sessionStorage.removeItem(
+          actionSequenceStorageKey(roomId, connectionId),
+        );
       } catch {
         // The connection was page-local when sessionStorage was unavailable.
       }
@@ -673,21 +656,15 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
 
     const clearSocketTimers = () => {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
-      if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
-      if (connectTimer !== null) window.clearTimeout(connectTimer);
       retryTimer = null;
-      heartbeatTimer = null;
-      connectTimer = null;
     };
 
     const clearPollTimer = () => {
-      if (pollTimer !== null) window.clearTimeout(pollTimer);
-      pollTimer = null;
+      httpTransport.clearScheduledSync();
     };
 
     const abortHttpRequests = () => {
-      for (const controller of httpControllers) controller.abort();
-      httpControllers.clear();
+      httpTransport.abortRequests();
     };
 
     const completeLeave = (acknowledged = false) => {
@@ -715,19 +692,24 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       next: RoomSnapshot,
       source: RoomTransport,
     ) => {
+      const current = snapshotRef.current;
+      const currentSnapshotRevision = current?.snapshotRevision;
+      const nextSnapshotRevision = next.snapshotRevision;
+      if (
+        current !== null &&
+        typeof currentSnapshotRevision === "number" &&
+        typeof nextSnapshotRevision === "number" &&
+        nextSnapshotRevision < currentSnapshotRevision
+      ) {
+        return;
+      }
+      if (current !== null && next.revision < current.revision) {
+        return;
+      }
       const reconciliation = concurrentActions.reconcileSnapshot(next);
       for (const receipt of next.actionReceipts ?? []) {
         concurrentHttpInFlight.delete(receipt.actionId);
         concurrentWebSocketSent.delete(receipt.actionId);
-      }
-      const current = snapshotRef.current;
-      if (current !== null && next.revision < current.revision) {
-        if (reconciliation.changed) publishPending();
-        const rejectedCode = reconciliation.rejectedCodes.at(-1);
-        if (rejectedCode !== undefined) {
-          setNotice(humanizeError(rejectedCode, current));
-        }
-        return;
       }
       let pendingResolution: "confirmed" | "retry" | null = null;
       snapshotRef.current = next;
@@ -760,10 +742,10 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         }
         httpNoticeShown = true;
       }
-      const rejectedCode = reconciliation.rejectedCodes.at(-1);
-      if (rejectedCode !== undefined) {
-        setNotice(humanizeError(rejectedCode, next));
-      }
+    const rejectedCode = reconciliation.rejectedCodes.at(-1);
+    if (rejectedCode !== undefined) {
+      setNotice(humanizeError(rejectedCode, next, resolveErrorMessage));
+    }
     };
 
     const handleServerMessage = (
@@ -795,6 +777,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         humanizeError(
           message.code,
           message.snapshot ?? snapshotRef.current,
+          resolveErrorMessage,
         ),
       );
       if (fatalCodes.has(message.code)) {
@@ -808,64 +791,12 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       }
     };
 
-    const postHttp = async (
+    const postHttp = (
       operation: "sync" | "command" | "leave",
       command?: RoomCommand,
       keepalive = false,
-    ): Promise<RoomSnapshot | ServerError | LeftMessage> => {
-      for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
-        const controller = keepalive ? null : new AbortController();
-        let timeout: number | null = null;
-        if (controller !== null) {
-          httpControllers.add(controller);
-          timeout = window.setTimeout(
-            () => controller.abort(),
-            HTTP_REQUEST_TIMEOUT_MS,
-          );
-        }
-        try {
-          await ensureSession(controller?.signal);
-          const response = await fetch(httpTransportUrl(roomId, operation), {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-            body: JSON.stringify({
-              v: PROTOCOL_VERSION,
-              connectionId,
-              ...(command === undefined ? {} : { command }),
-            }),
-            cache: "no-store",
-            keepalive,
-            ...(controller === null ? {} : { signal: controller.signal }),
-          });
-          let raw: unknown = null;
-          try {
-            raw = await response.json();
-          } catch {
-            if (response.ok) throw new HttpProtocolError();
-          }
-          if (response.status === 401 && sessionAttempt === 0) {
-            sessionReady = null;
-            continue;
-          }
-          if (!response.ok) {
-            throw new HttpStatusError(
-              response.status,
-              boundaryErrorCode(raw),
-            );
-          }
-          const message = parseServerMessage(raw);
-          if (message === null) throw new HttpProtocolError();
-          return message;
-        } finally {
-          if (timeout !== null) window.clearTimeout(timeout);
-          if (controller !== null) httpControllers.delete(controller);
-        }
-      }
-      throw new HttpStatusError(401, "session.required");
-    };
+    ): Promise<HttpTransportResult> =>
+      httpTransport.request(operation, command, { keepalive });
 
     const failPermanentlyForHttp = (error: unknown): boolean => {
       if (!isPermanentHttpFailure(error)) return false;
@@ -886,8 +817,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
 
     const scheduleHttpSync = (delay: number) => {
       if (disposed || terminal || !fallbackActive) return;
-      clearPollTimer();
-      pollTimer = window.setTimeout(() => void syncHttp(), delay);
+      httpTransport.scheduleSync(delay, () => void syncHttp());
     };
 
     async function syncHttp(): Promise<void> {
@@ -910,7 +840,15 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       try {
         const message = await postHttp("sync");
         if (disposed || currentGeneration !== generation) return;
-        handleServerMessage(message, "http");
+        if (message.type !== "heartbeat") {
+          handleServerMessage(message, "http");
+        } else if (snapshotRef.current !== null) {
+          // A 204 is a transport-level heartbeat.  It must not resolve or
+          // clear any pending command because no receipt was delivered.
+          httpReady = true;
+          setTransportMode("http");
+          setPhase("online");
+        }
         flushConcurrentHttpCommands();
         if (!terminal) {
           scheduleHttpSync(document.hidden ? 2_500 : 1_000);
@@ -937,9 +875,8 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       pendingNeedsReconciliation = pendingRevisionRef.current !== null;
       generation += 1;
       clearSocketTimers();
-      const socket = socketRef.current;
+      websocketTransport?.close();
       socketRef.current = null;
-      if (socket !== null) closeSocket(socket);
       concurrentWebSocketSent.clear();
       setTransportMode("http");
       setPhase(snapshotRef.current === null ? "connecting" : "retrying");
@@ -978,7 +915,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       setTransportMode("websocket");
       setPhase(snapshotRef.current === null ? "connecting" : "retrying");
       try {
-        await ensureSession();
+        await websocketTransport?.connect();
       } catch {
         if (!disposed && currentGeneration === generation) {
           setNotice("无法建立匿名会话，正在重试。");
@@ -987,74 +924,6 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         return;
       }
       if (disposed || currentGeneration !== generation) return;
-
-      const socket = new WebSocket(websocketUrl(roomId));
-      socketRef.current = socket;
-      connectTimer = window.setTimeout(() => {
-        if (currentGeneration !== generation || terminal) return;
-        closeSocket(socket, "WebSocket handshake timeout");
-        startHttpFallback();
-      }, 4_000);
-
-      socket.addEventListener("open", () => {
-        if (disposed || currentGeneration !== generation) return;
-        setPhase("syncing");
-        lastServerMessageAt = Date.now();
-        heartbeatTimer = window.setInterval(() => {
-          if (socket.readyState !== WebSocket.OPEN) return;
-          if (Date.now() - lastServerMessageAt > 60_000) {
-            socket.close();
-            return;
-          }
-          socket.send("ping");
-        }, 25_000);
-      });
-
-      socket.addEventListener("message", (event) => {
-        if (disposed || currentGeneration !== generation) return;
-        lastServerMessageAt = Date.now();
-        if (event.data === "pong") return;
-        let raw: unknown;
-        try {
-          raw = JSON.parse(String(event.data));
-        } catch {
-          setNotice("收到无法识别的服务器消息。");
-          return;
-        }
-        if (isRecord(raw) && "v" in raw && raw.v !== PROTOCOL_VERSION) {
-          terminal = true;
-          clearSocketTimers();
-          pendingRevisionRef.current = null;
-          pendingNeedsReconciliation = false;
-          clearConcurrentActions();
-          setFatalCode("protocol.version_mismatch");
-          setNotice("服务器协议不兼容，请刷新页面后重试。");
-          setPhase("fatal");
-          closeSocket(socket, "protocol version mismatch");
-          return;
-        }
-        const message = parseServerMessage(raw);
-        if (message === null) {
-          setNotice("服务器协议不兼容，请刷新页面。");
-          return;
-        }
-        if (connectTimer !== null) window.clearTimeout(connectTimer);
-        connectTimer = null;
-        handleServerMessage(message, "websocket", socket);
-        if (message.type === "snapshot") {
-          flushConcurrentWebSocketCommands(socket);
-        }
-      });
-
-      socket.addEventListener("close", () => {
-        if (socketRef.current === socket) socketRef.current = null;
-        if (leaveRequested && leaveTargetSocket === socket) completeLeave();
-        if (currentGeneration !== generation || terminal) return;
-        clearSocketTimers();
-        if (navigator.onLine) startHttpFallback();
-        else scheduleWebSocketReconnect();
-      });
-      socket.addEventListener("error", () => socket.close());
     }
 
     const sendStrictHttpCommand = async (
@@ -1064,8 +933,10 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       try {
         const message = await postHttp("command", command);
         if (disposed || terminal || currentGeneration !== generation) return;
-        handleServerMessage(message, "http");
-        scheduleHttpSync(0);
+        if (message.type !== "heartbeat") {
+          handleServerMessage(message, "http");
+        }
+        if (message.type === "heartbeat") scheduleHttpSync(0);
       } catch (error) {
         if (disposed || terminal || currentGeneration !== generation) return;
         if (failPermanentlyForHttp(error)) return;
@@ -1094,14 +965,16 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       try {
         const message = await postHttp("command", command);
         if (disposed || terminal || currentGeneration !== generation) return;
-        handleServerMessage(message, "http");
-        scheduleHttpSync(0);
+        if (message.type !== "heartbeat") {
+          handleServerMessage(message, "http");
+        }
+        if (message.type === "heartbeat") scheduleHttpSync(0);
       } catch (error) {
         if (disposed || terminal || currentGeneration !== generation) return;
         if (failPermanentlyForHttp(error)) return;
         httpReady = false;
         httpRecovering = true;
-        setNotice("连接暂时中断，正在确认刚才的扫雷操作。");
+        setNotice("连接暂时中断，正在确认刚才的操作。");
         setPhase(navigator.onLine ? "retrying" : "offline");
         scheduleHttpSync(0);
       } finally {
@@ -1137,12 +1010,72 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       const sent = sendOutstandingConcurrentActions(
         concurrentActions,
         concurrentWebSocketSent,
-        (command) => socket.send(JSON.stringify(command)),
+        (command) => {
+          if (!websocketTransport?.send(roomProtocol.encodeCommand(command))) {
+            throw new Error("websocket_send_failed");
+          }
+        },
       );
       if (!sent) {
         startHttpFallback();
       }
     }
+
+    websocketTransport = new WebSocketTransport({
+      url: websocketUrl(roomId),
+      ensureSession,
+      onOpen: (socket) => {
+        if (disposed || terminal || fallbackActive) return;
+        socketRef.current = socket;
+        setPhase("syncing");
+        lastServerMessageAt = Date.now();
+      },
+      onMessage: (data, socket) => {
+        if (disposed || terminal || socketRef.current !== socket) return;
+        lastServerMessageAt = Date.now();
+        if (data === "pong") return;
+        let raw: unknown;
+        try {
+          raw = JSON.parse(String(data));
+        } catch {
+          setNotice("收到无法识别的服务器消息。");
+          return;
+        }
+        if (isRecord(raw) && "v" in raw && raw.v !== PROTOCOL_VERSION) {
+          terminal = true;
+          clearSocketTimers();
+          pendingRevisionRef.current = null;
+          pendingNeedsReconciliation = false;
+          clearConcurrentActions();
+          setFatalCode("protocol.version_mismatch");
+          setNotice("服务器协议不兼容，请刷新页面后重试。");
+          setPhase("fatal");
+          websocketTransport?.close("protocol version mismatch");
+          return;
+        }
+        const message = parseServerMessage(raw);
+        if (message === null) {
+          setNotice("服务器协议不兼容，请刷新页面。");
+          return;
+        }
+        handleServerMessage(message, "websocket", socket);
+        if (message.type === "snapshot") {
+          flushConcurrentWebSocketCommands(socket);
+        }
+      },
+      onClose: (socket) => {
+        if (socketRef.current === socket) socketRef.current = null;
+        if (leaveRequested && leaveTargetSocket === socket) completeLeave();
+        if (disposed || terminal) return;
+        clearSocketTimers();
+        if (navigator.onLine) startHttpFallback();
+        else scheduleWebSocketReconnect();
+      },
+      onError: () => undefined,
+      onHandshakeTimeout: () => {
+        if (!disposed && !terminal) startHttpFallback();
+      },
+    });
 
     const isConcurrentCommand = (
       command: RoomCommand,
@@ -1170,15 +1103,13 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
           void sendConcurrentHttpCommand(command, generation);
           return true;
         }
-        const socket = socketRef.current;
-        if (socket?.readyState !== WebSocket.OPEN) return false;
+        if (!websocketTransport?.isOpen()) return false;
         if (!concurrentActions.add(command)) return false;
         publishPending();
         setNotice(null);
-        try {
-          socket.send(JSON.stringify(command));
+        if (websocketTransport.send(roomProtocol.encodeCommand(command))) {
           concurrentWebSocketSent.add(command.actionId);
-        } catch {
+        } else {
           concurrentWebSocketSent.delete(command.actionId);
           startHttpFallback();
         }
@@ -1194,15 +1125,12 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         void sendStrictHttpCommand(command, generation);
         return true;
       }
-      const socket = socketRef.current;
-      if (socket?.readyState !== WebSocket.OPEN) return false;
+      if (!websocketTransport?.isOpen()) return false;
       pendingRevisionRef.current = command.expectedRevision;
       pendingNeedsReconciliation = false;
       publishPending();
       setNotice(null);
-      try {
-        socket.send(JSON.stringify(command));
-      } catch {
+      if (!websocketTransport.send(roomProtocol.encodeCommand(command))) {
         pendingNeedsReconciliation = true;
         startHttpFallback();
       }
@@ -1218,9 +1146,8 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         return;
       }
       generation += 1;
-      const socket = socketRef.current;
+      websocketTransport?.close("retry");
       socketRef.current = null;
-      if (socket !== null) closeSocket(socket, "retry");
       void connectWebSocket();
     };
     retryRef.current = retryNow;
@@ -1248,7 +1175,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         void (async () => {
           try {
             const message = await postHttp("leave", undefined, true);
-            if (!disposed || message.type === "left") {
+            if (!disposed && message.type !== "heartbeat") {
               handleServerMessage(message, "http");
             }
           } catch {
@@ -1258,17 +1185,15 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         return leavePromise;
       }
 
-      const socket = socketRef.current;
-      if (socket?.readyState !== WebSocket.OPEN) {
-        if (socket !== null) closeSocket(socket, "left");
+      const socket = websocketTransport?.currentSocket() ?? socketRef.current;
+      if (!websocketTransport?.isOpen() || socket === null) {
+        websocketTransport?.close("left");
         completeLeave(false);
         return leavePromise;
       }
       leaveTargetSocket = socket;
-      try {
-        socket.send(JSON.stringify({ v: PROTOCOL_VERSION, type: "leave" }));
-      } catch {
-        closeSocket(socket, "leave failed");
+      if (!websocketTransport.send(roomProtocol.encodeLeave())) {
+        websocketTransport.close("leave failed");
         completeLeave(false);
       }
       return leavePromise;
@@ -1285,8 +1210,8 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         abortHttpRequests();
         return;
       }
-      const socket = socketRef.current;
-      if (socket !== null) closeSocket(socket, "offline");
+      websocketTransport?.close("offline");
+      socketRef.current = null;
     };
     const handleOnline = () => {
       if (fallbackActive) scheduleHttpSync(0);
@@ -1299,7 +1224,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
         return;
       }
       if (
-        socketRef.current?.readyState !== WebSocket.OPEN ||
+        !websocketTransport?.isOpen() ||
         Date.now() - lastServerMessageAt > 60_000
       ) {
         retryNow();
@@ -1320,8 +1245,8 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       if (leaveTimer !== null) window.clearTimeout(leaveTimer);
       leaveTimer = null;
       completeLeave(false);
-      const socket = socketRef.current;
-      if (socket !== null) closeSocket(socket, "unmount");
+      websocketTransport?.dispose();
+      httpTransport.dispose();
       socketRef.current = null;
       concurrentActions.clear();
       concurrentHttpInFlight.clear();
@@ -1333,7 +1258,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [displayName, roomId]);
+  }, [displayName, resolveErrorMessage, roomId]);
 
   const send = useCallback(
     (command: RoomCommand): boolean => sendRef.current(command),
@@ -1345,8 +1270,12 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
       const current = snapshotRef.current;
       if (current === null) return false;
       const sequence = isConcurrentRoom(current)
-        ? actionSequenceRef.current.next++
+        ? nextClientSequence(actionSequenceRef.current.last)
         : 0;
+      if (isConcurrentRoom(current)) {
+        actionSequenceRef.current.last = sequence;
+        storeActionSequence(roomId, actionSequenceRef.current.connectionId, sequence);
+      }
       return send(
         createGameActionCommand(current, payload, {
           actionId: crypto.randomUUID(),
@@ -1387,7 +1316,7 @@ export function useRoom(roomId: string, displayName: string): RoomClientView {
     snapshot,
     pending,
     pendingActionIds,
-    pendingCells,
+    pendingActions,
     leaving,
     notice,
     fatalCode,

@@ -15,15 +15,17 @@
 - 中国象棋支持标准棋子走法、九宫、河界、将军/将死、困毙、飞将、三次重复与连续 60 回合无进展自动和棋；不含竞赛规则的长将/长捉责任裁定
 - 扫雷支持 9×9/10 雷、16×16/40 雷、30×16/99 雷；单人模式不占房间名额
 - 双人扫雷竞速使用同一权威雷区和共同中央安全起点，双方的已揭格与旗帜完全独立；只公开进度，先完成者获胜，踩雷者失败
-- 单人扫雷按难度显示个人最佳和全站 Top 10，记录签名 Guest 的昵称与最快用时
+- 单人扫雷按难度显示个人最佳和全站 Top 10；成绩绑定不可变规则版本并最多保留 180 天
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；单例 SQLite-backed `MinesweeperLeaderboard` 按 Guest 和难度原子保存最佳成绩。排行榜 DO 不计入房间上限。棋种规则通过 `GameRules` 注册表隔离，增加棋类不需要修改房间、会话或重连核心。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化，其内部由统一准入、`RoomRuntime`、`ActionJournal` 与 `SnapshotProjector` 分工，但不增加跨 DO 网络跳转；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；单例 SQLite-backed `MinesweeperLeaderboard` 按 Guest、难度和规则版本原子保存最佳成绩。排行榜 DO 不计入房间上限。
 
-五子棋、中国象棋和井字棋继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道；旧 `minesweeper.duel.*.v1` 只保留协议兼容，不再从首页创建。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
+共享 `GameManifest` 只包含可信纯元数据，客户端 `GameCatalog` 通过静态 allowlist 动态加载本地页面或房间 renderer，服务端 `GameRules` 注册表独立控制规则恢复与新建。浏览器侧保留窄的 `useRoom()` 接口，内部 `RoomSession` 将 WebSocket、HTTPS polling、协议解析和并发动作跟踪分离，因此增加棋类不需要修改会话与重连核心。
 
-单人榜以签名 Guest 作为匿名身份，昵称从签名会话取得。它是客户端运行的休闲榜，已做输入校验和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。
+五子棋、中国象棋和井字棋继续使用严格 revision。新建双人扫雷房使用 `minesweeper.race.*.v1` 和 `actionId + clientSeq + baseRevision` 的并发幂等通道，`clientSeq` 在单个连接内单调、服务端按有限窗口去重，旗帜使用显式 `set_flag`；服务端会拒绝已淘汰序号和同序号不同 ID。旧 `minesweeper.duel.*.v1` 只保留已有房间恢复，公共建房 API 也会拒绝。WebSocket 为首选，受限网络下操作仍会立即通过 HTTPS 兼容连接提交；无变化的 fallback sync 返回 `204`，不会反复投影和广播同一快照。单人和竞速扫雷复用同一个纯函数 `MinefieldEngine` 与 `MinesweeperBoard`。
+
+单人榜以签名 Guest 作为匿名身份，昵称从签名会话取得。`minesweeper.solo.v1` 与其他规则版本不混榜，记录在 180 天后由每日清理任务删除。它是客户端计时并提交的休闲榜，已做输入校验、请求限流和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。
 
 初始架构设计、当前扩展说明与调研证据见 [`docs/GOMOKU_PLATFORM_PLAN.md`](docs/GOMOKU_PLATFORM_PLAN.md) 和 [`docs/research/GITHUB_SURVEY.md`](docs/research/GITHUB_SURVEY.md)。
 
@@ -81,6 +83,8 @@ npm run deploy
 ```
 
 生产密钥只能写入 Cloudflare Secret，不要放入 `.env`、源码或 Git 历史。
+
+安全边界：Worker 对 JSON 请求执行 Content-Type、Content-Length 和字节上限校验；会话、建房、房间命令、统计和排行榜入口都有 Guest/IP 维度的软限流，生产环境还应在 Cloudflare WAF/Rate Limiting 配置分布式规则。静态资源使用 CSP、HSTS、同源隔离、`nosniff` 和禁止 iframe；生产构建不发布 source map。`SESSION_SECRET` 缺失或过弱时 Worker 拒绝启动，客户端清单不是服务端授权边界。
 
 ## 增加棋种
 

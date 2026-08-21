@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   applySoloAction,
   createSoloGame,
@@ -52,6 +52,53 @@ export function formatLeaderboardTime(elapsedMs: number): string {
   const seconds = Math.floor((totalCentiseconds % 6_000) / 100);
   const centiseconds = totalCentiseconds % 100;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+}
+
+function monotonicNow(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+export function getDisplayedElapsedMs(
+  elapsedMs: number,
+  status: SoloGameState["status"],
+  runningSince: number | null,
+  now: number,
+): number {
+  return status === "playing" && runningSince !== null
+    ? elapsedMs + Math.max(0, now - runningSince)
+    : elapsedMs;
+}
+
+/**
+ * The clock owns its 250ms state.  A ticking display must not update the
+ * game page (and therefore the minefield DOM) on every tick.
+ */
+function ElapsedTimeDisplay({
+  elapsedMs,
+  status,
+  runningSince,
+}: {
+  elapsedMs: number;
+  status: SoloGameState["status"];
+  runningSince: number | null;
+}) {
+  const [now, setNow] = useState(monotonicNow);
+
+  useEffect(() => {
+    if (status !== "playing" || runningSince === null) return;
+    const refresh = () => setNow(monotonicNow());
+    refresh();
+    const timer = globalThis.setInterval(refresh, 250);
+    return () => globalThis.clearInterval(timer);
+  }, [status, runningSince]);
+
+  const visibleElapsed = getDisplayedElapsedMs(
+    elapsedMs,
+    status,
+    runningSince,
+    now,
+  );
+  return <strong>{formatElapsedTime(visibleElapsed)}</strong>;
 }
 
 export function advancePlayingClock(
@@ -108,20 +155,7 @@ export function SoloPage({
   const submittedGames = useRef(new Set<string>());
   const leaderboardRequest = useRef(0);
   const previousTickAt = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (game.status !== "playing") return;
-    previousTickAt.current ??= performance.now();
-    const timer = globalThis.setInterval(() => {
-      const now = performance.now();
-      setGame((current) => {
-        const previous = previousTickAt.current ?? now;
-        previousTickAt.current = now;
-        return advancePlayingClock(current, previous, now);
-      });
-    }, 250);
-    return () => globalThis.clearInterval(timer);
-  }, [game.status]);
+  const [clockStartedAt, setClockStartedAt] = useState<number | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -186,11 +220,14 @@ export function SoloPage({
     return () => controller.abort();
   }, [displayName, game.elapsedMs, game.seed, game.status, leaderboard, presetId]);
 
-  const view = game.field === null
-    ? projectHiddenMinefield(game.config, game.progress)
-    : projectMinefield(game.field, game.progress, {
-        revealMines: game.status === "lost",
-      });
+  const view = useMemo(
+    () => game.field === null
+      ? projectHiddenMinefield(game.config, game.progress)
+      : projectMinefield(game.field, game.progress, {
+          revealMines: game.status === "lost",
+        }),
+    [game.config, game.field, game.progress, game.status],
+  );
   const boardMode =
     game.status === "ready" || game.status === "playing"
       ? "playing" as const
@@ -200,6 +237,7 @@ export function SoloPage({
   const restart = (nextPresetId = presetId) => {
     const seed = crypto.randomUUID();
     previousTickAt.current = null;
+    setClockStartedAt(null);
     setGame((current) =>
       applySoloAction(current, {
         type: "restart",
@@ -212,7 +250,8 @@ export function SoloPage({
 
   const handleBoardAction = (action: MinesweeperBoardAction) => {
     if (action.type === "select_start") return;
-    const now = performance.now();
+    const now = monotonicNow();
+    setClockStartedAt(now);
     setGame((current) => {
       const timed = previousTickAt.current === null
         ? current
@@ -266,7 +305,11 @@ export function SoloPage({
         </label>
         <div class="minesweeper-counter" aria-label="用时">
           <small>用时</small>
-          <strong>{formatElapsedTime(game.elapsedMs)}</strong>
+          <ElapsedTimeDisplay
+            elapsedMs={game.elapsedMs}
+            status={game.status}
+            runningSince={clockStartedAt}
+          />
         </div>
         <div class="minesweeper-counter" aria-label="旗帜数量">
           <small>旗帜</small>
@@ -285,7 +328,8 @@ export function SoloPage({
           type="button"
           disabled={game.status === "ready" || game.status === "won" || game.status === "lost"}
           onClick={() => {
-            const now = performance.now();
+            const now = monotonicNow();
+            setClockStartedAt(game.status === "paused" ? now : null);
             setGame((current) => {
               const timed = previousTickAt.current === null
                 ? current
