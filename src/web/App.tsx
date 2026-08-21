@@ -28,6 +28,7 @@ import {
   type RoomTransport,
 } from "./room-client";
 import { ProfileMenu } from "./ProfileMenu";
+import { ThemeToggle } from "./theme";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
@@ -527,11 +528,14 @@ function LandingPage({
           <span aria-hidden="true">·</span>
           <span>房间 {stats?.activeRooms ?? "—"} 个</span>
         </div>
-        <ProfileMenu
-          displayName={displayName}
-          initiallyOpen={displayNameNeedsPrompt}
-          onSave={onDisplayNameChange}
-        />
+        <div class="topbar-actions">
+          <ProfileMenu
+            displayName={displayName}
+            initiallyOpen={displayNameNeedsPrompt}
+            onSave={onDisplayNameChange}
+          />
+          <ThemeToggle />
+        </div>
       </nav>
       <section class="hero">
         <h1>想下哪一局？</h1>
@@ -746,7 +750,12 @@ function RoomPage({
   if (client.phase === "fatal") {
     return (
       <main class="room-page">
-        <nav class="topbar"><Brand /></nav>
+        <nav class="topbar">
+          <Brand />
+          <div class="topbar-actions">
+            <ThemeToggle />
+          </div>
+        </nav>
         <section class="fatal-card">
           <p class="eyebrow">房间不可用</p>
           <h1>{client.fatalCode === "room.full" ? "这里已经坐满了" : "没能进入这个房间"}</h1>
@@ -772,11 +781,14 @@ function RoomPage({
           <span aria-hidden="true" />
           {phaseText(client.phase, client.transport)}
         </span>
-        <ProfileMenu
-          displayName={displayName}
-          initiallyOpen={displayNameNeedsPrompt}
-          onSave={onDisplayNameChange}
-        />
+        <div class="topbar-actions">
+          <ProfileMenu
+            displayName={displayName}
+            initiallyOpen={displayNameNeedsPrompt}
+            onSave={onDisplayNameChange}
+          />
+          <ThemeToggle />
+        </div>
       </nav>
 
       <section class="game-layout">
@@ -934,7 +946,12 @@ function RoomPage({
 function NotFoundPage() {
   return (
     <main class="landing">
-      <nav class="topbar"><Brand /></nav>
+      <nav class="topbar">
+        <Brand />
+        <div class="topbar-actions">
+          <ThemeToggle />
+        </div>
+      </nav>
       <section class="fatal-card">
         <p class="eyebrow">404</p>
         <h1>这里没有棋盘</h1>
@@ -979,7 +996,12 @@ function LocalGamePageRoute({
   if (failed) {
     return (
       <main class="landing">
-        <nav class="topbar"><Brand /></nav>
+        <nav class="topbar">
+          <Brand />
+          <div class="topbar-actions">
+            <ThemeToggle />
+          </div>
+        </nav>
         <section class="fatal-card" role="alert">
           <p class="eyebrow">游戏不可用</p>
           <h1>暂时无法加载这个游戏</h1>
@@ -992,7 +1014,12 @@ function LocalGamePageRoute({
   if (Page === null) {
     return (
       <main class="landing">
-        <nav class="topbar"><Brand /></nav>
+        <nav class="topbar">
+          <Brand />
+          <div class="topbar-actions">
+            <ThemeToggle />
+          </div>
+        </nav>
         <section class="fatal-card" role="status" aria-live="polite">
           <p class="eyebrow">正在加载</p>
           <h1>正在准备游戏…</h1>

@@ -315,6 +315,6 @@ export const minesweeperRaceAdapters = [
   adapter(
     getMinesweeperRuleSetId("race", "large"),
     "双人扫雷竞速 · 大型",
-    "30×16 · 99 雷 · 可拖动大地图",
+    "30×16 · 99 雷 · 桌面完整显示",
   ),
 ] as const;

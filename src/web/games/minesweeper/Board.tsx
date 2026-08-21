@@ -273,12 +273,13 @@ export function MinesweeperBoard({
     <div class="minesweeper-board-shell">
       <div
         class="minesweeper-board-viewport"
-        aria-label="扫雷棋盘滚动区域"
+        aria-label="扫雷棋盘区域"
         tabIndex={mode === "disabled" ? 0 : -1}
       >
         <div
           ref={gridRef}
           class={`minesweeper-board mode-${mode}`}
+          data-columns={view.width}
           role="grid"
           aria-label="扫雷棋盘"
           aria-rowcount={view.height}

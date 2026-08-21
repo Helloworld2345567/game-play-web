@@ -22,6 +22,7 @@ import {
   recordMinesweeperWin,
 } from "./leaderboard-client";
 import { ProfileMenu } from "../../ProfileMenu";
+import { ThemeToggle } from "../../theme";
 
 const EMPTY_PENDING_CELLS: ReadonlySet<string> = new Set<string>();
 
@@ -268,11 +269,14 @@ export function SoloPage({
         <a class="secondary-button minesweeper-home-link" href="/">
           返回首页
         </a>
-        <ProfileMenu
-          displayName={displayName}
-          initiallyOpen={initiallyOpenProfile}
-          onSave={onDisplayNameChange}
-        />
+        <div class="topbar-actions">
+          <ProfileMenu
+            displayName={displayName}
+            initiallyOpen={initiallyOpenProfile}
+            onSave={onDisplayNameChange}
+          />
+          <ThemeToggle />
+        </div>
       </nav>
       <header class="minesweeper-solo-header">
         <div>
@@ -353,50 +357,54 @@ export function SoloPage({
         </button>
       </section>
 
-      <MinesweeperBoard
-        view={view}
-        mode={boardMode}
-        pendingCells={EMPTY_PENDING_CELLS}
-        onAction={handleBoardAction}
-      />
-      <p class="board-last-move">
-        桌面端左键揭开、右键插旗；手机点击揭开、长按插旗。点击已揭开的数字可快捷展开。
-      </p>
-      {recordNotice && (
-        <p class="minesweeper-record-notice" aria-live="polite">
-          {recordNotice}
-        </p>
-      )}
-      <section class="minesweeper-leaderboard" aria-label="扫雷排行榜">
-        <header>
-          <div>
-            <p class="eyebrow">休闲榜 · 当前难度</p>
-            <h2>{PRESET_LABELS[presetId]} · 前 10</h2>
-          </div>
-          <span>
-            {leaderboardStatus === "loading"
-              ? "正在加载…"
-              : leaderboardStatus === "offline"
-                ? "暂时无法连接排行榜"
-                : "按完成用时排序"}
-          </span>
-        </header>
-        {leaderboard !== null && leaderboard.top.length > 0 ? (
-          <ol>
-            {leaderboard.top.map((entry) => (
-              <li key={`${entry.rank}-${entry.displayName}-${entry.elapsedMs}`}>
-                <span class="leaderboard-rank">{entry.rank}</span>
-                <strong>{entry.displayName}</strong>
-                <time>{formatLeaderboardTime(entry.elapsedMs)}</time>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p class="leaderboard-empty">
-            {leaderboardStatus === "ready" ? "还没有完成纪录" : "—"}
+      <div class="minesweeper-solo-game-layout">
+        <div class="minesweeper-solo-board-column">
+          <MinesweeperBoard
+            view={view}
+            mode={boardMode}
+            pendingCells={EMPTY_PENDING_CELLS}
+            onAction={handleBoardAction}
+          />
+          <p class="board-last-move">
+            电脑端左键揭开、右键插旗；手机点击揭开、长按插旗。点击已揭开的数字可快捷展开。
           </p>
-        )}
-      </section>
+          {recordNotice && (
+            <p class="minesweeper-record-notice" aria-live="polite">
+              {recordNotice}
+            </p>
+          )}
+        </div>
+        <section class="minesweeper-leaderboard" aria-label="扫雷排行榜">
+          <header>
+            <div>
+              <p class="eyebrow">休闲榜 · 当前难度</p>
+              <h2>{PRESET_LABELS[presetId]} · 前 10</h2>
+            </div>
+            <span>
+              {leaderboardStatus === "loading"
+                ? "正在加载…"
+                : leaderboardStatus === "offline"
+                  ? "暂时无法连接排行榜"
+                  : "按完成用时排序"}
+            </span>
+          </header>
+          {leaderboard !== null && leaderboard.top.length > 0 ? (
+            <ol>
+              {leaderboard.top.map((entry) => (
+                <li key={`${entry.rank}-${entry.displayName}-${entry.elapsedMs}`}>
+                  <span class="leaderboard-rank">{entry.rank}</span>
+                  <strong>{entry.displayName}</strong>
+                  <time>{formatLeaderboardTime(entry.elapsedMs)}</time>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p class="leaderboard-empty">
+              {leaderboardStatus === "ready" ? "还没有完成纪录" : "—"}
+            </p>
+          )}
+        </section>
+      </div>
     </main>
   );
 }

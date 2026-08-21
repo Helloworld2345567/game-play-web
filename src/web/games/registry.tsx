@@ -478,7 +478,7 @@ export const minesweeperRaceAdapters = [
   createMinesweeperRaceAdapter(
     MINESWEEPER_RACE_RULE_SET_IDS[2],
     "双人扫雷竞速 · 大型",
-    "30×16 · 99 雷 · 可拖动大地图",
+    "30×16 · 99 雷 · 桌面完整显示",
   ),
 ] as const;
 
@@ -499,7 +499,7 @@ export const minesweeperDuelAdapters = [
     MINESWEEPER_DUEL_RULE_SET_IDS[2],
     "双人扫雷 · 大型",
     "双人扫雷 · 大型",
-    "30×16 · 99 雷 · 可拖动大地图",
+    "30×16 · 99 雷 · 桌面完整显示",
   ),
 ] as const;
 

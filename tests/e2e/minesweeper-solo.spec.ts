@@ -98,9 +98,107 @@ test("mobile long press flags and the large board stays inside its viewport", as
       isPrimary: true,
     });
     await expect(target).toHaveAttribute("data-flagged", "true");
+
+    const mobileLayout = await page.evaluate(() => {
+      const board = document.querySelector<HTMLElement>(
+        ".minesweeper-board-viewport",
+      );
+      const leaderboard = document.querySelector<HTMLElement>(
+        ".minesweeper-leaderboard",
+      );
+      if (board === null || leaderboard === null) {
+        throw new Error("Missing mobile minesweeper layout element");
+      }
+      return {
+        boardBottom: board.getBoundingClientRect().bottom,
+        leaderboardTop: leaderboard.getBoundingClientRect().top,
+      };
+    });
+    expect(mobileLayout.leaderboardTop).toBeGreaterThanOrEqual(
+      mobileLayout.boardBottom,
+    );
   } finally {
     await context.close();
   }
+});
+
+test("desktop large board fits without dragging and keeps the leaderboard to the right", async ({
+  page,
+}) => {
+  for (const width of [1024, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/minesweeper?preset=large");
+    await expect(board(page)).toHaveAttribute("aria-colcount", "30");
+    await expect(page.locator(".minesweeper-cell")).toHaveCount(480);
+
+    const metrics = await page.evaluate(() => {
+      const viewport = document.querySelector<HTMLElement>(
+        ".minesweeper-board-viewport",
+      );
+      const grid = document.querySelector<HTMLElement>(
+        ".minesweeper-board[aria-colcount='30']",
+      );
+      const leaderboard = document.querySelector<HTMLElement>(
+        ".minesweeper-leaderboard",
+      );
+      const lastCell = document.querySelector<HTMLElement>(
+        '[data-cell="29,15"]',
+      );
+      if (
+        viewport === null ||
+        grid === null ||
+        leaderboard === null ||
+        lastCell === null
+      ) {
+        throw new Error("Missing desktop minesweeper layout element");
+      }
+      const viewportBox = viewport.getBoundingClientRect();
+      const gridBox = grid.getBoundingClientRect();
+      const leaderboardBox = leaderboard.getBoundingClientRect();
+      const lastCellBox = lastCell.getBoundingClientRect();
+      return {
+        documentOverflow: document.documentElement.scrollWidth >
+          document.documentElement.clientWidth,
+        viewportOverflow: viewport.scrollWidth > viewport.clientWidth + 1,
+        lastCellInside: lastCellBox.right <= viewportBox.right + 1 &&
+          lastCellBox.bottom <= viewportBox.bottom + 1,
+        leaderboardLeft: leaderboardBox.left,
+        gridRight: gridBox.right,
+      };
+    });
+
+    expect(metrics.documentOverflow).toBe(false);
+    expect(metrics.viewportOverflow).toBe(false);
+    expect(metrics.lastCellInside).toBe(true);
+    expect(metrics.leaderboardLeft).toBeGreaterThan(metrics.gridRight);
+  }
+});
+
+test("switches between night and day mode from the upper-right control", async ({
+  page,
+}) => {
+  await page.goto("/minesweeper");
+  const themeToggle = page.getByRole("button", { name: "切换到白天模式" });
+  await expect(themeToggle).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const darkBackground = await page.locator("body").evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+
+  await themeToggle.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  const lightBackground = await page.locator("body").evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  expect(lightBackground).not.toBe(darkBackground);
+  await expect(
+    page.getByRole("button", { name: "切换到黑夜模式" }),
+  ).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("button", { name: "切换到黑夜模式" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
 test("opens a selected difficulty and shows personal and top-10 records", async ({

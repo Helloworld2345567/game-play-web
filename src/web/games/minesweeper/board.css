@@ -220,6 +220,18 @@
   letter-spacing: -0.045em;
 }
 
+.minesweeper-solo-game-layout {
+  display: grid;
+  min-width: 0;
+  align-items: start;
+  gap: 24px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 290px);
+}
+
+.minesweeper-solo-board-column {
+  min-width: 0;
+}
+
 .minesweeper-home-link {
   display: inline-flex;
   align-items: center;
@@ -300,8 +312,9 @@
 }
 
 .minesweeper-leaderboard {
-  max-width: 760px;
-  margin: 34px auto 0;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
   padding: clamp(18px, 4vw, 28px);
   border: 1px solid #3f3931;
   border-radius: 22px;
@@ -310,11 +323,46 @@
     rgba(33, 31, 27, 0.86);
 }
 
+/*
+ * Desktop boards use the available width instead of creating a horizontal
+ * drag target.  The intrinsic, touch-friendly board remains unchanged below
+ * the tablet breakpoint so narrow screens can still pan a large field.
+ */
+@media (min-width: 681px) {
+  .minesweeper-board-viewport {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+  }
+
+  .minesweeper-board[data-columns="30"] {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .minesweeper-board[data-columns="30"] .minesweeper-board-row {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .minesweeper-board[data-columns="30"] .minesweeper-cell {
+    flex: 0 1 var(--minesweeper-cell-size);
+    width: var(--minesweeper-cell-size);
+    height: auto;
+    min-width: 0;
+    aspect-ratio: 1;
+  }
+}
+
 .minesweeper-leaderboard > header {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 18px;
+}
+
+.minesweeper-leaderboard > header > div {
+  min-width: 0;
 }
 
 .minesweeper-leaderboard h2 {
@@ -551,6 +599,181 @@
     flex-basis: 100%;
     min-width: 100%;
   }
+}
+
+@media (max-width: 900px) {
+  .minesweeper-solo-game-layout {
+    display: block;
+  }
+
+  .minesweeper-leaderboard {
+    margin-top: 34px;
+  }
+}
+
+html[data-theme="light"] .minesweeper-board-viewport {
+  border-color: #d3cabe;
+  background:
+    radial-gradient(circle at 24% 8%, rgba(166, 101, 22, 0.09), transparent 38%),
+    #eee9e0;
+}
+
+html[data-theme="light"] .minesweeper-board {
+  background: #d9d1c5;
+}
+
+html[data-theme="light"] .minesweeper-cell {
+  border-color: #b9afa1;
+  color: #403a32;
+  background: #fffdf8;
+}
+
+html[data-theme="light"] .minesweeper-cell.is-hidden {
+  border-color: #f8f4ec #a99d8d #a99d8d #f8f4ec;
+  background: linear-gradient(145deg, #f5f0e7, #e5ddd0);
+}
+
+html[data-theme="light"] .minesweeper-board:not(.mode-disabled) .minesweeper-cell.is-hidden:not(:disabled):hover {
+  border-color: #c08a45 #9c702e #9c702e #c08a45;
+  background: linear-gradient(145deg, #fff8e9, #ece0c8);
+}
+
+html[data-theme="light"] .minesweeper-cell.is-revealed {
+  border-color: #d0c7ba;
+  background: #fffdf8;
+}
+
+html[data-theme="light"] .minesweeper-cell.is-revealed.by-seat-a {
+  background: linear-gradient(rgba(184, 125, 31, 0.12), rgba(184, 125, 31, 0.12)), #fffdf8;
+}
+
+html[data-theme="light"] .minesweeper-cell.is-revealed.by-seat-b {
+  background: linear-gradient(rgba(53, 117, 152, 0.12), rgba(53, 117, 152, 0.12)), #fffdf8;
+}
+
+html[data-theme="light"] .minesweeper-cell.is-mine {
+  border-color: #b34b43;
+  color: #fffaf5;
+  background: #c95a50;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-1 {
+  color: #326bb2;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-2 {
+  color: #2f8051;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-3 {
+  color: #b0443c;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-4 {
+  color: #6b4ca4;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-5 {
+  color: #a55531;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-6 {
+  color: #197a78;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-7 {
+  color: #4d463e;
+}
+
+html[data-theme="light"] .minesweeper-cell.has-8 {
+  color: #746b5f;
+}
+
+html[data-theme="light"] .minesweeper-flag {
+  color: #a66516;
+}
+
+html[data-theme="light"] .minesweeper-mine {
+  color: #fff7ee;
+  background: #5d5148;
+  box-shadow: 0 0 0 2px rgba(93, 81, 72, 0.28);
+}
+
+html[data-theme="light"] .minesweeper-cell.is-pending {
+  border-color: rgba(166, 101, 22, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(166, 101, 22, 0.22);
+}
+
+html[data-theme="light"] .minesweeper-pending-dot {
+  background: #a66516;
+  box-shadow: 0 0 0 2px rgba(255, 253, 248, 0.7);
+}
+
+html[data-theme="light"] .minesweeper-solo-controls,
+html[data-theme="light"] .minesweeper-duel-toolbar {
+  border-color: var(--theme-border-soft);
+  background: var(--theme-surface-soft);
+}
+
+html[data-theme="light"] .minesweeper-solo-controls select,
+html[data-theme="light"] .minesweeper-counter,
+html[data-theme="light"] .minesweeper-duel-scores span {
+  border-color: var(--theme-border);
+  color: var(--theme-text);
+  background: var(--theme-surface);
+}
+
+html[data-theme="light"] .minesweeper-duel-toolbar p,
+html[data-theme="light"] .minesweeper-race-progress strong {
+  color: var(--theme-muted);
+}
+
+html[data-theme="light"] .minesweeper-duel-scores strong {
+  color: var(--theme-text);
+}
+
+html[data-theme="light"] .minesweeper-solo-controls label,
+html[data-theme="light"] .minesweeper-counter small,
+html[data-theme="light"] .minesweeper-solo-status,
+html[data-theme="light"] .minesweeper-leaderboard > header > span,
+html[data-theme="light"] .leaderboard-empty,
+html[data-theme="light"] .race-progress-row small,
+html[data-theme="light"] .race-progress-row b {
+  color: var(--theme-muted);
+}
+
+html[data-theme="light"] .minesweeper-counter strong,
+html[data-theme="light"] .minesweeper-leaderboard li strong,
+html[data-theme="light"] .minesweeper-leaderboard time,
+html[data-theme="light"] .race-progress-row b {
+  color: var(--theme-text);
+}
+
+html[data-theme="light"] .minesweeper-record-notice,
+html[data-theme="light"] .leaderboard-rank,
+html[data-theme="light"] .race-progress-row.is-self strong,
+html[data-theme="light"] .race-winning-time {
+  color: var(--theme-accent);
+}
+
+html[data-theme="light"] .minesweeper-leaderboard {
+  border-color: #d3cabe;
+  background:
+    linear-gradient(145deg, rgba(166, 101, 22, 0.07), transparent 45%),
+    rgba(255, 253, 249, 0.92);
+}
+
+html[data-theme="light"] .minesweeper-leaderboard li,
+html[data-theme="light"] .leaderboard-empty {
+  border-color: rgba(208, 200, 188, 0.76);
+}
+
+html[data-theme="light"] .race-progress-row progress {
+  background: #e2ddd4;
+}
+
+html[data-theme="light"] .race-progress-row progress::-webkit-progress-bar {
+  background: #e2ddd4;
 }
 
 @media (prefers-reduced-motion: reduce) {
