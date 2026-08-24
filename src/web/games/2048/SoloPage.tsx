@@ -27,6 +27,35 @@ interface PointerStart {
   readonly y: number;
 }
 
+interface FailedGame2048Submission {
+  readonly id: string;
+  readonly score: number;
+}
+
+export function higherGame2048PersonalBest(
+  current: number | null,
+  incoming: number | null,
+): number | null {
+  if (current === null) return incoming;
+  if (incoming === null) return current;
+  return Math.max(current, incoming);
+}
+
+export function preferHigherGame2048Snapshot(
+  current: Game2048LeaderboardSnapshot | null,
+  incoming: Game2048LeaderboardSnapshot,
+): Game2048LeaderboardSnapshot {
+  const incomingBest = incoming.personalBestScore;
+  if (
+    current !== null &&
+    current.personalBestScore !== null &&
+    (incomingBest === null || incomingBest < current.personalBestScore)
+  ) {
+    return current;
+  }
+  return incoming;
+}
+
 const DIRECTION_BUTTONS: ReadonlyArray<{
   direction: Game2048Direction;
   label: string;
@@ -59,8 +88,10 @@ export function isNewGame2048PersonalBest(
   previousBestScore: number | null,
   completedScore: number,
   confirmedBestScore: number | null,
+  previousBestKnown: boolean,
 ): boolean {
-  return confirmedBestScore === completedScore &&
+  return previousBestKnown &&
+    confirmedBestScore === completedScore &&
     (previousBestScore === null || completedScore > previousBestScore);
 }
 
@@ -94,9 +125,24 @@ export function SoloPage({
   const [leaderboardStatus, setLeaderboardStatus] =
     useState<"loading" | "ready" | "offline">("loading");
   const [recordNotice, setRecordNotice] = useState<string | null>(null);
+  const [failedSubmission, setFailedSubmission] =
+    useState<FailedGame2048Submission | null>(null);
   const leaderboardRequest = useRef(0);
+  const submissionAttempt = useRef(0);
+  const visibleSubmissionAttempt = useRef<number | null>(null);
+  const confirmedBestKnown = useRef(false);
+  const confirmedBestScore = useRef<number | null>(null);
   const submittedGames = useRef(new Set<string>());
+  const submittingGames = useRef(new Set<string>());
   const pointerStart = useRef<PointerStart | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -105,68 +151,116 @@ export function SoloPage({
     void loadGame2048Leaderboard(displayName, controller.signal).then(
       (snapshot) => {
         if (leaderboardRequest.current !== requestId) return;
-        setLeaderboard(snapshot);
+        const effectiveBest = higherGame2048PersonalBest(
+          confirmedBestScore.current,
+          snapshot.personalBestScore,
+        );
+        confirmedBestKnown.current = true;
+        confirmedBestScore.current = effectiveBest;
+        setLeaderboard((current) =>
+          preferHigherGame2048Snapshot(current, snapshot)
+        );
         setLeaderboardStatus("ready");
       },
       () => {
         if (controller.signal.aborted || leaderboardRequest.current !== requestId) {
           return;
         }
-        setLeaderboard(null);
         setLeaderboardStatus("offline");
       },
     );
     return () => controller.abort();
   }, [displayName]);
 
-  useEffect(() => {
-    const game = activeGame.state;
+  const submitScore = useCallback((gameId: string, score: number) => {
     if (
-      game.status !== "over" ||
-      game.score <= 0 ||
-      submittedGames.current.has(activeGame.id)
+      submittedGames.current.has(gameId) ||
+      submittingGames.current.has(gameId)
     ) {
       return;
     }
-    submittedGames.current.add(activeGame.id);
-    const controller = new AbortController();
-    const requestId = ++leaderboardRequest.current;
-    const previousBest = leaderboard?.personalBestScore ?? null;
-    setRecordNotice("正在保存本局分数…");
-    void recordGame2048Score(
-      displayName,
-      game.score,
-      controller.signal,
-    ).then(
+    submittedGames.current.add(gameId);
+    submittingGames.current.add(gameId);
+    const attemptId = ++submissionAttempt.current;
+    visibleSubmissionAttempt.current = attemptId;
+    const previousBestKnown = confirmedBestKnown.current;
+    const previousBest = confirmedBestScore.current;
+    setFailedSubmission((current) => current?.id === gameId ? null : current);
+    setRecordNotice("正在保存分数…");
+    void recordGame2048Score(displayName, score).then(
       (snapshot) => {
-        if (leaderboardRequest.current !== requestId) return;
-        setLeaderboard(snapshot);
-        setLeaderboardStatus("ready");
-        setRecordNotice(
-          isNewGame2048PersonalBest(
-              previousBest,
-              game.score,
-              snapshot.personalBestScore,
-            )
-            ? "新的个人最高分！"
-            : "本局分数已记录",
+        submittingGames.current.delete(gameId);
+        if (!mounted.current) return;
+        // A completed write is authoritative for this score. Invalidate any
+        // older read and never let an out-of-order lower snapshot roll the
+        // confirmed personal best back.
+        leaderboardRequest.current += 1;
+        const effectiveBest = higherGame2048PersonalBest(
+          confirmedBestScore.current,
+          snapshot.personalBestScore,
         );
+        confirmedBestKnown.current = true;
+        confirmedBestScore.current = effectiveBest;
+        setFailedSubmission((current) =>
+          current !== null &&
+            current.score <= (effectiveBest ?? 0)
+            ? null
+            : current
+        );
+        setLeaderboard((current) =>
+          preferHigherGame2048Snapshot(current, snapshot)
+        );
+        setLeaderboardStatus("ready");
+        if (visibleSubmissionAttempt.current === attemptId) {
+          setRecordNotice(
+            isNewGame2048PersonalBest(
+                previousBest,
+                score,
+                effectiveBest,
+                previousBestKnown,
+              )
+              ? "新的个人最高分！"
+              : "分数已记录",
+          );
+        }
       },
       () => {
-        if (controller.signal.aborted || leaderboardRequest.current !== requestId) {
-          return;
+        submittingGames.current.delete(gameId);
+        if (!mounted.current) return;
+        setFailedSubmission((current) => {
+          if (
+            confirmedBestScore.current !== null &&
+            confirmedBestScore.current >= score
+          ) {
+            return current;
+          }
+          // The server stores only max(score), so the highest unsynced valid
+          // score subsumes every lower failed attempt.
+          return current === null || score > current.score
+            ? { id: gameId, score }
+            : current;
+        });
+        if (visibleSubmissionAttempt.current === attemptId) {
+          setRecordNotice("分数暂未同步，可重试");
         }
-        setLeaderboardStatus("offline");
-        setRecordNotice("本局已结束，分数暂未同步");
       },
     );
-    return () => controller.abort();
-  }, [activeGame, displayName, leaderboard]);
+  }, [displayName]);
+
+  useEffect(() => {
+    const game = activeGame.state;
+    if (game.status === "over" && game.score > 0) {
+      submitScore(activeGame.id, game.score);
+    }
+  }, [activeGame, submitScore]);
 
   const move = useCallback((direction: Game2048Direction) => {
     setActiveGame((current) => {
       const result = moveGame2048(current.state, direction, secureRandom);
-      if (result.moved) setRecordNotice(null);
+      if (result.moved) {
+        visibleSubmissionAttempt.current = null;
+        setRecordNotice(null);
+      }
       return result.state === current.state
         ? current
         : { ...current, state: result.state };
@@ -195,6 +289,7 @@ export function SoloPage({
 
   const restart = () => {
     pointerStart.current = null;
+    visibleSubmissionAttempt.current = null;
     setActiveGame(newActiveGame2048());
     setRecordNotice(null);
   };
@@ -342,6 +437,19 @@ export function SoloPage({
             <p class="game-2048-record-notice" aria-live="polite">
               {recordNotice}
             </p>
+          )}
+          {failedSubmission && (
+            <button
+              class="secondary-button game-2048-record-retry"
+              type="button"
+              onClick={() => {
+                if (submittingGames.current.has(failedSubmission.id)) return;
+                submittedGames.current.delete(failedSubmission.id);
+                submitScore(failedSubmission.id, failedSubmission.score);
+              }}
+            >
+              重试保存 {formatGame2048Score(failedSubmission.score)} 分
+            </button>
           )}
         </section>
 

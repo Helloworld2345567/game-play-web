@@ -222,6 +222,12 @@
   font-weight: 700;
 }
 
+.game-2048-record-retry {
+  display: block;
+  min-height: 42px;
+  margin: 10px auto 0;
+}
+
 .game-2048-leaderboard {
   min-width: 0;
   padding: clamp(18px, 4vw, 28px);

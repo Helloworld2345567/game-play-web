@@ -14,10 +14,10 @@ describe("game manifest", () => {
       description: "4×4 · 单人合并 · 最高分榜",
       creationPolicy: "enabled",
       launchKind: "local-game",
-      ruleSetIds: [],
+      ruleSetIds: ["2048.solo.4x4.v1"],
       creatableRuleSetIds: [],
     });
-    expect(isManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(false);
+    expect(isManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(true);
     expect(isCreatableManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(false);
   });
 

@@ -106,7 +106,7 @@ export const GAME_MANIFESTS = [
     description: "4×4 · 单人合并 · 最高分榜",
     creationPolicy: "enabled",
     launchKind: "local-game",
-    ruleSetIds: [],
+    ruleSetIds: ["2048.solo.4x4.v1"],
     creatableRuleSetIds: [],
   },
 ] as const satisfies readonly GameManifest[];
