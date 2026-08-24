@@ -105,6 +105,11 @@ const RENDERER_LOADERS = {
     gameId: "chase",
     load: () => import("./chase/Board").then(({ ChaseBoard }) => ChaseBoard),
   },
+  "tiaojiaqi.five-flower-diamond.v1": {
+    gameId: "tiaojiaqi",
+    load: () =>
+      import("./tiaojiaqi/Board").then(({ TiaojiaqiBoard }) => TiaojiaqiBoard),
+  },
 } as const satisfies Readonly<Record<string, RendererRegistration>>;
 
 /* Page imports are allowlisted independently from room renderers. */

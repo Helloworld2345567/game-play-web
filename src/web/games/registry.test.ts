@@ -59,6 +59,47 @@ function chasePosition(
   };
 }
 
+function tiaojiaqiAction(
+  payload: GameActionCommand["payload"],
+): GameActionCommand {
+  return {
+    v: 1,
+    type: "game_action",
+    gameType: "tiaojiaqi",
+    ruleSetId: "tiaojiaqi.five-flower-diamond.v1",
+    expectedRevision: 4,
+    payload,
+  };
+}
+
+function tiaojiaqiPosition(
+  overrides: Record<string, unknown> = {},
+): RulePosition {
+  return {
+    data: {
+      board: {
+        "0,0": 2,
+        "1,0": 2,
+        "2,0": 2,
+        "3,0": 2,
+        "4,0": 2,
+        "0,4": 1,
+        "1,4": 1,
+        "2,4": 1,
+        "3,4": 1,
+        "4,4": 1,
+      },
+      blackSeat: "seat-a",
+      whiteSeat: "seat-b",
+      moveCount: 0,
+      lastMove: null,
+      ...overrides,
+    },
+    turn: "seat-a",
+    outcome: null,
+  };
+}
+
 describe("game outcome presentation", () => {
   it("allowlists the local 2048 page without a room renderer", async () => {
     const loader = getClientGamePageLoader("2048");
@@ -91,6 +132,12 @@ describe("game outcome presentation", () => {
         getClientGameRendererLoader("chase", ruleSetId),
       ).toBeTypeOf("function");
     }
+    expect(
+      getClientGameRendererLoader(
+        "tiaojiaqi",
+        "tiaojiaqi.five-flower-diamond.v1",
+      ),
+    ).toBeTypeOf("function");
     expect(
       getClientGameRendererLoader("gomoku", "chase.easy.v1"),
     ).toBeNull();
@@ -134,6 +181,23 @@ describe("game outcome presentation", () => {
         displayName: expect.stringContaining("警察抓小偷"),
       });
     }
+  });
+
+  it("registers the five-stone 挑夹棋 renderer and adapter", () => {
+    expect(
+      getGameAdapter("tiaojiaqi", "tiaojiaqi.five-flower-diamond.v1"),
+    ).toMatchObject({
+      gameType: "tiaojiaqi",
+      ruleSetId: "tiaojiaqi.five-flower-diamond.v1",
+      displayName: "挑夹棋",
+    });
+  });
+
+  it("translates the apex guard error for 挑夹棋 players", () => {
+    expect(
+      getGameAdapter("tiaojiaqi", "tiaojiaqi.five-flower-diamond.v1")
+        ?.getErrorMessage("tiaojiaqi.last_piece_must_reach_apex"),
+    ).toBe("最后一子必须困在菱形最右尖端。");
   });
 
   it("exposes opening role choices for turn-based games only", () => {
@@ -200,6 +264,23 @@ describe("game outcome presentation", () => {
       },
     ]);
     expect(
+      getGameAdapter("tiaojiaqi", "tiaojiaqi.five-flower-diamond.v1")
+        ?.openingChoices,
+    ).toEqual([
+      {
+        roleId: "black",
+        label: "黑方",
+        orderLabel: "先手",
+        swatchClassName: "tiaojiaqi-black",
+      },
+      {
+        roleId: "white",
+        label: "白方",
+        orderLabel: "后手",
+        swatchClassName: "tiaojiaqi-white",
+      },
+    ]);
+    expect(
       getGameAdapter("minesweeper", "minesweeper.duel.9x9x10.v1")
         ?.openingChoices,
     ).toBeUndefined();
@@ -246,6 +327,63 @@ describe("game outcome presentation", () => {
         chaseAction({ type: "move", to: "V2" }),
       ]),
     ).toEqual(new Set(["move:V1", "move:V2"]));
+  });
+
+  it("projects 挑夹棋 moves into destination pending keys", () => {
+    const adapter = getGameAdapter(
+      "tiaojiaqi",
+      "tiaojiaqi.five-flower-diamond.v1",
+    );
+    expect(
+      projectPendingCells(adapter, [
+        tiaojiaqiAction({ type: "move", from: "0,4", to: "0,3" }),
+        tiaojiaqiAction({
+          type: "move",
+          from: "1,4",
+          to: "1,3",
+          captureId: "pick:1,2",
+        }),
+      ]),
+    ).toEqual(new Set(["move:0,3", "move:1,3"]));
+  });
+
+  it("uses the position role assignment for 挑夹棋 seat swatches", () => {
+    const adapter = getGameAdapter(
+      "tiaojiaqi",
+      "tiaojiaqi.five-flower-diamond.v1",
+    );
+    expect(adapter?.getSeatPresentations(tiaojiaqiPosition())).toEqual({
+      "seat-a": { label: "黑方", swatchClassName: "tiaojiaqi-black" },
+      "seat-b": { label: "白方", swatchClassName: "tiaojiaqi-white" },
+    });
+    expect(
+      adapter?.getSeatPresentations(
+        tiaojiaqiPosition({ blackSeat: "seat-b", whiteSeat: "seat-a" }),
+      ),
+    ).toEqual({
+      "seat-a": { label: "白方", swatchClassName: "tiaojiaqi-white" },
+      "seat-b": { label: "黑方", swatchClassName: "tiaojiaqi-black" },
+    });
+  });
+
+  it("describes 挑夹棋 conversion and immobilization outcomes", () => {
+    const adapter = getGameAdapter(
+      "tiaojiaqi",
+      "tiaojiaqi.five-flower-diamond.v1",
+    );
+    const outcome = {
+      kind: "win" as const,
+      winner: "seat-a",
+      reason: "all_pieces_converted",
+    };
+    expect(adapter?.getOutcomeMessage?.(outcome, {
+      selfSeat: "seat-a",
+      winnerDisplayName: "黑方棋友",
+    })).toBe("对手棋子全部转化 · 你赢了");
+    expect(adapter?.getOutcomeMessage?.(outcome, {
+      selfSeat: null,
+      winnerDisplayName: "黑方棋友",
+    })).toBe("黑方棋友（对手棋子全部转化）");
   });
 
   it("describes chase outcomes for players and spectators", () => {

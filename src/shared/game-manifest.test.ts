@@ -7,6 +7,30 @@ import {
 } from "./game-manifest";
 
 describe("game manifest", () => {
+  it("exposes the five-flower diamond Tiaojiaqi room rules", () => {
+    expect(getGameManifest("tiaojiaqi")).toMatchObject({
+      gameId: "tiaojiaqi",
+      title: "挑夹棋",
+      creationPolicy: "enabled",
+      launchKind: "turn-room",
+      ruleSetIds: ["tiaojiaqi.five-flower-diamond.v1"],
+      creatableRuleSetIds: ["tiaojiaqi.five-flower-diamond.v1"],
+    });
+    expect(
+      isManifestRuleSet(
+        "tiaojiaqi",
+        "tiaojiaqi.five-flower-diamond.v1",
+      ),
+    ).toBe(true);
+    expect(
+      isCreatableManifestRuleSet(
+        "tiaojiaqi",
+        "tiaojiaqi.five-flower-diamond.v1",
+      ),
+    ).toBe(true);
+    expect(isManifestRuleSet("tiaojiaqi", "tiaojiaqi.unknown.v1")).toBe(false);
+  });
+
   it("exposes 2048 only as a fixed local 4×4 game", () => {
     expect(getGameManifest("2048")).toMatchObject({
       gameId: "2048",

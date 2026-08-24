@@ -1,6 +1,6 @@
 # Decision map: ym0v0 极简棋类平台
 
-状态：2026-08-20 已按“全站同时最多 10 个未废弃房间”的容量重新收敛，并纳入井字棋、单人扫雷与双人同时扫雷。当前统一语言以 [`CONTEXT.md`](../CONTEXT.md) 为准；实现细节见 [GOMOKU_PLATFORM_PLAN.md](./GOMOKU_PLATFORM_PLAN.md)，GitHub 证据见 [research/GITHUB_SURVEY.md](./research/GITHUB_SURVEY.md)。
+状态：2026-08-24 已按“全站同时最多 10 个未废弃房间”的容量重新收敛，并纳入井字棋、挑夹棋、单人扫雷与双人同时扫雷。当前统一语言以 [`CONTEXT.md`](../CONTEXT.md) 为准；实现细节见 [GOMOKU_PLATFORM_PLAN.md](./GOMOKU_PLATFORM_PLAN.md)，GitHub 证据见 [research/GITHUB_SURVEY.md](./research/GITHUB_SURVEY.md)。
 
 ## #1：复用完整平台还是基于 Cloudflare 原语自建？
 
@@ -8,7 +8,7 @@
 
 ## #2：首版到底交付什么？
 
-**结论**：交付可自定义昵称的游客邀请房、15×15 自由五子棋、休闲中国象棋、井字棋、单人扫雷、双人同时扫雷、前两人对战与后续游客只读观战、权威裁决、认输/复赛、刷新和断线重连、移动端棋盘。没有账号、匹配、排位、棋钟、聊天、AI 和永久历史。
+**结论**：交付可自定义昵称的游客邀请房、15×15 自由五子棋、休闲中国象棋、井字棋、挑夹棋、单人扫雷、双人同时扫雷、前两人对战与后续游客只读观战、权威裁决、认输/复赛、刷新和断线重连、移动端棋盘。没有账号、匹配、排位、棋钟、聊天、AI 和永久历史。
 
 ## #3：实时状态放在哪里？
 
@@ -20,11 +20,11 @@
 
 ## #5：如何持续增加棋类？
 
-**结论**：保留一个深而窄的 `GameRules` 模块，由确定性的 `create`、`apply`、按观看者生成公开局面的 `project`，以及显式 `actionConsistency` 组成。时间与随机种子只能由平台通过 `RuleContext` 注入。平台把棋种状态和 action payload 当作不透明 JSON；前端每个棋种有独立 renderer。中国象棋、井字棋和扫雷已验证这条扩展缝；以后仍不设计万能棋盘。
+**结论**：保留一个深而窄的 `GameRules` 模块，由确定性的 `create`、`apply`、按观看者生成公开局面的 `project`，以及显式 `actionConsistency` 组成。时间与随机种子只能由平台通过 `RuleContext` 注入。平台把棋种状态和 action payload 当作不透明 JSON；前端每个棋种有独立 renderer。中国象棋、井字棋、挑夹棋和扫雷已验证这条扩展缝；以后仍不设计万能棋盘。
 
 ## #6：前端怎样兼顾小、快和易用？
 
-**结论**：Preact + Vite + 共享 `GameManifest` 和客户端静态 allowlist `GameCatalog`，按入口动态加载每棋种页面/renderer。交叉点棋盘继续使用 Canvas 2D；井字棋和扫雷使用可访问的 DOM Grid。首屏 JS gzip 目标小于 100 KB；严格棋类由服务端确认后落为实子，双人扫雷逐格显示 pending；断线时保留局面并自动恢复。
+**结论**：Preact + Vite + 共享 `GameManifest` 和客户端静态 allowlist `GameCatalog`，按入口动态加载每棋种页面/renderer。规则网格使用 Canvas 2D，挑夹棋这类不规则图使用 SVG 线段配合可访问的 DOM 节点，井字棋和扫雷使用可访问的 DOM Grid。首屏 JS gzip 目标小于 100 KB；严格棋类由服务端确认后落为实子，双人扫雷逐格显示 pending；断线时保留局面并自动恢复。
 
 ## #7：怎样部署到 ym0v0.com？
 

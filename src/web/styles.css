@@ -1880,3 +1880,378 @@ html[data-theme="light"] .rematch-mode-panel {
 html[data-theme="light"] .rematch-mode-option {
   background: #fffaf2;
 }
+
+/* 挑夹棋 */
+.tiaojiaqi-board-shell {
+  position: relative;
+  aspect-ratio: 3 / 2;
+  overflow: hidden;
+  border-color: rgba(239, 180, 91, 0.24);
+  background:
+    radial-gradient(circle at 36% 25%, rgba(239, 180, 91, 0.13), transparent 48%),
+    #211e1a;
+  line-height: normal;
+}
+
+.tiaojiaqi-board {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tiaojiaqi-board-edges,
+.tiaojiaqi-node-layer {
+  position: absolute;
+  inset: 7% 4.5%;
+  width: 91%;
+  height: 86%;
+}
+
+.tiaojiaqi-board-edges {
+  overflow: visible;
+  pointer-events: none;
+}
+
+.tiaojiaqi-board-edges line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--theme-accent) 68%, var(--theme-border));
+  stroke-linecap: round;
+  stroke-width: 1.35px;
+  vector-effect: non-scaling-stroke;
+}
+
+.tiaojiaqi-node-layer {
+  pointer-events: none;
+}
+
+.tiaojiaqi-node {
+  position: absolute;
+  display: grid;
+  width: clamp(34px, 8.5%, 58px);
+  aspect-ratio: 1;
+  min-height: 34px;
+  padding: 0;
+  place-items: center;
+  border: 2px solid rgba(151, 136, 116, 0.68);
+  border-radius: 50%;
+  color: var(--theme-text);
+  background: rgba(41, 38, 32, 0.94);
+  cursor: default;
+  line-height: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.tiaojiaqi-node:disabled {
+  opacity: 1;
+}
+
+.tiaojiaqi-node-stone {
+  display: grid;
+  width: 72%;
+  height: 72%;
+  place-items: center;
+  border-radius: 50%;
+  color: transparent;
+  font-family: ui-rounded, "Arial Rounded MT Bold", system-ui, sans-serif;
+  font-size: clamp(1.2rem, 4vw, 2rem);
+  line-height: 1;
+}
+
+.tiaojiaqi-node-stone-0 {
+  border-color: rgba(151, 136, 116, 0.82);
+  background: rgba(23, 21, 18, 0.72);
+}
+
+.tiaojiaqi-node-stone-0 .tiaojiaqi-node-stone {
+  width: 30%;
+  height: 30%;
+  border: 1px solid rgba(220, 204, 180, 0.62);
+  background: rgba(220, 204, 180, 0.52);
+}
+
+.tiaojiaqi-node-stone-1 {
+  border-color: #d18a4b;
+  background: rgba(78, 48, 26, 0.86);
+}
+
+.tiaojiaqi-node-stone-1 .tiaojiaqi-node-stone {
+  color: #19130e;
+  border: 1px solid #050403;
+  background: radial-gradient(circle at 35% 28%, #66605a, #0a0908 72%);
+  box-shadow: inset -2px -3px 4px rgba(0, 0, 0, 0.4);
+}
+
+.tiaojiaqi-node-stone-2 {
+  border-color: #aaa293;
+  background: rgba(79, 72, 62, 0.82);
+}
+
+.tiaojiaqi-node-stone-2 .tiaojiaqi-node-stone {
+  color: #fdf8ed;
+  border: 1px solid #817a70;
+  background: radial-gradient(circle at 34% 25%, #fffef9, #d8d1c4 72%);
+  box-shadow: inset -2px -3px 4px rgba(87, 77, 63, 0.22);
+}
+
+.stone-swatch.tiaojiaqi-black {
+  border: 1px solid #050403;
+  background: radial-gradient(circle at 35% 28%, #66605a, #0a0908 72%);
+}
+
+.stone-swatch.tiaojiaqi-white {
+  border: 1px solid #817a70;
+  background: radial-gradient(circle at 34% 25%, #fffef9, #d8d1c4 72%);
+}
+
+.tiaojiaqi-node.is-own {
+  cursor: pointer;
+}
+
+.tiaojiaqi-node.is-own:hover:not(:disabled),
+.tiaojiaqi-node.is-selected {
+  border-color: var(--theme-accent);
+  box-shadow: 0 0 0 5px rgba(239, 180, 91, 0.14);
+  transform: translate(-50%, -50%) scale(1.07);
+}
+
+.tiaojiaqi-node.is-legal {
+  border-color: color-mix(in srgb, var(--theme-accent) 82%, #fff);
+  cursor: pointer;
+  background: color-mix(in srgb, var(--theme-accent) 14%, var(--theme-surface));
+  box-shadow: 0 0 0 4px rgba(239, 180, 91, 0.1);
+}
+
+.tiaojiaqi-node.is-legal:hover:not(:disabled),
+.tiaojiaqi-node.is-destination {
+  background: color-mix(in srgb, var(--theme-accent) 27%, var(--theme-surface));
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.tiaojiaqi-node.is-last-from,
+.tiaojiaqi-node.is-last-to {
+  z-index: 1;
+}
+
+.tiaojiaqi-node.is-last-from {
+  border-style: dashed;
+}
+
+.tiaojiaqi-node.is-last-to {
+  border-color: #75c58d;
+  box-shadow: 0 0 0 4px rgba(117, 197, 141, 0.18);
+}
+
+.tiaojiaqi-node.is-converted::after {
+  position: absolute;
+  right: -0.25em;
+  bottom: -0.28em;
+  display: grid;
+  width: 1.1em;
+  height: 1.1em;
+  place-items: center;
+  border: 1px solid #75c58d;
+  border-radius: 50%;
+  color: #16241a;
+  background: #a9dfb7;
+  content: "↻";
+  font-size: clamp(0.65rem, 2vw, 0.82rem);
+  font-weight: 850;
+  line-height: 1;
+}
+
+.tiaojiaqi-node.is-pending {
+  border-style: dashed;
+  cursor: wait;
+}
+
+.tiaojiaqi-node:focus-visible {
+  z-index: 3;
+  outline: 3px solid var(--theme-accent);
+  outline-offset: 4px;
+}
+
+.tiaojiaqi-board-info {
+  display: grid;
+  width: min(100%, 620px);
+  gap: 8px;
+  margin: 14px auto 0;
+}
+
+.tiaojiaqi-board-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  color: var(--theme-muted);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.tiaojiaqi-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tiaojiaqi-legend-stone {
+  display: grid;
+  width: 1.65em;
+  height: 1.65em;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.tiaojiaqi-legend-black {
+  color: #f3efe6;
+  background: #161311;
+}
+
+.tiaojiaqi-legend-white {
+  color: #817a70;
+  background: #f4efe5;
+}
+
+.tiaojiaqi-board-status,
+.tiaojiaqi-board-note,
+.tiaojiaqi-last-move {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.tiaojiaqi-board-status {
+  color: var(--theme-text);
+  font-weight: 700;
+}
+
+.tiaojiaqi-board-note {
+  color: var(--theme-subtle);
+  font-size: 0.78rem;
+}
+
+.tiaojiaqi-capture-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+  padding: clamp(16px, 3vw, 22px);
+  border: 1px solid rgba(239, 180, 91, 0.55);
+  border-radius: 20px;
+  background: var(--theme-surface-soft);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.18);
+}
+
+.tiaojiaqi-capture-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.tiaojiaqi-capture-heading .eyebrow {
+  margin-bottom: 5px;
+}
+
+.tiaojiaqi-capture-heading h2 {
+  margin: 0;
+  font-size: clamp(1.2rem, 5vw, 1.55rem);
+  line-height: 1.1;
+}
+
+.tiaojiaqi-capture-note {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.tiaojiaqi-capture-options {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.tiaojiaqi-capture-option {
+  display: grid;
+  min-height: 72px;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 15px;
+  color: var(--theme-text);
+  background: var(--theme-surface);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.tiaojiaqi-capture-option:hover:not(:disabled) {
+  border-color: var(--theme-accent);
+  background: color-mix(in srgb, var(--theme-accent) 10%, var(--theme-surface));
+  transform: translateY(-1px);
+}
+
+.tiaojiaqi-capture-option strong {
+  color: var(--theme-accent);
+}
+
+.tiaojiaqi-capture-option span {
+  color: var(--theme-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.tiaojiaqi-capture-cancel {
+  justify-self: start;
+}
+
+html[data-theme="light"] .tiaojiaqi-board-shell {
+  border-color: var(--theme-border);
+  background:
+    radial-gradient(circle at 36% 25%, rgba(166, 101, 22, 0.1), transparent 48%),
+    #fffaf2;
+}
+
+html[data-theme="light"] .tiaojiaqi-board {
+  background: rgba(255, 253, 249, 0.44);
+}
+
+html[data-theme="light"] .tiaojiaqi-board-edges line {
+  stroke: color-mix(in srgb, var(--theme-accent) 64%, var(--theme-border));
+}
+
+html[data-theme="light"] .tiaojiaqi-node {
+  color: var(--theme-text);
+  background: rgba(255, 250, 242, 0.95);
+}
+
+@media (max-width: 460px) {
+  .tiaojiaqi-board-shell {
+    border-radius: 18px;
+  }
+
+  .tiaojiaqi-node {
+    width: clamp(30px, 9.5%, 48px);
+    min-height: 30px;
+    border-width: 1.5px;
+  }
+
+  .tiaojiaqi-board-status,
+  .tiaojiaqi-board-note,
+  .tiaojiaqi-last-move {
+    font-size: 0.78rem;
+  }
+}

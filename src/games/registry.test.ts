@@ -8,6 +8,21 @@ import {
 } from "./registry";
 
 describe("game rules registry", () => {
+  it("registers and allows creation of five-flower diamond Tiaojiaqi", () => {
+    const ruleSetId = "tiaojiaqi.five-flower-diamond.v1";
+
+    expect(isSupportedGame("tiaojiaqi", ruleSetId)).toBe(true);
+    expect(isCreatableRuleSet("tiaojiaqi", ruleSetId)).toBe(true);
+    expect(getGameRules(ruleSetId)?.definition).toEqual({
+      gameType: "tiaojiaqi",
+      ruleSetId,
+      actionConsistency: "strict_revision",
+      openingRoleIds: ["black", "white"],
+    });
+    expect(isSupportedGame("gomoku", ruleSetId)).toBe(false);
+    expect(getRematchRuleSetIds(ruleSetId)).toEqual([ruleSetId]);
+  });
+
   it("registers every standard minesweeper duel preset", () => {
     for (const ruleSetId of [
       "minesweeper.duel.9x9x10.v1",

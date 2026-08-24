@@ -61,6 +61,15 @@ export const GAME_MANIFESTS = [
     creatableRuleSetIds: ["tictactoe.classic3.v1"],
   },
   {
+    gameId: "tiaojiaqi",
+    title: "挑夹棋",
+    description: "五花加十字菱形 · 每方五子 · 夹换/挑换",
+    creationPolicy: "enabled",
+    launchKind: "turn-room",
+    ruleSetIds: ["tiaojiaqi.five-flower-diamond.v1"],
+    creatableRuleSetIds: ["tiaojiaqi.five-flower-diamond.v1"],
+  },
+  {
     gameId: "chase",
     title: "警察抓小偷",
     description: "轮流走一步 · 警察抓到小偷获胜",

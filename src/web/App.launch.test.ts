@@ -15,6 +15,7 @@ describe("landing game catalog", () => {
       "gomoku",
       "xiangqi",
       "tictactoe",
+      "tiaojiaqi",
       "chase",
       "minesweeper",
       "2048",

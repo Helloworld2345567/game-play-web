@@ -4,6 +4,7 @@ import { gomokuRules } from "./gomoku/rules";
 import { minesweeperDuelRules } from "./minesweeper/duel-rules";
 import { minesweeperRaceRules } from "./minesweeper/race-rules";
 import { ticTacToeRules } from "./tictactoe/rules";
+import { tiaojiaqiRules } from "./tiaojiaqi/rules";
 import { xiangqiRules } from "./xiangqi/rules";
 
 export type RuleCreationPolicy = "enabled" | "legacy_only";
@@ -19,6 +20,7 @@ const registrations: readonly ServerRuleRegistration[] = [
   { rules: gomokuRules, creationPolicy: "enabled" },
   { rules: xiangqiRules, creationPolicy: "enabled" },
   { rules: ticTacToeRules, creationPolicy: "enabled" },
+  { rules: tiaojiaqiRules, creationPolicy: "enabled" },
   ...Object.values(chaseRules).map(
     (rules) => ({
       rules,
