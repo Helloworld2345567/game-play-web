@@ -100,6 +100,15 @@ export const GAME_MANIFESTS = [
       "minesweeper.race.30x16x99.v1",
     ],
   },
+  {
+    gameId: "2048",
+    title: "2048",
+    description: "4×4 · 单人合并 · 最高分榜",
+    creationPolicy: "enabled",
+    launchKind: "local-game",
+    ruleSetIds: [],
+    creatableRuleSetIds: [],
+  },
 ] as const satisfies readonly GameManifest[];
 
 export type GameId = (typeof GAME_MANIFESTS)[number]["gameId"];

@@ -4,10 +4,15 @@ import {
   MINESWEEPER_LEADERBOARD_NAME,
   MinesweeperLeaderboard,
 } from "./minesweeper-leaderboard";
+import {
+  GAME_2048_LEADERBOARD_NAME,
+  Game2048Leaderboard,
+} from "./game-2048-leaderboard";
 import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
 import { isCreatableRuleSet } from "./games/registry";
 import { normalizeDisplayName } from "./shared/display-name";
 import { MINESWEEPER_SOLO_RULE_VERSION } from "./shared/minesweeper-leaderboard";
+import { GAME_2048_SOLO_RULE_VERSION } from "./shared/game-2048-leaderboard";
 import {
   ensureGuestSession,
   readGuestSession,
@@ -24,11 +29,17 @@ import {
   type SoftRateLimitDecision,
 } from "./worker/rate-limit";
 
-export { GameRoom, MinesweeperLeaderboard, RoomDirectory };
+export {
+  Game2048Leaderboard,
+  GameRoom,
+  MinesweeperLeaderboard,
+  RoomDirectory,
+};
 
 export interface WorkerEnv extends GameRoomEnv {
   ROOMS: DurableObjectNamespace<GameRoom>;
   MINESWEEPER_LEADERBOARD: DurableObjectNamespace<MinesweeperLeaderboard>;
+  GAME_2048_LEADERBOARD: DurableObjectNamespace<Game2048Leaderboard>;
   SESSION_SECRET: string;
 }
 
@@ -41,6 +52,7 @@ const BROWSER_BOOTSTRAP_ID_PATTERN = /^[0-9a-f-]{36}$/u;
 const MAX_CREATE_BODY_BYTES = 2_048;
 const MAX_ROOM_HTTP_BODY_BYTES = 4_096;
 const MAX_LEADERBOARD_ELAPSED_MS = 24 * 60 * 60_000;
+const MAX_GAME_2048_SCORE = 1_000_000_000;
 const MIN_SESSION_SECRET_BYTES = 32;
 const PRODUCTION_ORIGINS = new Set(["https://play.ym0v0.com"]);
 
@@ -105,6 +117,18 @@ function unauthenticatedRateLimitFor(
   if (pathname === "/api/minesweeper/leaderboard/record") {
     return {
       scope: "leaderboard:record",
+      config: LEADERBOARD_RECORD_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/2048/leaderboard") {
+    return {
+      scope: "leaderboard:2048:query",
+      config: LEADERBOARD_QUERY_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/2048/leaderboard/record") {
+    return {
+      scope: "leaderboard:2048:record",
       config: LEADERBOARD_RECORD_RATE_LIMIT,
     };
   }
@@ -310,11 +334,63 @@ async function readLeaderboardCommand(
   };
 }
 
+async function readGame2048LeaderboardCommand(
+  request: Request,
+  includeScore: boolean,
+): Promise<
+  | {
+    ok: true;
+    ruleVersion: typeof GAME_2048_SOLO_RULE_VERSION;
+    score?: number;
+  }
+  | { ok: false; failure: JsonBodyFailure }
+> {
+  const result = await readSmallJson(request);
+  if (isJsonResultFailure(result)) return result;
+  const value = result.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  const body = value as Record<string, unknown>;
+  if (body.ruleVersion !== GAME_2048_SOLO_RULE_VERSION) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  if (!includeScore) {
+    return {
+      ok: true,
+      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+    };
+  }
+  const score = body.score;
+  if (
+    !Number.isSafeInteger(score) ||
+    (score as number) < 4 ||
+    (score as number) > MAX_GAME_2048_SCORE ||
+    (score as number) % 4 !== 0
+  ) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  return {
+    ok: true,
+    ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+    score: score as number,
+  };
+}
+
 function minesweeperLeaderboard(
   env: WorkerEnv,
 ): DurableObjectStub<MinesweeperLeaderboard> {
   return env.MINESWEEPER_LEADERBOARD.getByName(
     MINESWEEPER_LEADERBOARD_NAME,
+    { locationHint: "apac" },
+  );
+}
+
+function game2048Leaderboard(
+  env: WorkerEnv,
+): DurableObjectStub<Game2048Leaderboard> {
+  return env.GAME_2048_LEADERBOARD.getByName(
+    GAME_2048_LEADERBOARD_NAME,
     { locationHint: "apac" },
   );
 }
@@ -606,6 +682,58 @@ export default {
         }
       }
       return json({ error: "session.required" }, { status: 401 });
+    }
+    if (
+      url.pathname === "/api/2048/leaderboard" &&
+      request.method === "POST"
+    ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "leaderboard:2048:query",
+        guest.guestId,
+        LEADERBOARD_QUERY_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("leaderboard.rate_limited", rateLimit);
+      }
+      const command = await readGame2048LeaderboardCommand(request, false);
+      if (!command.ok) {
+        return jsonBodyFailureResponse(
+          command.failure,
+          "leaderboard.invalid_request",
+        );
+      }
+      return json(await game2048Leaderboard(env).snapshot(guest.guestId));
+    }
+    if (
+      url.pathname === "/api/2048/leaderboard/record" &&
+      request.method === "POST"
+    ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "leaderboard:2048:record",
+        guest.guestId,
+        LEADERBOARD_RECORD_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("leaderboard.rate_limited", rateLimit);
+      }
+      const command = await readGame2048LeaderboardCommand(request, true);
+      if (!command.ok || command.score === undefined) {
+        return !command.ok
+          ? jsonBodyFailureResponse(
+            command.failure,
+            "leaderboard.invalid_request",
+          )
+          : json({ error: "leaderboard.invalid_request" }, { status: 400 });
+      }
+      return json(
+        await game2048Leaderboard(env).recordScore(
+          guest.guestId,
+          guest.displayName,
+          command.score,
+        ),
+      );
     }
     if (
       url.pathname === "/api/minesweeper/leaderboard" &&

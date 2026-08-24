@@ -42,6 +42,7 @@ import {
 import { ThemeToggle } from "./theme";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
+const LOCAL_GAME_PATH = /^\/([A-Za-z0-9_-]+)\/?$/u;
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/u;
 const DISPLAY_NAME_STORAGE_KEY = "ym0v0.display-name";
 const DISPLAY_NAME_CONFIRMED_STORAGE_KEY = "ym0v0.display-name-confirmed";
@@ -80,6 +81,26 @@ const LANDING_ROOM_ENTRIES = clientGameCatalog.flatMap((manifest) => {
   }];
 });
 
+const LANDING_LOCAL_ENTRIES = clientGameCatalog.flatMap((manifest) => {
+  if (
+    manifest.launchKind !== "local-game" ||
+    manifest.creationPolicy !== "enabled" ||
+    manifest.loadPage === undefined
+  ) {
+    return [];
+  }
+  return [{
+    id: manifest.gameId,
+    label: manifest.title,
+    ariaLabel: `${manifest.title}，开始本机游戏`,
+    description: manifest.description,
+    launch: {
+      kind: "navigate" as const,
+      href: `/${manifest.gameId}`,
+    },
+  }];
+});
+
 export const LANDING_GAME_CATALOG = [
   ...LANDING_ROOM_ENTRIES,
   {
@@ -96,12 +117,21 @@ export const LANDING_GAME_CATALOG = [
     description: "单人计时 · 双人竞速",
     launch: { kind: "picker" as const, gameType: "minesweeper" as const },
   },
+  ...LANDING_LOCAL_ENTRIES,
 ] as const;
 
 export type MinesweeperLaunchMode = "solo" | "race";
 export type MinesweeperPreset = MinefieldPresetId;
 
 export type ChaseDifficulty = "easy" | "medium" | "hard";
+
+export function localGameIdFromPath(path: string): string | null {
+  const gameId = path.match(LOCAL_GAME_PATH)?.[1];
+  if (gameId === undefined) return null;
+  return getClientGameCatalogEntry(gameId)?.loadPage === undefined
+    ? null
+    : gameId;
+}
 
 export function resolveChaseLaunch(difficulty: ChaseDifficulty) {
   const ruleSetId = `chase.${difficulty}.v1`;
@@ -727,7 +757,7 @@ function LandingPage({
       <section class="hero">
         <h1>想下哪一局？</h1>
         <p class="hero-copy">
-          创建房间，把邀请链接发给朋友。
+          和朋友开一局，或者玩一盘单机小游戏。
         </p>
         <div class="game-choice-grid" aria-label="选择棋种">
           {LANDING_GAME_CATALOG.map((game) => (
@@ -750,6 +780,8 @@ function LandingPage({
                   } else {
                     setMinesweeperPickerOpen(true);
                   }
+                } else if (game.launch.kind === "navigate") {
+                  location.assign(game.launch.href);
                 } else {
                   void createRoom(
                     game.launch.gameType,
@@ -766,7 +798,7 @@ function LandingPage({
                     ? "正在创建…"
                     : game.label}
                 </strong>
-                {game.launch.kind === "picker" && (
+                {game.launch.kind !== "room" && (
                   <span class="game-choice-chevron" aria-hidden="true">›</span>
                 )}
               </span>
@@ -1346,10 +1378,11 @@ export function App() {
       />
     );
   }
-  if (path === "/minesweeper" || path === "/minesweeper/") {
+  const localGameId = localGameIdFromPath(path);
+  if (localGameId !== null) {
     return (
       <LocalGamePageRoute
-        gameId="minesweeper"
+        gameId={localGameId}
         displayName={displayName}
         initiallyOpenProfile={displayNameNeedsPrompt}
         onDisplayNameChange={saveDisplayName}

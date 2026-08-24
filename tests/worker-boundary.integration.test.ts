@@ -11,6 +11,7 @@ import {
   type RoomDirectory,
 } from "../src/room-directory";
 import { MINESWEEPER_SOLO_RULE_VERSION } from "../src/shared/minesweeper-leaderboard";
+import { GAME_2048_SOLO_RULE_VERSION } from "../src/shared/game-2048-leaderboard";
 
 interface TestExports {
   default: Fetcher;
@@ -862,6 +863,13 @@ describe("Worker request boundary", () => {
       presetId: "small",
       elapsedMs: 12_345,
     })],
+    ["/api/2048/leaderboard", 30, () => ({
+      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+    })],
+    ["/api/2048/leaderboard/record", 10, () => ({
+      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+      score: 12_000,
+    })],
   ] as const)("soft-limits %s and returns Retry-After", async (path, capacity, makeBody) => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1010,6 +1018,52 @@ describe("Worker request boundary", () => {
     });
   });
 
+  it("records and reads a 2048 score using only the signed session nickname", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "签名昵称" }),
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const recorded = await app.default.fetch(
+      apiRequest(origin, "/api/2048/leaderboard/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+          score: 12_000,
+          displayName: "伪造昵称",
+        }),
+      }),
+    );
+    expect(recorded.status).toBe(200);
+    expect(recorded.headers.get("Cache-Control")).toBe("no-store");
+    await expect(recorded.json()).resolves.toEqual({
+      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+      personalBestScore: 12_000,
+      top: [{ rank: 1, displayName: "签名昵称", score: 12_000 }],
+    });
+
+    const snapshot = await app.default.fetch(
+      apiRequest(origin, "/api/2048/leaderboard", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleVersion: GAME_2048_SOLO_RULE_VERSION }),
+      }),
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("Cache-Control")).toBe("no-store");
+    await expect(snapshot.json()).resolves.toEqual({
+      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+      personalBestScore: 12_000,
+      top: [{ rank: 1, displayName: "签名昵称", score: 12_000 }],
+    });
+  });
+
   it.each([
     [
       "/api/minesweeper/leaderboard",
@@ -1022,6 +1076,11 @@ describe("Worker request boundary", () => {
         presetId: "small",
         elapsedMs: 1_000,
       },
+    ],
+    ["/api/2048/leaderboard", { ruleVersion: "2048.solo.4x4.v1" }],
+    [
+      "/api/2048/leaderboard/record",
+      { ruleVersion: "2048.solo.4x4.v1", score: 1_000 },
     ],
   ])("requires a signed session for %s", async (path, body) => {
     const origin = "http://localhost:5173";
@@ -1057,6 +1116,19 @@ describe("Worker request boundary", () => {
     [
       "/api/minesweeper/leaderboard/record",
       { presetId: "large", elapsedMs: 24 * 60 * 60_000 + 1 },
+    ],
+    ["/api/2048/leaderboard", {}],
+    [
+      "/api/2048/leaderboard",
+      { ruleVersion: "2048.solo.4x4.v0" },
+    ],
+    [
+      "/api/2048/leaderboard/record",
+      { ruleVersion: "2048.solo.4x4.v1", score: 3 },
+    ],
+    [
+      "/api/2048/leaderboard/record",
+      { ruleVersion: "2048.solo.4x4.v1", score: 1_000_000_004 },
     ],
   ])("rejects an invalid leaderboard body for %s", async (path, body) => {
     const origin = "http://localhost:5173";
@@ -1100,6 +1172,8 @@ describe("Worker request boundary", () => {
     "/api/presence/leave",
     "/api/minesweeper/leaderboard",
     "/api/minesweeper/leaderboard/record",
+    "/api/2048/leaderboard",
+    "/api/2048/leaderboard/record",
     "/api/rooms/AAAAAAAAAAAAAAAA/sync",
   ])("requires application/json for %s", async (path) => {
     const session = await app.default.fetch(

@@ -16,6 +16,10 @@
       {
         "name": "MINESWEEPER_LEADERBOARD",
         "class_name": "MinesweeperLeaderboard"
+      },
+      {
+        "name": "GAME_2048_LEADERBOARD",
+        "class_name": "Game2048Leaderboard"
       }
     ]
   },
@@ -29,6 +33,10 @@
       "storage": "sqlite"
     },
     "MinesweeperLeaderboard": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "Game2048Leaderboard": {
       "type": "durable-object",
       "storage": "sqlite"
     }

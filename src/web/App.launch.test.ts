@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LANDING_GAME_CATALOG,
+  localGameIdFromPath,
   resolveChaseLaunch,
   resolveMinesweeperLaunch,
   resolveRematchModeOptions,
@@ -16,6 +17,7 @@ describe("landing game catalog", () => {
       "tictactoe",
       "chase",
       "minesweeper",
+      "2048",
     ]);
     expect(
       LANDING_GAME_CATALOG.filter((entry) => entry.launch.kind === "picker").map(
@@ -25,6 +27,9 @@ describe("landing game catalog", () => {
       { kind: "picker", gameType: "chase" },
       { kind: "picker", gameType: "minesweeper" },
     ]);
+    expect(
+      LANDING_GAME_CATALOG.find((entry) => entry.id === "2048")?.launch,
+    ).toEqual({ kind: "navigate", href: "/2048" });
   });
 
   it("projects direct room entries from the registered game adapters", () => {
@@ -72,6 +77,14 @@ describe("landing game catalog", () => {
       kind: "navigate",
       href: "/minesweeper?preset=medium",
     });
+  });
+
+  it("resolves only allowlisted local-game page routes", () => {
+    expect(localGameIdFromPath("/2048")).toBe("2048");
+    expect(localGameIdFromPath("/2048/")).toBe("2048");
+    expect(localGameIdFromPath("/minesweeper")).toBe("minesweeper");
+    expect(localGameIdFromPath("/unknown")).toBeNull();
+    expect(localGameIdFromPath("/2048/extra")).toBeNull();
   });
 
   it.each([

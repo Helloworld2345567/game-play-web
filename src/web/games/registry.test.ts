@@ -3,6 +3,8 @@ import type { RulePosition } from "../../core/game-rules";
 import type { GameActionCommand } from "../../shared/protocol";
 import {
   clientGameCatalog,
+  getClientGameCatalogEntry,
+  getClientGamePageLoader,
   getClientGameRendererLoader,
 } from "./catalog";
 import {
@@ -58,6 +60,16 @@ function chasePosition(
 }
 
 describe("game outcome presentation", () => {
+  it("allowlists the local 2048 page without a room renderer", async () => {
+    const loader = getClientGamePageLoader("2048");
+    expect(loader).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("2048")?.loadPage).toBe(loader);
+    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader("2048", "2048.solo.4x4.v1"),
+    ).toBeNull();
+  });
+
   it("exposes allowlisted renderer loading through every catalog entry", () => {
     expect(
       clientGameCatalog.every(

@@ -111,6 +111,7 @@ const RENDERER_LOADERS = {
 const PAGE_LOADERS = {
   minesweeper: () =>
     import("./minesweeper/SoloPage").then(({ SoloPage }) => SoloPage),
+  "2048": () => import("./2048/SoloPage").then(({ SoloPage }) => SoloPage),
 } as const satisfies Readonly<Record<string, ClientGamePageLoader>>;
 
 export function getClientGameRendererLoader(
@@ -170,7 +171,9 @@ export const clientGameCatalog: readonly ClientGameCatalogEntry[] = [
   ...GAME_MANIFESTS.map((manifest) =>
     catalogEntry(
       manifest,
-      manifest.gameId === "minesweeper" ? PAGE_LOADERS.minesweeper : undefined,
+      (PAGE_LOADERS as Readonly<Record<string, ClientGamePageLoader>>)[
+        manifest.gameId
+      ],
     ),
   ),
 ];

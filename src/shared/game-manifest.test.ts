@@ -7,6 +7,20 @@ import {
 } from "./game-manifest";
 
 describe("game manifest", () => {
+  it("exposes 2048 only as a fixed local 4×4 game", () => {
+    expect(getGameManifest("2048")).toMatchObject({
+      gameId: "2048",
+      title: "2048",
+      description: "4×4 · 单人合并 · 最高分榜",
+      creationPolicy: "enabled",
+      launchKind: "local-game",
+      ruleSetIds: [],
+      creatableRuleSetIds: [],
+    });
+    expect(isManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(false);
+    expect(isCreatableManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(false);
+  });
+
   it("exposes one police-chase family with all three map rule sets", () => {
     const manifest = getGameManifest("chase");
     expect(manifest).toMatchObject({
