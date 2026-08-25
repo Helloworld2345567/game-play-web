@@ -239,7 +239,7 @@
 .checkers-board {
   position: relative;
   width: 100%;
-  aspect-ratio: 1.25 / 1;
+  aspect-ratio: 0.8660254 / 1;
   overflow: visible;
   isolation: isolate;
   border-radius: 22px;
@@ -251,8 +251,21 @@
 .checkers-board-star {
   position: absolute;
   z-index: 0;
-  inset: 10% 7%;
-  clip-path: polygon(50% 0%, 61% 29%, 93% 29%, 68% 47%, 78% 80%, 50% 61%, 22% 80%, 32% 47%, 7% 29%, 39% 29%);
+  inset: 4%;
+  clip-path: polygon(
+    50% 0%,
+    66.667% 25%,
+    100% 25%,
+    83.333% 50%,
+    100% 75%,
+    66.667% 75%,
+    50% 100%,
+    33.333% 75%,
+    0% 75%,
+    16.667% 50%,
+    0% 25%,
+    33.333% 25%
+  );
   opacity: 0.26;
   background:
     radial-gradient(circle at 50% 50%, rgba(239, 180, 91, 0.34), transparent 57%),

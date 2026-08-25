@@ -101,7 +101,7 @@ function jumpCount(state: ChineseCheckersState): number {
 function holePositionStyle(hole: (typeof CHINESE_CHECKERS_HOLES)[number]) {
   return {
     left: `${50 + hole.x * 3.6}%`,
-    top: `${50 + hole.y * 4.55}%`,
+    top: `${50 + hole.y * 5.4}%`,
   };
 }
 
