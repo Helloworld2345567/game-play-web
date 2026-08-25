@@ -115,6 +115,16 @@ describe("game outcome presentation", () => {
     }
   });
 
+  it("allowlists the local Snake page without a room renderer", async () => {
+    const loader = getClientGamePageLoader("snake");
+    expect(loader).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("snake")?.loadPage).toBe(loader);
+    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader("snake", "snake.solo.20x20.v1"),
+    ).toBeNull();
+  });
+
   it("exposes allowlisted renderer loading through every catalog entry", () => {
     expect(
       clientGameCatalog.every(

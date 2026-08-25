@@ -122,6 +122,15 @@ export const GAME_MANIFESTS = [
     ],
     creatableRuleSetIds: [],
   },
+  {
+    gameId: "snake",
+    title: "贪吃蛇",
+    description: "20×20 · 有墙 · 吃食物得分 · 独立最高分榜",
+    creationPolicy: "enabled",
+    launchKind: "local-game",
+    ruleSetIds: ["snake.solo.20x20.v1"],
+    creatableRuleSetIds: [],
+  },
 ] as const satisfies readonly GameManifest[];
 
 export type GameId = (typeof GAME_MANIFESTS)[number]["gameId"];

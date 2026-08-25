@@ -1,6 +1,6 @@
 # ym0v0 棋局
 
-一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷和 2048 七个入口；扫雷入口内可选单人或双人竞速及三种难度，2048 可选 4×4、5×5 或 6×6 单机地图。无需注册，创建房间后把邀请链接发给朋友即可开始；单机游戏直接在本机开始，不创建房间。
+一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、2048 和贪吃蛇八个入口；扫雷入口内可选单人或双人竞速及三种难度，2048 可选 4×4、5×5 或 6×6 单机地图。无需注册，创建房间后把邀请链接发给朋友即可开始；单机游戏直接在本机开始，不创建房间。
 
 - 线上地址：<https://play.ym0v0.com>
 - 服务端权威裁决：严格棋类拒绝旧修订；并发棋类始终按最新权威局面验证动作
@@ -19,10 +19,12 @@
 - 单人扫雷按难度显示个人最佳和全站 Top 10；成绩绑定不可变规则版本并最多保留 180 天
 - 2048 支持 4×4、5×5、6×6 网格，在浏览器本地运行，不创建房间或消耗房间名额；棋盘无法继续移动时自动提交本局分数
 - 2048 按地图尺寸独立排名；每个签名 Guest 在每种地图保留一条个人最高分，按 `score` 降序取 Top 10，同分按 `achieved_at`、`guest_id` 确定性排序；三种地图分别绑定不可变的 `2048.solo.4x4.v1`、`2048.solo.5x5.v1`、`2048.solo.6x6.v1`，成绩最多保留 180 天
+- 贪吃蛇使用经典 20×20 有墙地图，支持方向键/WASD、触摸滑动、屏幕方向按钮、暂停和重开；吃到食物后增长、加分并逐步加速，撞墙或撞到自身后结束
+- 贪吃蛇显示个人最高分和全站 Top 10；每个签名 Guest 在不可变规则版本 `snake.solo.20x20.v1` 下保留一条个人最高分，成绩最多保留 180 天
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化，其内部由统一准入、`RoomRuntime`、`ActionJournal` 与 `SnapshotProjector` 分工，但不增加跨 DO 网络跳转；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；单例 SQLite-backed `MinesweeperLeaderboard` 按 Guest、难度和规则版本原子保存最佳成绩，单例 SQLite-backed `Game2048Leaderboard` 按签名 Guest 和地图规则版本原子保存个人最高分并生成各自 Top 10，使用独立的分数表与接口，不复用扫雷的难度/preset/计时榜单结构。当前共四类 SQLite-backed Durable Object；排行榜 DO 不计入房间上限。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化，其内部由统一准入、`RoomRuntime`、`ActionJournal` 与 `SnapshotProjector` 分工，但不增加跨 DO 网络跳转；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；`MinesweeperLeaderboard`、`Game2048Leaderboard` 和 `SnakeLeaderboard` 三个 SQLite-backed 单例分别按各自不可变规则版本原子保存个人最佳并生成 Top 10，使用独立的分数表与接口。当前共五类 SQLite-backed Durable Object；排行榜 DO 不计入房间上限。
 
 共享 `GameManifest` 只包含可信纯元数据，客户端 `GameCatalog` 通过静态 allowlist 动态加载本地页面或房间 renderer，服务端 `GameRules` 注册表独立控制规则恢复与新建。浏览器侧保留窄的 `useRoom()` 接口，内部 `RoomSession` 将 WebSocket、HTTPS polling、协议解析和并发动作跟踪分离，因此增加棋类不需要修改会话与重连核心。
 
@@ -30,7 +32,9 @@
 
 2048 是独立的 `local-game` 页面，首页导航到 `/2048` 后才通过客户端静态 allowlist 动态加载；它只在浏览器内运行 4×4、5×5 或 6×6 规则，不进入房间协议，不创建 `GameRoom`。`/2048` 默认打开 4×4，也可用 `?size=5` 或 `?size=6` 直达其他地图。结束时通过独立的 `/api/2048/leaderboard` 与 `/api/2048/leaderboard/record` 接口提交或读取客户端分数；`Game2048Leaderboard` 按不可变地图规则版本隔离数据，每个签名 Guest 在每种地图只保留个人最高分，按分数降序返回各自的全站 Top 10。
 
-单人扫雷榜以签名 Guest 作为匿名身份，昵称从签名会话取得。`minesweeper.solo.v1` 与其他规则版本不混榜，记录在 180 天后由每日清理任务删除。它是客户端计时并提交的休闲榜，已做输入校验、请求限流和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。2048 榜同样按签名 Guest 和地图规则版本保存单条个人最高分，三种尺寸互不混榜，分数由客户端提交并在 180 天后清理，因此同样只定位为休闲榜。
+贪吃蛇也是独立的 `local-game` 页面，访问 `/snake` 时才动态加载。纯函数引擎在 20×20 有墙地图上维护蛇身、食物、方向、暂停与终局状态，随机食物生成由调用方注入随机源；页面只负责定时推进和输入。结束时通过 `/api/snake/leaderboard` 与 `/api/snake/leaderboard/record` 读取或提交成绩；`SnakeLeaderboard` 在 `snake.solo.20x20.v1` 下为每个签名 Guest 保留最高分并返回全站 Top 10。
+
+单人扫雷榜以签名 Guest 作为匿名身份，昵称从签名会话取得。`minesweeper.solo.v1` 与其他规则版本不混榜，记录在 180 天后由每日清理任务删除。它是客户端计时并提交的休闲榜，已做输入校验、请求限流和最佳成绩原子更新，但不具备完整服务端回放校验，不宣称强反作弊。2048 与贪吃蛇榜同样按签名 Guest 和不可变规则版本保存单条个人最高分，分数由客户端提交并在 180 天后清理，因此也只定位为休闲榜。
 
 初始架构设计、当前扩展说明与调研证据见 [`docs/GOMOKU_PLATFORM_PLAN.md`](docs/GOMOKU_PLATFORM_PLAN.md) 和 [`docs/research/GITHUB_SURVEY.md`](docs/research/GITHUB_SURVEY.md)。
 
@@ -64,11 +68,11 @@ npm run test:e2e
 npm run build
 ```
 
-测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷和扫雷引擎、4×4/5×5/6×6 的 2048 引擎与本地页交互、2048 客户端分榜解析、两个独立排行榜 Durable Object、真实 workerd Durable Object、Worker 边界校验、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
+测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷和贪吃蛇引擎、4×4/5×5/6×6 的 2048 引擎与本地页交互、排行榜客户端解析、三个独立排行榜 Durable Object、真实 workerd Durable Object、Worker 边界校验、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
 
 ## 部署
 
-`wrangler.jsonc` 已配置 Worker、静态资源、`GameRoom`、`RoomDirectory`、`MinesweeperLeaderboard` 和 `Game2048Leaderboard` 四个 SQLite Durable Object 类，以及 Custom Domain `play.ym0v0.com`。
+`wrangler.jsonc` 已配置 Worker、静态资源、`GameRoom`、`RoomDirectory`、`MinesweeperLeaderboard`、`Game2048Leaderboard` 和 `SnakeLeaderboard` 五个 SQLite Durable Object 类，以及 Custom Domain `play.ym0v0.com`。
 
 推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行高危依赖审计、单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
 

@@ -8,6 +8,10 @@ import {
   GAME_2048_LEADERBOARD_NAME,
   Game2048Leaderboard,
 } from "./game-2048-leaderboard";
+import {
+  SNAKE_LEADERBOARD_NAME,
+  SnakeLeaderboard,
+} from "./game-snake-leaderboard";
 import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
 import { isCreatableRuleSet } from "./games/registry";
 import { normalizeDisplayName } from "./shared/display-name";
@@ -16,6 +20,11 @@ import {
   isGame2048RuleVersion,
   type Game2048RuleVersion,
 } from "./shared/game-2048-rules";
+import {
+  isSnakeRuleVersion,
+  SNAKE_MAX_SCORE,
+  type SnakeRuleVersion,
+} from "./shared/game-snake-rules";
 import {
   ensureGuestSession,
   readGuestSession,
@@ -37,12 +46,14 @@ export {
   GameRoom,
   MinesweeperLeaderboard,
   RoomDirectory,
+  SnakeLeaderboard,
 };
 
 export interface WorkerEnv extends GameRoomEnv {
   ROOMS: DurableObjectNamespace<GameRoom>;
   MINESWEEPER_LEADERBOARD: DurableObjectNamespace<MinesweeperLeaderboard>;
   GAME_2048_LEADERBOARD: DurableObjectNamespace<Game2048Leaderboard>;
+  SNAKE_LEADERBOARD: DurableObjectNamespace<SnakeLeaderboard>;
   SESSION_SECRET: string;
 }
 
@@ -132,6 +143,18 @@ function unauthenticatedRateLimitFor(
   if (pathname === "/api/2048/leaderboard/record") {
     return {
       scope: "leaderboard:2048:record",
+      config: LEADERBOARD_RECORD_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/snake/leaderboard") {
+    return {
+      scope: "leaderboard:snake:query",
+      config: LEADERBOARD_QUERY_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/snake/leaderboard/record") {
+    return {
+      scope: "leaderboard:snake:record",
       config: LEADERBOARD_RECORD_RATE_LIMIT,
     };
   }
@@ -380,6 +403,45 @@ async function readGame2048LeaderboardCommand(
   };
 }
 
+async function readSnakeLeaderboardCommand(
+  request: Request,
+  includeScore: boolean,
+): Promise<
+  | {
+    ok: true;
+    ruleVersion: SnakeRuleVersion;
+    score?: number;
+  }
+  | { ok: false; failure: JsonBodyFailure }
+> {
+  const result = await readSmallJson(request);
+  if (isJsonResultFailure(result)) return result;
+  const value = result.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  const body = value as Record<string, unknown>;
+  if (!isSnakeRuleVersion(body.ruleVersion)) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  if (!includeScore) {
+    return { ok: true, ruleVersion: body.ruleVersion };
+  }
+  const score = body.score;
+  if (
+    !Number.isSafeInteger(score) ||
+    (score as number) < 1 ||
+    (score as number) > SNAKE_MAX_SCORE
+  ) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  return {
+    ok: true,
+    ruleVersion: body.ruleVersion,
+    score: score as number,
+  };
+}
+
 function minesweeperLeaderboard(
   env: WorkerEnv,
 ): DurableObjectStub<MinesweeperLeaderboard> {
@@ -394,6 +456,15 @@ function game2048Leaderboard(
 ): DurableObjectStub<Game2048Leaderboard> {
   return env.GAME_2048_LEADERBOARD.getByName(
     GAME_2048_LEADERBOARD_NAME,
+    { locationHint: "apac" },
+  );
+}
+
+function snakeLeaderboard(
+  env: WorkerEnv,
+): DurableObjectStub<SnakeLeaderboard> {
+  return env.SNAKE_LEADERBOARD.getByName(
+    SNAKE_LEADERBOARD_NAME,
     { locationHint: "apac" },
   );
 }
@@ -685,6 +756,64 @@ export default {
         }
       }
       return json({ error: "session.required" }, { status: 401 });
+    }
+    if (
+      url.pathname === "/api/snake/leaderboard" &&
+      request.method === "POST"
+    ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "leaderboard:snake:query",
+        guest.guestId,
+        LEADERBOARD_QUERY_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("leaderboard.rate_limited", rateLimit);
+      }
+      const command = await readSnakeLeaderboardCommand(request, false);
+      if (!command.ok) {
+        return jsonBodyFailureResponse(
+          command.failure,
+          "leaderboard.invalid_request",
+        );
+      }
+      return json(
+        await snakeLeaderboard(env).snapshot(
+          command.ruleVersion,
+          guest.guestId,
+        ),
+      );
+    }
+    if (
+      url.pathname === "/api/snake/leaderboard/record" &&
+      request.method === "POST"
+    ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "leaderboard:snake:record",
+        guest.guestId,
+        LEADERBOARD_RECORD_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("leaderboard.rate_limited", rateLimit);
+      }
+      const command = await readSnakeLeaderboardCommand(request, true);
+      if (!command.ok || command.score === undefined) {
+        return !command.ok
+          ? jsonBodyFailureResponse(
+            command.failure,
+            "leaderboard.invalid_request",
+          )
+          : json({ error: "leaderboard.invalid_request" }, { status: 400 });
+      }
+      return json(
+        await snakeLeaderboard(env).recordScore(
+          command.ruleVersion,
+          guest.guestId,
+          guest.displayName,
+          command.score,
+        ),
+      );
     }
     if (
       url.pathname === "/api/2048/leaderboard" &&

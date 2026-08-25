@@ -14,6 +14,8 @@ import { MINESWEEPER_SOLO_RULE_VERSION } from "../src/shared/minesweeper-leaderb
 import { GAME_2048_RULE_VERSION_BY_SIZE } from "../src/shared/game-2048-rules";
 import { GAME_2048_SOLO_RULE_VERSION } from "../src/shared/game-2048-leaderboard";
 
+const SNAKE_SOLO_RULE_VERSION = "snake.solo.20x20.v1";
+
 interface TestExports {
   default: Fetcher;
 }
@@ -871,6 +873,13 @@ describe("Worker request boundary", () => {
       ruleVersion: GAME_2048_SOLO_RULE_VERSION,
       score: 12_000,
     })],
+    ["/api/snake/leaderboard", 30, () => ({
+      ruleVersion: SNAKE_SOLO_RULE_VERSION,
+    })],
+    ["/api/snake/leaderboard/record", 10, () => ({
+      ruleVersion: SNAKE_SOLO_RULE_VERSION,
+      score: 12,
+    })],
   ] as const)("soft-limits %s and returns Retry-After", async (path, capacity, makeBody) => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1066,6 +1075,52 @@ describe("Worker request boundary", () => {
     });
   });
 
+  it("records and reads a Snake score using only the signed session nickname", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "签名昵称" }),
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const recorded = await app.default.fetch(
+      apiRequest(origin, "/api/snake/leaderboard/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ruleVersion: SNAKE_SOLO_RULE_VERSION,
+          score: 12,
+          displayName: "伪造昵称",
+        }),
+      }),
+    );
+    expect(recorded.status).toBe(200);
+    expect(recorded.headers.get("Cache-Control")).toBe("no-store");
+    await expect(recorded.json()).resolves.toEqual({
+      ruleVersion: SNAKE_SOLO_RULE_VERSION,
+      personalBestScore: 12,
+      top: [{ rank: 1, displayName: "签名昵称", score: 12 }],
+    });
+
+    const snapshot = await app.default.fetch(
+      apiRequest(origin, "/api/snake/leaderboard", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleVersion: SNAKE_SOLO_RULE_VERSION }),
+      }),
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("Cache-Control")).toBe("no-store");
+    await expect(snapshot.json()).resolves.toEqual({
+      ruleVersion: SNAKE_SOLO_RULE_VERSION,
+      personalBestScore: 12,
+      top: [{ rank: 1, displayName: "签名昵称", score: 12 }],
+    });
+  });
+
   it("keeps the 4×4, 5×5, and 6×6 score endpoints in separate rankings", async () => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1123,6 +1178,11 @@ describe("Worker request boundary", () => {
       "/api/2048/leaderboard/record",
       { ruleVersion: "2048.solo.4x4.v1", score: 1_000 },
     ],
+    ["/api/snake/leaderboard", { ruleVersion: SNAKE_SOLO_RULE_VERSION }],
+    [
+      "/api/snake/leaderboard/record",
+      { ruleVersion: SNAKE_SOLO_RULE_VERSION, score: 12 },
+    ],
   ])("requires a signed session for %s", async (path, body) => {
     const origin = "http://localhost:5173";
     const response = await app.default.fetch(
@@ -1171,6 +1231,19 @@ describe("Worker request boundary", () => {
       "/api/2048/leaderboard/record",
       { ruleVersion: "2048.solo.4x4.v1", score: 1_000_000_004 },
     ],
+    ["/api/snake/leaderboard", {}],
+    [
+      "/api/snake/leaderboard",
+      { ruleVersion: "snake.solo.20x20.v0" },
+    ],
+    [
+      "/api/snake/leaderboard/record",
+      { ruleVersion: SNAKE_SOLO_RULE_VERSION, score: 0 },
+    ],
+    [
+      "/api/snake/leaderboard/record",
+      { ruleVersion: SNAKE_SOLO_RULE_VERSION, score: 398 },
+    ],
   ])("rejects an invalid leaderboard body for %s", async (path, body) => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1215,6 +1288,8 @@ describe("Worker request boundary", () => {
     "/api/minesweeper/leaderboard/record",
     "/api/2048/leaderboard",
     "/api/2048/leaderboard/record",
+    "/api/snake/leaderboard",
+    "/api/snake/leaderboard/record",
     "/api/rooms/AAAAAAAAAAAAAAAA/sync",
   ])("requires application/json for %s", async (path) => {
     const session = await app.default.fetch(

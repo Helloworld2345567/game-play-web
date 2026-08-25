@@ -19,6 +19,7 @@ describe("landing game catalog", () => {
       "chase",
       "minesweeper",
       "2048",
+      "snake",
     ]);
     expect(
       LANDING_GAME_CATALOG.filter((entry) => entry.launch.kind === "picker").map(
@@ -83,6 +84,8 @@ describe("landing game catalog", () => {
   it("resolves only allowlisted local-game page routes", () => {
     expect(localGameIdFromPath("/2048")).toBe("2048");
     expect(localGameIdFromPath("/2048/")).toBe("2048");
+    expect(localGameIdFromPath("/snake")).toBe("snake");
+    expect(localGameIdFromPath("/snake/")).toBe("snake");
     expect(localGameIdFromPath("/minesweeper")).toBe("minesweeper");
     expect(localGameIdFromPath("/unknown")).toBeNull();
     expect(localGameIdFromPath("/2048/extra")).toBeNull();

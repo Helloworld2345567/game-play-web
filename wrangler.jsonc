@@ -25,6 +25,10 @@
       {
         "name": "GAME_2048_LEADERBOARD",
         "class_name": "Game2048Leaderboard"
+      },
+      {
+        "name": "SNAKE_LEADERBOARD",
+        "class_name": "SnakeLeaderboard"
       }
     ]
   },
@@ -42,6 +46,10 @@
       "storage": "sqlite"
     },
     "Game2048Leaderboard": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "SnakeLeaderboard": {
       "type": "durable-object",
       "storage": "sqlite"
     }

@@ -53,6 +53,20 @@ describe("game manifest", () => {
     expect(isCreatableManifestRuleSet("2048", "2048.solo.6x6.v1")).toBe(false);
   });
 
+  it("exposes Snake as a single wall-bound local game rule", () => {
+    expect(getGameManifest("snake")).toMatchObject({
+      gameId: "snake",
+      title: "贪吃蛇",
+      creationPolicy: "enabled",
+      launchKind: "local-game",
+      ruleSetIds: ["snake.solo.20x20.v1"],
+      creatableRuleSetIds: [],
+    });
+    expect(isManifestRuleSet("snake", "snake.solo.20x20.v1")).toBe(true);
+    expect(isCreatableManifestRuleSet("snake", "snake.solo.20x20.v1")).toBe(false);
+    expect(isManifestRuleSet("snake", "snake.solo.20x20.v2")).toBe(false);
+  });
+
   it("exposes one police-chase family with all three map rule sets", () => {
     const manifest = getGameManifest("chase");
     expect(manifest).toMatchObject({
