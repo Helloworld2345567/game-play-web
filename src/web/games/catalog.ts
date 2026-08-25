@@ -118,6 +118,8 @@ const PAGE_LOADERS = {
     import("./minesweeper/SoloPage").then(({ SoloPage }) => SoloPage),
   "2048": () => import("./2048/SoloPage").then(({ SoloPage }) => SoloPage),
   snake: () => import("./snake/SoloPage").then(({ SoloPage }) => SoloPage),
+  "chinese-checkers": () =>
+    import("./chinese-checkers/SoloPage").then(({ SoloPage }) => SoloPage),
 } as const satisfies Readonly<Record<string, ClientGamePageLoader>>;
 
 export function getClientGameRendererLoader(

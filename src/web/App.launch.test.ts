@@ -18,6 +18,7 @@ describe("landing game catalog", () => {
       "tiaojiaqi",
       "chase",
       "minesweeper",
+      "chinese-checkers",
       "2048",
       "snake",
     ]);
@@ -87,6 +88,12 @@ describe("landing game catalog", () => {
     expect(localGameIdFromPath("/snake")).toBe("snake");
     expect(localGameIdFromPath("/snake/")).toBe("snake");
     expect(localGameIdFromPath("/minesweeper")).toBe("minesweeper");
+    expect(localGameIdFromPath("/chinese-checkers")).toBe(
+      "chinese-checkers",
+    );
+    expect(localGameIdFromPath("/chinese-checkers/")).toBe(
+      "chinese-checkers",
+    );
     expect(localGameIdFromPath("/unknown")).toBeNull();
     expect(localGameIdFromPath("/2048/extra")).toBeNull();
   });

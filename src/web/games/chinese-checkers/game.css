@@ -1,0 +1,915 @@
+.checkers-page {
+  width: min(100%, 1240px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding:
+    max(18px, env(safe-area-inset-top))
+    max(18px, env(safe-area-inset-right))
+    max(32px, env(safe-area-inset-bottom))
+    max(18px, env(safe-area-inset-left));
+}
+
+.checkers-topbar {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.checkers-home-link {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  color: var(--theme-muted);
+  font-size: 0.86rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.checkers-home-link:hover {
+  color: var(--theme-text);
+}
+
+.checkers-home-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--theme-border);
+  border-radius: 50%;
+  color: var(--theme-accent);
+  font-size: 1.1rem;
+  line-height: 1;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+
+.checkers-home-link:hover .checkers-home-mark {
+  border-color: var(--theme-accent);
+  transform: translateX(-2px);
+}
+
+.checkers-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: clamp(42px, 8vw, 82px) 0 28px;
+}
+
+.checkers-heading h1 {
+  margin: 0;
+  color: var(--theme-text);
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: clamp(3.2rem, 10vw, 6rem);
+  font-weight: 500;
+  letter-spacing: -0.06em;
+  line-height: 0.92;
+}
+
+.checkers-intro {
+  max-width: 600px;
+  margin: 18px 0 0;
+  color: var(--theme-muted);
+  font-size: clamp(0.94rem, 2vw, 1.1rem);
+  line-height: 1.65;
+}
+
+.checkers-player-picker {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.checkers-player-picker legend {
+  padding: 0;
+  color: var(--theme-subtle);
+  font-size: 0.74rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.checkers-player-options {
+  display: flex;
+  gap: 7px;
+}
+
+.checkers-player-option {
+  display: inline-flex;
+  min-width: 60px;
+  min-height: 52px;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 14px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 15px;
+  color: var(--theme-muted);
+  background: var(--theme-surface-soft);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.checkers-player-option:hover {
+  border-color: color-mix(in srgb, var(--theme-accent) 70%, var(--theme-border));
+  color: var(--theme-text);
+  transform: translateY(-1px);
+}
+
+.checkers-player-option.is-selected {
+  border-color: var(--theme-accent);
+  color: var(--theme-accent);
+  background: color-mix(in srgb, var(--theme-accent) 14%, var(--theme-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-accent) 28%, transparent);
+}
+
+.checkers-player-option strong {
+  font-size: 1.12rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.checkers-player-option span {
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.checkers-layout {
+  display: grid;
+  align-items: start;
+  gap: clamp(22px, 4vw, 42px);
+  grid-template-columns: minmax(0, 1fr) minmax(270px, 350px);
+}
+
+.checkers-board-column,
+.checkers-sidebar {
+  min-width: 0;
+}
+
+.checkers-board-heading,
+.checkers-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.checkers-board-heading .eyebrow,
+.checkers-section-heading .eyebrow {
+  margin-bottom: 6px;
+}
+
+.checkers-board-heading h2,
+.checkers-section-heading h2,
+.checkers-rules h2 {
+  margin: 0;
+  color: var(--theme-text);
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: clamp(1.36rem, 3vw, 1.75rem);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.checkers-turn-chip {
+  display: inline-flex;
+  min-height: 39px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--theme-border);
+  border-radius: 999px;
+  color: var(--theme-text);
+  background: var(--theme-surface-soft);
+  font-size: 0.78rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.checkers-mini-symbol,
+.checkers-turn-symbol,
+.checkers-player-symbol {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  font-family: ui-rounded, "Arial Rounded MT Bold", system-ui, sans-serif;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.checkers-mini-symbol {
+  width: 1.5em;
+  height: 1.5em;
+  font-size: 0.82rem;
+}
+
+.checkers-board-shell {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  padding: clamp(12px, 2.8vw, 24px);
+  border: 1px solid color-mix(in srgb, var(--theme-accent) 32%, var(--theme-border));
+  border-radius: clamp(20px, 4vw, 32px);
+  background:
+    radial-gradient(circle at 50% 40%, rgba(239, 180, 91, 0.12), transparent 51%),
+    #211e1a;
+  box-shadow:
+    0 28px 72px rgba(0, 0, 0, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.checkers-board-shell.is-won {
+  border-color: color-mix(in srgb, var(--theme-success) 62%, var(--theme-border));
+  box-shadow:
+    0 28px 72px rgba(0, 0, 0, 0.28),
+    0 0 0 5px rgba(169, 223, 183, 0.08),
+    inset 0 0 0 1px rgba(169, 223, 183, 0.12);
+}
+
+.checkers-board {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.25 / 1;
+  overflow: visible;
+  isolation: isolate;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 50% 48%, rgba(255, 255, 255, 0.035), transparent 58%),
+    rgba(13, 12, 11, 0.3);
+}
+
+.checkers-board-star {
+  position: absolute;
+  z-index: 0;
+  inset: 10% 7%;
+  clip-path: polygon(50% 0%, 61% 29%, 93% 29%, 68% 47%, 78% 80%, 50% 61%, 22% 80%, 32% 47%, 7% 29%, 39% 29%);
+  opacity: 0.26;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(239, 180, 91, 0.34), transparent 57%),
+    color-mix(in srgb, var(--theme-accent) 25%, #171411);
+}
+
+.checkers-hole {
+  position: absolute;
+  display: grid;
+  width: clamp(18px, 4.3vw, 30px);
+  height: clamp(18px, 4.3vw, 30px);
+  place-items: center;
+  padding: 0;
+  border: 1.5px solid rgba(203, 188, 163, 0.44);
+  border-radius: 50%;
+  color: var(--theme-muted);
+  background: rgba(56, 49, 41, 0.95);
+  cursor: pointer;
+  line-height: 1;
+  transform: translate(-50%, -50%);
+  transition:
+    border-color 130ms ease,
+    background 130ms ease,
+    box-shadow 130ms ease,
+    transform 130ms ease;
+}
+
+.checkers-hole::before {
+  position: absolute;
+  inset: 21%;
+  border: 1px solid rgba(237, 221, 194, 0.16);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+
+.checkers-hole.camp-0,
+.checkers-hole.camp-3 {
+  border-color: color-mix(in srgb, var(--theme-accent) 46%, rgba(203, 188, 163, 0.42));
+}
+
+.checkers-hole.camp-1,
+.checkers-hole.camp-4 {
+  border-color: color-mix(in srgb, #7bc6cf 42%, rgba(203, 188, 163, 0.42));
+}
+
+.checkers-hole.camp-2,
+.checkers-hole.camp-5 {
+  border-color: color-mix(in srgb, #b391dc 42%, rgba(203, 188, 163, 0.42));
+}
+
+.checkers-hole:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.checkers-hole.is-empty:hover:not(:disabled),
+.checkers-hole.is-legal-step,
+.checkers-hole.is-legal-jump {
+  border-color: var(--theme-accent);
+  background: color-mix(in srgb, var(--theme-accent) 21%, var(--theme-surface));
+  box-shadow: 0 0 0 4px rgba(239, 180, 91, 0.11);
+}
+
+.checkers-hole.is-legal-step:hover:not(:disabled),
+.checkers-hole.is-legal-jump:hover:not(:disabled) {
+  transform: translate(-50%, -50%) scale(1.18);
+}
+
+.checkers-hole.is-legal-jump {
+  border-style: dashed;
+}
+
+.checkers-hole.owner-0,
+.checkers-piece.coral,
+.checkers-player-symbol.coral,
+.checkers-mini-symbol.coral,
+.checkers-turn-symbol.coral {
+  --player-color: #ef806d;
+}
+
+.checkers-hole.owner-1,
+.checkers-piece.indigo,
+.checkers-player-symbol.indigo,
+.checkers-mini-symbol.indigo,
+.checkers-turn-symbol.indigo {
+  --player-color: #7c9de5;
+}
+
+.checkers-hole.owner-2,
+.checkers-piece.teal,
+.checkers-player-symbol.teal,
+.checkers-mini-symbol.teal,
+.checkers-turn-symbol.teal {
+  --player-color: #67c4b4;
+}
+
+.checkers-hole.owner-3,
+.checkers-piece.violet,
+.checkers-player-symbol.violet,
+.checkers-mini-symbol.violet,
+.checkers-turn-symbol.violet {
+  --player-color: #bf92df;
+}
+
+.checkers-piece {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 78%;
+  height: 78%;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--player-color) 85%, #211c17);
+  border-radius: 50%;
+  color: #1c1712;
+  background: radial-gradient(circle at 33% 25%, color-mix(in srgb, var(--player-color) 75%, #fff), var(--player-color) 72%);
+  box-shadow:
+    inset -2px -3px 4px rgba(0, 0, 0, 0.27),
+    0 2px 4px rgba(0, 0, 0, 0.24);
+  font-size: clamp(0.58rem, 1.75vw, 0.85rem);
+  font-weight: 900;
+}
+
+.checkers-legal-marker {
+  position: absolute;
+  z-index: 2;
+  right: -0.25em;
+  bottom: -0.35em;
+  display: grid;
+  width: 1.1em;
+  height: 1.1em;
+  place-items: center;
+  border: 1px solid var(--theme-accent);
+  border-radius: 50%;
+  color: var(--theme-accent-ink);
+  background: var(--theme-accent);
+  font-size: clamp(0.62rem, 1.8vw, 0.78rem);
+  font-weight: 900;
+}
+
+.checkers-hole.is-selected {
+  z-index: 3;
+  border-color: #fff1ca;
+  box-shadow:
+    0 0 0 4px rgba(239, 180, 91, 0.3),
+    0 0 20px rgba(239, 180, 91, 0.23);
+  transform: translate(-50%, -50%) scale(1.13);
+}
+
+.checkers-hole.is-last-from {
+  border-style: dashed;
+}
+
+.checkers-hole.is-last-to {
+  border-color: var(--theme-success);
+  box-shadow: 0 0 0 4px rgba(169, 223, 183, 0.19);
+}
+
+.checkers-hole.is-hop-end {
+  border-color: #fff1ca;
+}
+
+.checkers-hole.is-hop-visited::after,
+.checkers-hole.is-last-path::after {
+  position: absolute;
+  z-index: 2;
+  right: -0.18em;
+  top: -0.28em;
+  display: grid;
+  width: 0.75em;
+  height: 0.75em;
+  place-items: center;
+  border: 1px solid #f2d18c;
+  border-radius: 50%;
+  color: #342415;
+  background: #f2d18c;
+  content: "";
+  font-size: 0.6em;
+}
+
+.checkers-hole.is-last-path::after {
+  border-color: var(--theme-success);
+  background: var(--theme-success);
+}
+
+.checkers-hole:focus-visible {
+  z-index: 5;
+  outline: 3px solid var(--theme-accent);
+  outline-offset: 4px;
+}
+
+.checkers-board-meta {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.checkers-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: var(--theme-muted);
+  font-size: 0.77rem;
+  font-weight: 700;
+}
+
+.checkers-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.checkers-legend-dot {
+  display: grid;
+  width: 1.55em;
+  height: 1.55em;
+  place-items: center;
+  border: 1px solid var(--theme-border);
+  border-radius: 50%;
+  color: var(--theme-accent);
+  background: var(--theme-surface-soft);
+  font-style: normal;
+  line-height: 1;
+}
+
+.checkers-legend-dot.is-jump {
+  border-style: dashed;
+}
+
+.checkers-legend-dot.is-recent {
+  color: var(--theme-success);
+}
+
+.checkers-recent-move {
+  min-height: 1.5em;
+  margin: 0;
+  color: var(--theme-subtle);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.checkers-sidebar {
+  display: grid;
+  gap: 16px;
+}
+
+.checkers-turn-panel {
+  display: grid;
+  gap: 8px;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--player-color, var(--theme-accent)) 42%, var(--theme-border));
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--player-color, var(--theme-accent)) 18%, transparent), transparent 52%),
+    var(--theme-surface-raised);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.16);
+}
+
+.checkers-turn-panel.player-0 { --player-color: #ef806d; }
+.checkers-turn-panel.player-1 { --player-color: #7c9de5; }
+.checkers-turn-panel.player-2 { --player-color: #67c4b4; }
+.checkers-turn-panel.player-3 { --player-color: #bf92df; }
+
+.checkers-turn-panel-topline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--player-color);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.checkers-turn-symbol {
+  width: 1.7em;
+  height: 1.7em;
+  color: #211914;
+  background: var(--player-color);
+  font-size: 0.9rem;
+}
+
+.checkers-turn-panel h2 {
+  margin: 0;
+  color: var(--theme-text);
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: clamp(1.55rem, 4vw, 2.05rem);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.checkers-turn-panel p {
+  margin: 2px 0 0;
+  color: var(--theme-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.checkers-players {
+  padding: 18px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 20px;
+  background: var(--theme-surface-soft);
+}
+
+.checkers-player-count {
+  color: var(--theme-subtle);
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.checkers-player-cards {
+  display: grid;
+  gap: 8px;
+}
+
+.checkers-player-card {
+  --player-color: var(--theme-muted);
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--theme-surface) 70%, transparent);
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.checkers-player-card.coral { --player-color: #ef806d; }
+.checkers-player-card.indigo { --player-color: #7c9de5; }
+.checkers-player-card.teal { --player-color: #67c4b4; }
+.checkers-player-card.violet { --player-color: #bf92df; }
+
+.checkers-player-card.is-current {
+  border-color: color-mix(in srgb, var(--player-color) 72%, var(--theme-border));
+  background: color-mix(in srgb, var(--player-color) 9%, var(--theme-surface));
+  transform: translateX(2px);
+}
+
+.checkers-player-card.is-winner {
+  border-color: var(--theme-success);
+  background: color-mix(in srgb, var(--theme-success) 9%, var(--theme-surface));
+}
+
+.checkers-player-card-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkers-player-symbol {
+  width: 30px;
+  height: 30px;
+  color: #1f1712;
+  background: var(--player-color);
+  font-size: 0.9rem;
+}
+
+.checkers-player-card-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.checkers-player-card-heading strong {
+  overflow: hidden;
+  color: var(--theme-text);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.checkers-player-card-heading small {
+  overflow: hidden;
+  color: var(--theme-subtle);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.checkers-player-status {
+  min-width: 35px;
+  margin-left: auto;
+  color: var(--player-color);
+  font-size: 0.68rem;
+  font-weight: 850;
+  text-align: right;
+}
+
+.checkers-player-card.is-winner .checkers-player-status {
+  color: var(--theme-success);
+}
+
+.checkers-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.checkers-progress-track {
+  display: block;
+  flex: 1 1 auto;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--theme-border) 70%, transparent);
+}
+
+.checkers-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--player-color);
+  transition: width 180ms ease;
+}
+
+.checkers-progress small {
+  flex: 0 0 auto;
+  color: var(--theme-subtle);
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.checkers-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.checkers-actions .primary-button,
+.checkers-actions .secondary-button {
+  min-height: 46px;
+  padding-inline: 12px;
+  font-size: 0.82rem;
+}
+
+.checkers-rules {
+  padding: 17px 18px 18px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 20px;
+  background: var(--theme-surface-soft);
+}
+
+.checkers-rules .eyebrow {
+  margin-bottom: 6px;
+}
+
+.checkers-rules ol {
+  display: grid;
+  gap: 7px;
+  margin: 14px 0 13px;
+  padding-left: 1.25rem;
+  color: var(--theme-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.checkers-rules li::marker {
+  color: var(--theme-accent);
+  font-weight: 800;
+}
+
+.checkers-rules > p:last-child {
+  margin: 0;
+  color: var(--theme-subtle);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.checkers-live-region {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+html[data-theme="light"] .checkers-home-mark {
+  background: rgba(255, 253, 249, 0.7);
+}
+
+html[data-theme="light"] .checkers-player-option,
+html[data-theme="light"] .checkers-turn-chip,
+html[data-theme="light"] .checkers-players,
+html[data-theme="light"] .checkers-rules {
+  border-color: var(--theme-border);
+  background: rgba(255, 253, 249, 0.76);
+}
+
+html[data-theme="light"] .checkers-board-shell {
+  border-color: color-mix(in srgb, var(--theme-accent) 58%, var(--theme-border));
+  background:
+    radial-gradient(circle at 50% 40%, rgba(166, 101, 22, 0.1), transparent 51%),
+    #fffaf2;
+  box-shadow:
+    0 28px 70px rgba(73, 62, 47, 0.14),
+    inset 0 0 0 1px rgba(73, 62, 47, 0.08);
+}
+
+html[data-theme="light"] .checkers-board {
+  background:
+    radial-gradient(circle at 50% 48%, rgba(166, 101, 22, 0.06), transparent 58%),
+    rgba(255, 253, 249, 0.62);
+}
+
+html[data-theme="light"] .checkers-board-star {
+  opacity: 0.2;
+}
+
+html[data-theme="light"] .checkers-hole {
+  border-color: rgba(110, 90, 65, 0.46);
+  color: #675b4d;
+  background: rgba(250, 245, 235, 0.94);
+}
+
+html[data-theme="light"] .checkers-hole::before {
+  border-color: rgba(110, 90, 65, 0.15);
+}
+
+html[data-theme="light"] .checkers-player-card {
+  background: rgba(255, 250, 242, 0.7);
+}
+
+html[data-theme="light"] .checkers-turn-panel {
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--player-color, var(--theme-accent)) 13%, transparent), transparent 52%),
+    #fffaf2;
+  box-shadow: 0 18px 42px rgba(73, 62, 47, 0.12);
+}
+
+@media (max-width: 860px) {
+  .checkers-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .checkers-player-picker {
+    width: 100%;
+  }
+
+  .checkers-player-options {
+    width: 100%;
+  }
+
+  .checkers-player-option {
+    flex: 1 1 0;
+  }
+
+  .checkers-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .checkers-sidebar {
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+    align-items: start;
+  }
+
+  .checkers-turn-panel {
+    grid-column: 1 / -1;
+  }
+
+  .checkers-actions {
+    grid-column: 1 / -1;
+  }
+
+  .checkers-rules {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .checkers-page {
+    padding-inline: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right));
+  }
+
+  .checkers-topbar .topbar-actions {
+    gap: 5px;
+  }
+
+  .checkers-topbar .profile-trigger {
+    max-width: 112px;
+    padding-inline: 9px;
+  }
+
+  .checkers-topbar .theme-toggle {
+    min-width: 40px;
+    padding-inline: 8px;
+  }
+
+  .checkers-topbar .theme-toggle-label {
+    display: none;
+  }
+
+  .checkers-heading {
+    padding-top: 38px;
+  }
+
+  .checkers-heading h1 {
+    font-size: clamp(3.1rem, 19vw, 4.6rem);
+  }
+
+  .checkers-board-shell {
+    padding: 10px;
+    border-radius: 21px;
+  }
+
+  .checkers-board {
+    border-radius: 16px;
+  }
+
+  .checkers-hole {
+    width: clamp(17px, 5.4vw, 24px);
+    height: clamp(17px, 5.4vw, 24px);
+    border-width: 1px;
+  }
+
+  .checkers-piece {
+    font-size: clamp(0.52rem, 2.35vw, 0.72rem);
+  }
+
+  .checkers-board-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .checkers-turn-chip {
+    align-self: stretch;
+    justify-content: center;
+  }
+
+  .checkers-sidebar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .checkers-turn-panel,
+  .checkers-actions,
+  .checkers-rules {
+    grid-column: auto;
+  }
+
+  .checkers-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .checkers-home-mark,
+  .checkers-player-option,
+  .checkers-hole,
+  .checkers-player-card,
+  .checkers-progress-track > span {
+    transition: none;
+  }
+}

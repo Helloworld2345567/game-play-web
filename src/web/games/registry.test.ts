@@ -101,6 +101,21 @@ function tiaojiaqiPosition(
 }
 
 describe("game outcome presentation", () => {
+  it("allowlists the local Chinese Checkers page without a room renderer", async () => {
+    const loader = getClientGamePageLoader("chinese-checkers");
+    expect(loader).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("chinese-checkers")?.loadPage).toBe(
+      loader,
+    );
+    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader(
+        "chinese-checkers",
+        "chinese-checkers.local.v1",
+      ),
+    ).toBeNull();
+  });
+
   it("allowlists the local 2048 page without a room renderer", async () => {
     const loader = getClientGamePageLoader("2048");
     expect(loader).toBeTypeOf("function");
