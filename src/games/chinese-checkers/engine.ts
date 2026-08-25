@@ -3,6 +3,10 @@ export type ChineseCheckersPlayerId = 0 | 1 | 2 | 3;
 export type ChineseCheckersCamp = 0 | 1 | 2 | 3 | 4 | 5;
 export type ChineseCheckersPosition = `${number},${number}`;
 export type ChineseCheckersStatus = "playing" | "won";
+export type ChineseCheckersEdge = readonly [
+  ChineseCheckersPosition,
+  ChineseCheckersPosition,
+];
 
 export interface ChineseCheckersHole {
   readonly key: ChineseCheckersPosition;
@@ -102,6 +106,28 @@ const DIRECTIONS = [
   { x: -1, y: 1 },
   { x: 1, y: 1 },
 ] as const;
+
+function makeChineseCheckersEdges(): readonly ChineseCheckersEdge[] {
+  const seen = new Set<string>();
+  const edges: ChineseCheckersEdge[] = [];
+  for (const hole of CHINESE_CHECKERS_HOLES) {
+    for (const direction of DIRECTIONS) {
+      const neighbor = positionKey(
+        hole.x + direction.x,
+        hole.y + direction.y,
+      );
+      if (!HOLE_KEYS.has(neighbor)) continue;
+
+      const edgeKey = [hole.key, neighbor].sort().join("|");
+      if (seen.has(edgeKey)) continue;
+      seen.add(edgeKey);
+      edges.push([hole.key, neighbor]);
+    }
+  }
+  return edges;
+}
+
+export const CHINESE_CHECKERS_EDGES = makeChineseCheckersEdges();
 
 const CAMPS = Array.from({ length: 6 }, (_, camp) =>
   CHINESE_CHECKERS_HOLES

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHINESE_CHECKERS_EDGES,
   CHINESE_CHECKERS_HOLES,
   createChineseCheckers,
   finishChineseCheckersHop,
@@ -15,6 +16,44 @@ describe("Chinese Checkers engine", () => {
     3: [0, 2, 4],
     4: [5, 1, 2, 4],
   } as const;
+
+  it("models every adjacent board edge exactly once", () => {
+    const holes = new Map(
+      CHINESE_CHECKERS_HOLES.map((hole) => [hole.key, hole] as const),
+    );
+    const undirectedEdges = new Set(
+      CHINESE_CHECKERS_EDGES.map(([from, to]) =>
+        [from, to].sort().join("|")),
+    );
+    const directionCounts = { horizontal: 0, rising: 0, falling: 0 };
+
+    expect(CHINESE_CHECKERS_EDGES).toHaveLength(312);
+    expect(undirectedEdges.size).toBe(CHINESE_CHECKERS_EDGES.length);
+
+    for (const [from, to] of CHINESE_CHECKERS_EDGES) {
+      const fromHole = holes.get(from);
+      const toHole = holes.get(to);
+      expect(fromHole).toBeDefined();
+      expect(toHole).toBeDefined();
+      if (fromHole === undefined || toHole === undefined) continue;
+
+      const dx = toHole.x - fromHole.x;
+      const dy = toHole.y - fromHole.y;
+      expect([[2, 0], [1, 1]]).toContainEqual([
+        Math.abs(dx),
+        Math.abs(dy),
+      ]);
+      if (dy === 0) directionCounts.horizontal += 1;
+      else if (dx * dy < 0) directionCounts.rising += 1;
+      else directionCounts.falling += 1;
+    }
+
+    expect(directionCounts).toEqual({
+      horizontal: 104,
+      rising: 104,
+      falling: 104,
+    });
+  });
 
   it.each([2, 3, 4] as const)(
     "creates the standard 121-hole board for %i players",

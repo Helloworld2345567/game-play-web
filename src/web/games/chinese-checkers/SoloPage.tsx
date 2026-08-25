@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "preact/hooks";
 import {
+  CHINESE_CHECKERS_EDGES,
   CHINESE_CHECKERS_HOLES,
   createChineseCheckers,
   finishChineseCheckersHop,
@@ -7,6 +8,7 @@ import {
   getChineseCheckersLegalMoves,
   moveChineseCheckers,
   type ChineseCheckersCamp,
+  type ChineseCheckersHole,
   type ChineseCheckersPlayerId,
   type ChineseCheckersPlayerCount,
   type ChineseCheckersPosition,
@@ -43,6 +45,13 @@ const CAMP_NAMES: Readonly<Record<ChineseCheckersCamp, string>> = {
   4: "西南尖角",
   5: "西北尖角",
 };
+
+const BOARD_CENTER_PERCENT = 50;
+const BOARD_X_STEP_PERCENT = 3.6;
+const BOARD_Y_STEP_PERCENT = 5.4;
+const HOLES_BY_POSITION = new Map(
+  CHINESE_CHECKERS_HOLES.map((hole) => [hole.key, hole] as const),
+);
 
 /** Return how many of a player's ten pieces currently occupy their target. */
 export function getChineseCheckersTargetProgress(
@@ -98,11 +107,18 @@ function jumpCount(state: ChineseCheckersState): number {
   return Math.max(0, pathLength - 1);
 }
 
-function holePositionStyle(hole: (typeof CHINESE_CHECKERS_HOLES)[number]) {
+function holePositionPoint(
+  hole: ChineseCheckersHole,
+): { readonly x: number; readonly y: number } {
   return {
-    left: `${50 + hole.x * 3.6}%`,
-    top: `${50 + hole.y * 5.4}%`,
+    x: BOARD_CENTER_PERCENT + hole.x * BOARD_X_STEP_PERCENT,
+    y: BOARD_CENTER_PERCENT + hole.y * BOARD_Y_STEP_PERCENT,
   };
+}
+
+function holePositionStyle(hole: ChineseCheckersHole) {
+  const point = holePositionPoint(hole);
+  return { left: `${point.x}%`, top: `${point.y}%` };
 }
 
 export function SoloPage({
@@ -319,6 +335,34 @@ export function SoloPage({
               aria-colcount={25}
             >
               <div class="checkers-board-star" aria-hidden="true" />
+              <svg
+                class="checkers-board-edges"
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+                focusable="false"
+              >
+                {CHINESE_CHECKERS_EDGES.map(([from, to]) => {
+                  const fromHole = HOLES_BY_POSITION.get(from);
+                  const toHole = HOLES_BY_POSITION.get(to);
+                  if (fromHole === undefined || toHole === undefined) {
+                    return null;
+                  }
+                  const fromPoint = holePositionPoint(fromHole);
+                  const toPoint = holePositionPoint(toHole);
+                  return (
+                    <line
+                      key={`${from}-${to}`}
+                      data-from={from}
+                      data-to={to}
+                      x1={fromPoint.x}
+                      y1={fromPoint.y}
+                      x2={toPoint.x}
+                      y2={toPoint.y}
+                    />
+                  );
+                })}
+              </svg>
               {CHINESE_CHECKERS_HOLES.map((hole, index) => {
                 const owner = game.pieces[hole.key];
                 const isSelected = selectedPosition === hole.key;

@@ -272,8 +272,27 @@
     color-mix(in srgb, var(--theme-accent) 25%, #171411);
 }
 
+.checkers-board-edges {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.checkers-board-edges line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--theme-accent) 38%, var(--theme-border));
+  stroke-linecap: round;
+  stroke-width: 1.15px;
+  vector-effect: non-scaling-stroke;
+}
+
 .checkers-hole {
   position: absolute;
+  z-index: 2;
   display: grid;
   width: clamp(18px, 4.3vw, 30px);
   height: clamp(18px, 4.3vw, 30px);
@@ -779,6 +798,10 @@ html[data-theme="light"] .checkers-board {
 
 html[data-theme="light"] .checkers-board-star {
   opacity: 0.2;
+}
+
+html[data-theme="light"] .checkers-board-edges line {
+  stroke: rgba(110, 90, 65, 0.3);
 }
 
 html[data-theme="light"] .checkers-hole {

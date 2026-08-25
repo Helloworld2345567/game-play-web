@@ -67,6 +67,7 @@ test("projects the 121 holes as a regular six-point star", async ({ page }) => {
   );
   expect(starClipPath).toMatch(/^polygon\(/u);
   expect(starClipPath.slice(8, -1).split(",")).toHaveLength(12);
+  await expect(page.locator(".checkers-board-edges line")).toHaveCount(312);
 
   const center = await locatorCenter(hole(page, "0，0"));
   const tips = await Promise.all(
