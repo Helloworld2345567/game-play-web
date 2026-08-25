@@ -2,10 +2,10 @@ import { DurableObject } from "cloudflare:workers";
 import {
   createRoom,
   getGuestSeat,
+  getRoomSeatOrder,
   hydrateStoredRoom,
   joinRoom,
   SEAT_A,
-  SEAT_B,
   type PersistedRoom,
   type PlatformSeatId,
   type StoredRoom,
@@ -117,10 +117,12 @@ const HTTP_LEASE_MS = 15_000;
 const HTTP_LEASE_PERSIST_INTERVAL_MS = 5_000;
 const MAX_CONNECTIONS_PER_GUEST = 4;
 const MAX_CONNECTIONS_PER_ROOM = 16;
-// Reserve four connections for each of the two Seats so Spectators can never
-// prevent a player from reconnecting while the total remains bounded at 16.
-const MAX_SPECTATOR_CONNECTIONS_PER_ROOM =
-  MAX_CONNECTIONS_PER_ROOM - 2 * MAX_CONNECTIONS_PER_GUEST;
+const MAX_SPECTATOR_CONNECTIONS_PER_ROOM = 8;
+const MAX_PLAYER_CONNECTIONS_PER_ROOM =
+  MAX_CONNECTIONS_PER_ROOM - MAX_SPECTATOR_CONNECTIONS_PER_ROOM;
+// The room-wide ceiling remains fixed for resource safety. Independent player
+// and Spectator pools keep reconnect traffic from consuming the audience
+// budget, while the per-Guest cap prevents one identity from consuming either.
 const INTERNAL_GUEST_HEADER = "X-Internal-Guest-Id";
 const INTERNAL_DISPLAY_NAME_HEADER = "X-Internal-Display-Name";
 const MAX_MESSAGE_BYTES = 4_096;
@@ -224,8 +226,17 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     void this.ctx.blockConcurrencyWhile(async () => {
       const storedRoom =
         (await this.ctx.storage.get<PersistedRoom>(ROOM_STORAGE_KEY)) ?? null;
-      this.room =
-        storedRoom === null ? null : hydrateStoredRoom(storedRoom);
+      if (storedRoom === null) {
+        this.room = null;
+      } else {
+        const storedRules = getGameRules(storedRoom.ruleSetId);
+        if (storedRules === null) {
+          throw new Error(
+            `Stored Room has unknown rules: ${storedRoom.ruleSetId}`,
+          );
+        }
+        this.room = hydrateStoredRoom(storedRoom, storedRules);
+      }
       this.httpLeases =
         (await this.ctx.storage.get<HttpLeases>(HTTP_LEASES_KEY)) ?? {};
       this.httpRateBuckets =
@@ -339,10 +350,12 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       const prospectiveSeat = getGuestSeat(admittedRoom, guestId);
       const connectionCounts = this.connectionCounts(guestId, now);
       if (
+        connectionCounts.total >= MAX_CONNECTIONS_PER_ROOM ||
         connectionCounts.guest >= MAX_CONNECTIONS_PER_GUEST ||
-        (prospectiveSeat === null &&
-          connectionCounts.spectators >=
-            MAX_SPECTATOR_CONNECTIONS_PER_ROOM)
+        (prospectiveSeat === null
+          ? connectionCounts.spectators >=
+            MAX_SPECTATOR_CONNECTIONS_PER_ROOM
+          : connectionCounts.players >= MAX_PLAYER_CONNECTIONS_PER_ROOM)
       ) {
         return this.httpError("room.too_many_connections");
       }
@@ -783,9 +796,11 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     const prospectiveSeat = getGuestSeat(admittedRoom, guestId);
     const connectionCounts = this.connectionCounts(guestId, now);
     if (
+      connectionCounts.total >= MAX_CONNECTIONS_PER_ROOM ||
       connectionCounts.guest >= MAX_CONNECTIONS_PER_GUEST ||
-      (prospectiveSeat === null &&
-        connectionCounts.spectators >= MAX_SPECTATOR_CONNECTIONS_PER_ROOM)
+      (prospectiveSeat === null
+        ? connectionCounts.spectators >= MAX_SPECTATOR_CONNECTIONS_PER_ROOM
+        : connectionCounts.players >= MAX_PLAYER_CONNECTIONS_PER_ROOM)
     ) {
       return this.rejectedSocket("room.too_many_connections");
     }
@@ -1382,10 +1397,10 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
   ): Promise<boolean> {
     if (this.room === null || this.discarding) return false;
     const retainedGuestIds = new Set<string>([
-      this.room.seats[SEAT_A].guestId,
-      ...(this.room.seats[SEAT_B] === null
-        ? []
-        : [this.room.seats[SEAT_B].guestId]),
+      ...getRoomSeatOrder(this.room).flatMap((seatId) => {
+        const seat = this.room!.seats[seatId] ?? null;
+        return seat === null ? [] : [seat.guestId];
+      }),
     ]);
     for (const socket of this.liveSockets()) {
       const attachment =
@@ -1533,10 +1548,11 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
   private connectionCounts(
     guestId: string,
     now: number,
-  ): { guest: number; spectators: number } {
+  ): { total: number; guest: number; players: number; spectators: number } {
     const sockets = this.liveSockets();
     const httpLeases = this.activeHttpLeases(now);
     return {
+      total: sockets.length + httpLeases.length,
       guest:
         sockets.filter((socket) => {
           const attachment =
@@ -1544,6 +1560,12 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
           return attachment?.guestId === guestId;
         }).length +
         httpLeases.filter((lease) => lease.guestId === guestId).length,
+      players:
+        sockets.filter((socket) => {
+          const attachment =
+            socket.deserializeAttachment() as SocketAttachment | null;
+          return attachment?.seat !== null && attachment?.seat !== undefined;
+        }).length + httpLeases.filter((lease) => lease.seat !== null).length,
       spectators:
         sockets.filter((socket) => {
           const attachment =

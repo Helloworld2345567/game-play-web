@@ -164,6 +164,147 @@ function joinedGomokuRoom(
 }
 
 describe("room state", () => {
+  function multiSeatRules(playerCount: 3 | 4): GameRules {
+    return {
+      definition: {
+        gameType: "multi-seat-test",
+        ruleSetId: `multi-seat-test.${playerCount}p.v1`,
+        actionConsistency: "strict_revision",
+        playerCount,
+      },
+      create(seats) {
+        return {
+          data: { seats: [...seats] },
+          turn: seats[0]!,
+          outcome: null,
+        };
+      },
+      apply(current) {
+        return { ok: true, next: current };
+      },
+      project(position) {
+        return position;
+      },
+    };
+  }
+
+  it("fills four player seats before creating the position and makes the fifth guest a spectator", () => {
+    const rules = multiSeatRules(4);
+    let room = createRoom({
+      roomId: "four-seat-room",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    expect(room.position).toBeNull();
+    for (const [guestId, now] of [
+      ["guest-b", 2_000],
+      ["guest-c", 3_000],
+      ["guest-d", 4_000],
+    ] as const) {
+      const joined = joinRoom(room, guestId, rules, now);
+      expect(joined.ok).toBe(true);
+      if (!joined.ok) return;
+      room = joined.room;
+    }
+
+    expect(room.seatOrder).toEqual(["seat-a", "seat-b", "seat-c", "seat-d"]);
+    expect(room.position?.turn).toBe("seat-a");
+    expect(Object.keys(room.actionJournal)).toEqual([
+      "seat-a",
+      "seat-b",
+      "seat-c",
+      "seat-d",
+    ]);
+    expect(joinRoom(room, "guest-e", rules, 5_000)).toEqual({
+      ok: false,
+      room,
+      code: "room.full",
+    });
+  });
+
+  it("requires every three-seat player to ready and rotates the next round order", () => {
+    const rules = multiSeatRules(3);
+    let room = createRoom({
+      roomId: "three-seat-room",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    for (const [guestId, now] of [
+      ["guest-b", 2_000],
+      ["guest-c", 3_000],
+    ] as const) {
+      const joined = joinRoom(room, guestId, rules, now);
+      if (!joined.ok) throw new Error(joined.code);
+      room = joined.room;
+    }
+    room = {
+      ...room,
+      position: {
+        ...room.position!,
+        turn: null,
+        outcome: { kind: "win", winner: "seat-a", reason: "test" },
+      },
+    };
+
+    for (const [guestId, now] of [
+      ["guest-a", 4_000],
+      ["guest-b", 5_000],
+    ] as const) {
+      const ready = applyRoomCommand(
+        room,
+        guestId,
+        {
+          v: 1,
+          type: "rematch_ready",
+          expectedRevision: room.revision,
+          ready: true,
+        },
+        rules,
+        now,
+      );
+      if (!ready.ok) throw new Error(ready.code);
+      room = ready.room;
+    }
+    expect(room.position?.outcome).not.toBeNull();
+
+    const finalReady = applyRoomCommand(
+      room,
+      "guest-c",
+      {
+        v: 1,
+        type: "rematch_ready",
+        expectedRevision: room.revision,
+        ready: true,
+      },
+      rules,
+      6_000,
+    );
+    expect(finalReady.ok).toBe(true);
+    if (!finalReady.ok) return;
+    expect(finalReady.room.round).toBe(2);
+    expect(finalReady.room.activeSeatOrder).toEqual([
+      "seat-b",
+      "seat-c",
+      "seat-a",
+    ]);
+    expect(finalReady.room.position?.turn).toBe("seat-b");
+    expect(
+      applyRoomCommand(
+        finalReady.room,
+        "guest-a",
+        {
+          v: 1,
+          type: "resign",
+          expectedRevision: finalReady.room.revision,
+        },
+        rules,
+        7_000,
+      ),
+    ).toMatchObject({ ok: false, code: "room.resign_unavailable" });
+  });
+
   it("creates rooms using the current persisted schema", () => {
     const room = createRoom({
       roomId: "current-schema-room",
@@ -172,8 +313,170 @@ describe("room state", () => {
       now: 1_000,
     });
 
-    expect(room.schemaVersion).toBe(5);
+    expect(room.schemaVersion).toBe(6);
+    expect(room.seatOrder).toEqual(["seat-a", "seat-b"]);
     expect(room.rematchRuleSetId).toBeNull();
+  });
+
+  it("fails closed when a v6 room seat count disagrees with its rules", () => {
+    const room = createRoom({
+      roomId: "mismatched-rule-contract",
+      creatorGuestId: "guest-a",
+      rules: multiSeatRules(4),
+      now: 1_000,
+    });
+
+    expect(() => hydrateStoredRoom(room, gomokuRules)).toThrow(
+      "Stored Room does not match its rules",
+    );
+  });
+
+  it("fails closed instead of repairing a malformed v6 seat map", () => {
+    const rules = multiSeatRules(3);
+    const room = createRoom({
+      roomId: "malformed-seat-map",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    const malformed = {
+      ...room,
+      seats: {
+        "seat-a": room.seats["seat-a"],
+        "seat-b": room.seats["seat-b"],
+      },
+    } as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room seat state",
+    );
+  });
+
+  it("fails closed on malformed v6 seat values", () => {
+    const rules = multiSeatRules(3);
+    const room = createRoom({
+      roomId: "malformed-seat-values",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    const malformed = {
+      ...room,
+      seats: { ...room.seats, "seat-a": null },
+    } as unknown as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room seat state",
+    );
+  });
+
+  it("fails closed instead of repairing a malformed v6 action journal", () => {
+    const rules = multiSeatRules(3);
+    const room = createRoom({
+      roomId: "malformed-action-journal",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    const malformed = {
+      ...room,
+      actionJournal: {
+        "seat-a": room.actionJournal["seat-a"],
+        "seat-b": room.actionJournal["seat-b"],
+      },
+    } as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room action journal",
+    );
+  });
+
+  it("fails closed on malformed v6 action journal values", () => {
+    const rules = multiSeatRules(3);
+    const room = createRoom({
+      roomId: "malformed-action-journal-values",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    const malformed = {
+      ...room,
+      actionJournal: { ...room.actionJournal, "seat-a": {} },
+    } as unknown as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room action journal",
+    );
+  });
+
+  it("fails closed on a malformed v6 active seat order", () => {
+    const rules = multiSeatRules(3);
+    const room = createRoom({
+      roomId: "malformed-active-order",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    const malformed = {
+      ...room,
+      activeSeatOrder: ["seat-a", "seat-b", "seat-a"],
+    } as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room active seat order",
+    );
+  });
+
+  it("fails closed on a sparse v6 active seat order", () => {
+    const rules = multiSeatRules(3);
+    let room = createRoom({
+      roomId: "sparse-active-order",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    for (const [guestId, now] of [
+      ["guest-b", 2_000],
+      ["guest-c", 3_000],
+    ] as const) {
+      const joined = joinRoom(room, guestId, rules, now);
+      if (!joined.ok) throw new Error(joined.code);
+      room = joined.room;
+    }
+    const sparseOrder = new Array<string>(3);
+    sparseOrder[0] = "seat-a";
+    sparseOrder[2] = "seat-c";
+    const malformed = {
+      ...room,
+      activeSeatOrder: sparseOrder,
+    } as unknown as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room active seat order",
+    );
+  });
+
+  it("fails closed on a malformed v6 rule position", () => {
+    const rules = multiSeatRules(3);
+    let room = createRoom({
+      roomId: "malformed-rule-position",
+      creatorGuestId: "guest-a",
+      rules,
+      now: 1_000,
+    });
+    for (const [guestId, now] of [
+      ["guest-b", 2_000],
+      ["guest-c", 3_000],
+    ] as const) {
+      const joined = joinRoom(room, guestId, rules, now);
+      if (!joined.ok) throw new Error(joined.code);
+      room = joined.room;
+    }
+    const malformed = { ...room, position: {} } as unknown as PersistedRoom;
+
+    expect(() => hydrateStoredRoom(malformed, rules)).toThrow(
+      "Invalid Room position",
+    );
   });
 
   it("applies concurrent Actions from the same base revision to the latest state", () => {
@@ -577,9 +880,10 @@ describe("room state", () => {
     };
     const persistedRoom: PersistedRoom = legacyRoom;
 
-    const hydrated = hydrateStoredRoom(persistedRoom);
+    const hydrated = hydrateStoredRoom(persistedRoom, gomokuRules);
 
-    expect(hydrated.schemaVersion).toBe(5);
+    expect(hydrated.schemaVersion).toBe(6);
+    expect(hydrated.seatOrder).toEqual(["seat-a", "seat-b"]);
     expect(hydrated.roundStartRevision).toBe(legacyRoom.revision);
     expect(hydrated.actionJournal).toEqual({
       "seat-a": { compactedThrough: -1, receipts: [] },
@@ -626,7 +930,7 @@ describe("room state", () => {
       },
     };
 
-    const hydrated = hydrateStoredRoom(legacyRoom);
+    const hydrated = hydrateStoredRoom(legacyRoom, concurrentRules);
 
     expect(hydrated.actionJournal["seat-a"]).toMatchObject({
       compactedThrough: 9,
@@ -660,9 +964,10 @@ describe("room state", () => {
       schemaVersion: 3,
     };
 
-    const hydrated = hydrateStoredRoom(legacyRoom);
+    const hydrated = hydrateStoredRoom(legacyRoom, gomokuRules);
 
-    expect(hydrated.schemaVersion).toBe(5);
+    expect(hydrated.schemaVersion).toBe(6);
+    expect(hydrated.seatOrder).toEqual(["seat-a", "seat-b"]);
     expect(hydrated.preparation).toBeNull();
     expect(hydrated.activeSeatOrder).toEqual(["seat-a", "seat-b"]);
   });
@@ -679,20 +984,21 @@ describe("room state", () => {
       schemaVersion: 4,
     };
 
-    const hydrated = hydrateStoredRoom(legacyRoom);
+    const hydrated = hydrateStoredRoom(legacyRoom, concurrentRules);
 
-    expect(hydrated.schemaVersion).toBe(5);
+    expect(hydrated.schemaVersion).toBe(6);
+    expect(hydrated.seatOrder).toEqual(["seat-a", "seat-b"]);
     expect(hydrated.rematchRuleSetId).toBeNull();
   });
 
   it("fails closed instead of downgrading an unknown future schema", () => {
     const futureRoom = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       roomId: "future-room",
     } as unknown as PersistedRoom;
 
-    expect(() => hydrateStoredRoom(futureRoom)).toThrow(
-      "Unsupported Room schema version: 6",
+    expect(() => hydrateStoredRoom(futureRoom, gomokuRules)).toThrow(
+      "Unsupported Room schema version: 7",
     );
   });
 

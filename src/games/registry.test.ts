@@ -8,6 +8,42 @@ import {
 } from "./registry";
 
 describe("game rules registry", () => {
+  it("registers creatable Chinese Checkers room rules for 2, 3, and 4 players", () => {
+    for (const playerCount of [2, 3, 4] as const) {
+      const ruleSetId = `chinese-checkers.room.${playerCount}p.v1`;
+      expect(isSupportedGame("chinese-checkers", ruleSetId)).toBe(true);
+      expect(isCreatableRuleSet("chinese-checkers", ruleSetId)).toBe(true);
+      expect(getGameRules(ruleSetId)?.definition).toMatchObject({
+        gameType: "chinese-checkers",
+        ruleSetId,
+        actionConsistency: "strict_revision",
+        playerCount,
+        resignPolicy: "disabled",
+      });
+    }
+    expect(
+      isSupportedGame("chinese-checkers", "chinese-checkers.local.v1"),
+    ).toBe(false);
+    expect(
+      isCreatableRuleSet("chinese-checkers", "chinese-checkers.local.v1"),
+    ).toBe(false);
+  });
+
+  it("does not allow a Chinese Checkers rematch to change player count", () => {
+    expect(
+      getRematchGameRules(
+        "chinese-checkers.room.2p.v1",
+        "chinese-checkers.room.3p.v1",
+      ),
+    ).toBeNull();
+    expect(getRematchRuleSetIds("chinese-checkers.room.2p.v1")).toEqual([
+      "chinese-checkers.room.2p.v1",
+    ]);
+    expect(getRematchRuleSetIds("chinese-checkers.room.3p.v1")).toEqual([
+      "chinese-checkers.room.3p.v1",
+    ]);
+  });
+
   it("registers and allows creation of five-flower diamond Tiaojiaqi", () => {
     const ruleSetId = "tiaojiaqi.five-flower-diamond.v1";
 

@@ -3,7 +3,10 @@ import {
   createChineseCheckers,
   getChineseCheckersCamp,
 } from "../../../games/chinese-checkers/engine";
-import { getChineseCheckersTargetProgress } from "./SoloPage";
+import {
+  getChineseCheckersTargetProgress,
+  readChineseCheckersPlayerCount,
+} from "./SoloPage";
 
 describe("Chinese Checkers SoloPage helpers", () => {
   it("counts a player's pieces in their target camp", () => {
@@ -24,5 +27,13 @@ describe("Chinese Checkers SoloPage helpers", () => {
       filled: 10,
       total: 10,
     });
+  });
+
+  it("reads an allowlisted player count from the launch query", () => {
+    expect(readChineseCheckersPlayerCount("?players=2")).toBe(2);
+    expect(readChineseCheckersPlayerCount("?players=3")).toBe(3);
+    expect(readChineseCheckersPlayerCount("?players=4")).toBe(4);
+    expect(readChineseCheckersPlayerCount("?players=5")).toBe(2);
+    expect(readChineseCheckersPlayerCount("?players=three")).toBe(2);
   });
 });

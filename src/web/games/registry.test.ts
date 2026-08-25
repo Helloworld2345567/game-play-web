@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RulePosition } from "../../core/game-rules";
+import { chineseCheckersRoomRules } from "../../games/chinese-checkers/rules";
 import type { GameActionCommand } from "../../shared/protocol";
 import {
   clientGameCatalog,
@@ -101,7 +102,7 @@ function tiaojiaqiPosition(
 }
 
 describe("game outcome presentation", () => {
-  it("allowlists the local Chinese Checkers page without a room renderer", async () => {
+  it("allowlists both the local Chinese Checkers page and every room renderer", async () => {
     const loader = getClientGamePageLoader("chinese-checkers");
     expect(loader).toBeTypeOf("function");
     expect(getClientGameCatalogEntry("chinese-checkers")?.loadPage).toBe(
@@ -114,6 +115,32 @@ describe("game outcome presentation", () => {
         "chinese-checkers.local.v1",
       ),
     ).toBeNull();
+    for (const playerCount of [2, 3, 4] as const) {
+      const roomLoader = getClientGameRendererLoader(
+        "chinese-checkers",
+        `chinese-checkers.room.${playerCount}p.v1`,
+      );
+      expect(roomLoader).toBeTypeOf("function");
+      await expect(roomLoader?.()).resolves.toBeTypeOf("function");
+    }
+  });
+
+  it("presents every Chinese Checkers player seat with its stable colour", () => {
+    const position = chineseCheckersRoomRules[4].create(
+      ["seat-a", "seat-b", "seat-c", "seat-d"],
+      { now: 1, randomSeed: "test" },
+    );
+    const adapter = getGameAdapter(
+      "chinese-checkers",
+      "chinese-checkers.room.4p.v1",
+    );
+
+    expect(adapter?.getSeatPresentations(position)).toEqual({
+      "seat-a": { label: "玩家 1", swatchClassName: "checkers-coral" },
+      "seat-b": { label: "玩家 2", swatchClassName: "checkers-indigo" },
+      "seat-c": { label: "玩家 3", swatchClassName: "checkers-teal" },
+      "seat-d": { label: "玩家 4", swatchClassName: "checkers-violet" },
+    });
   });
 
   it("allowlists the local 2048 page without a room renderer", async () => {

@@ -2,8 +2,7 @@ import type { GameRules } from "../core/game-rules";
 import {
   getGuestSeat,
   getRecentActionReceipts,
-  SEAT_A,
-  SEAT_B,
+  getRoomSeatOrder,
   type StoredRoom,
 } from "../core/room-state";
 import { getRematchRuleSetIds } from "../games/registry";
@@ -27,8 +26,7 @@ export function projectRoomSnapshot({
   snapshotRevision: number;
 }): RoomSnapshot {
   const viewerSeat = getGuestSeat(room, viewerGuestId);
-  const seatA = room.seats[SEAT_A];
-  const seatB = room.seats[SEAT_B];
+  const seatOrder = getRoomSeatOrder(room);
   const spectatorGuestIds = [...onlineGuestIds]
     .filter((guestId) => getGuestSeat(room, guestId) === null)
     .sort();
@@ -38,6 +36,23 @@ export function projectRoomSnapshot({
     rematchRuleSetIds.includes(room.rematchRuleSetId)
       ? room.rematchRuleSetId
       : room.ruleSetId;
+  const projectedSeats = Object.fromEntries(
+    seatOrder.map((seatId) => {
+      const seat = room.seats[seatId] ?? null;
+      return [
+        seatId,
+        {
+          occupied: seat !== null,
+          online: seat !== null && onlineGuestIds.has(seat.guestId),
+          rematchReady: seat?.rematchReady ?? false,
+          displayName:
+            seat === null
+              ? null
+              : displayNames[seat.guestId] ?? defaultDisplayName(seat.guestId),
+        },
+      ];
+    }),
+  );
   return {
     v: PROTOCOL_VERSION,
     type: "snapshot",
@@ -49,23 +64,12 @@ export function projectRoomSnapshot({
     revision: room.revision,
     round: room.round,
     selfSeat: viewerSeat,
-    seats: {
-      [SEAT_A]: {
-        occupied: true,
-        online: onlineGuestIds.has(seatA.guestId),
-        rematchReady: seatA.rematchReady,
-        displayName:
-          displayNames[seatA.guestId] ?? defaultDisplayName(seatA.guestId),
-      },
-      [SEAT_B]: {
-        occupied: seatB !== null,
-        online: seatB !== null && onlineGuestIds.has(seatB.guestId),
-        rematchReady: seatB?.rematchReady ?? false,
-        displayName:
-          seatB === null
-            ? null
-            : displayNames[seatB.guestId] ?? defaultDisplayName(seatB.guestId),
-      },
+    seatOrder,
+    seats: projectedSeats,
+    capabilities: {
+      resign:
+        seatOrder.length === 2 &&
+        (rules.definition.resignPolicy ?? "opponent_wins") !== "disabled",
     },
     spectators: spectatorGuestIds.map((guestId) => ({
       displayName: displayNames[guestId] ?? defaultDisplayName(guestId),
@@ -76,8 +80,7 @@ export function projectRoomSnapshot({
         ? {
             roleIds: rules.definition.openingRoleIds,
             roleBySeat: room.preparation?.roleBySeat ?? {
-              [SEAT_A]: null,
-              [SEAT_B]: null,
+              ...Object.fromEntries(seatOrder.map((seatId) => [seatId, null])),
             },
           }
         : null,

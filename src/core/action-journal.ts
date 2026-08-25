@@ -5,7 +5,7 @@ const LEGACY_ACTION_SCOPE = "__legacy__";
 const INVALID_ACTION_SCOPE = "!invalid_scope!";
 const ACTION_SCOPE_PATTERN = /^[A-Za-z0-9_-]{1,96}$/u;
 
-export type ActionJournalSeat = "seat-a" | "seat-b";
+export type ActionJournalSeat = "seat-a" | "seat-b" | "seat-c" | "seat-d";
 
 export interface ActionJournalSeatState {
   /**
@@ -30,9 +30,13 @@ export interface ActionJournalScopeState {
   receipts: ActionReceipt[];
 }
 
-export type ActionJournalState = Record<
-  ActionJournalSeat,
-  ActionJournalSeatState
+/**
+ * Journal entries are only materialized for seats that belong to a room.
+ * Partial keeps schema-v1/v2 fixtures and two-seat rooms compact; all public
+ * helpers treat a missing seat as an empty journal.
+ */
+export type ActionJournalState = Partial<
+  Record<ActionJournalSeat, ActionJournalSeatState>
 >;
 
 export type ActionJournalAdmission =
@@ -45,6 +49,69 @@ export type ActionJournalAdmission =
    * higher sequence was admitted, because the higher action may be compacted.
    */
   | { kind: "out_of_order" };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isActionReceipt(value: unknown): value is ActionReceipt {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.actionId === "string" &&
+    value.actionId.length > 0 &&
+    Number.isSafeInteger(value.clientSeq) &&
+    (value.clientSeq as number) >= 0 &&
+    (value.status === "applied" ||
+      value.status === "already_revealed" ||
+      value.status === "rejected") &&
+    (value.code === undefined || typeof value.code === "string") &&
+    Number.isSafeInteger(value.revision) &&
+    (value.revision as number) >= 0
+  );
+}
+
+function isActionJournalScopeState(
+  value: unknown,
+): value is ActionJournalScopeState {
+  if (!isRecord(value)) return false;
+  return (
+    Number.isSafeInteger(value.compactedThrough) &&
+    (value.compactedThrough as number) >= -1 &&
+    Array.isArray(value.receipts) &&
+    value.receipts.every(isActionReceipt)
+  );
+}
+
+/** Validates one current-schema persisted journal entry before use. */
+export function isActionJournalSeatState(
+  value: unknown,
+): value is ActionJournalSeatState {
+  if (!isActionJournalScopeState(value)) return false;
+  const root = value as ActionJournalScopeState & {
+    scopes?: unknown;
+  };
+  if (root.scopes === undefined) {
+    return value.receipts.length <= MAX_RECENT_ACTION_RECEIPTS;
+  }
+  if (!isRecord(root.scopes)) return false;
+  const scopes = Object.entries(root.scopes);
+  if (
+    scopes.length > MAX_RECENT_ACTION_RECEIPTS ||
+    scopes.some(
+      ([scope, state]) =>
+        !ACTION_SCOPE_PATTERN.test(scope) ||
+        !isActionJournalScopeState(state),
+    )
+  ) {
+    return false;
+  }
+  const receiptCount = scopes.reduce(
+    (count, [, state]) =>
+      count + (state as ActionJournalScopeState).receipts.length,
+    value.receipts.length,
+  );
+  return receiptCount <= MAX_RECENT_ACTION_RECEIPTS;
+}
 
 function emptySeatJournal(): ActionJournalSeatState {
   return { compactedThrough: -1, receipts: [] };
@@ -108,19 +175,23 @@ function oldestScopeReceipt(
   return oldest === undefined ? undefined : { scope, receipt: oldest };
 }
 
-export function createActionJournal(): ActionJournalState {
-  return {
-    "seat-a": emptySeatJournal(),
-    "seat-b": emptySeatJournal(),
-  };
+export function createActionJournal(
+  seats: readonly ActionJournalSeat[] = ["seat-a", "seat-b"],
+): ActionJournalState {
+  return Object.fromEntries(
+    seats.map((seat) => [seat, emptySeatJournal()]),
+  ) as ActionJournalState;
 }
 
 /** Migrates the bounded receipt arrays written by Room schema v2. */
 export function migrateReceiptJournal(
-  receiptsBySeat: Record<ActionJournalSeat, ActionReceipt[]>,
+  receiptsBySeat: Record<string, ActionReceipt[]>,
+  seats: readonly ActionJournalSeat[] = ["seat-a", "seat-b"],
 ): ActionJournalState {
   const migrateSeat = (seat: ActionJournalSeat): ActionJournalSeatState => {
-    const receipts = receiptsBySeat[seat].slice(-MAX_RECENT_ACTION_RECEIPTS);
+    const receipts = (receiptsBySeat[seat] ?? []).slice(
+      -MAX_RECENT_ACTION_RECEIPTS,
+    );
     const minimumSequence = receipts.reduce(
       (minimum, receipt) => Math.min(minimum, receipt.clientSeq),
       Number.POSITIVE_INFINITY,
@@ -136,10 +207,9 @@ export function migrateReceiptJournal(
       receipts,
     };
   };
-  return {
-    "seat-a": migrateSeat("seat-a"),
-    "seat-b": migrateSeat("seat-b"),
-  };
+  return Object.fromEntries(
+    seats.map((seat) => [seat, migrateSeat(seat)]),
+  ) as ActionJournalState;
 }
 
 export function admitAction(
@@ -148,7 +218,7 @@ export function admitAction(
   identity: Pick<ActionReceipt, "actionId" | "clientSeq">,
   scope?: string,
 ): ActionJournalAdmission {
-  const seatJournal = journal[seat];
+  const seatJournal = journal[seat] ?? emptySeatJournal();
   // actionId is intentionally global to a Seat. A retry that changes
   // transport (HTTP ↔ WebSocket) must still be harmless.
   const duplicate = allScopeReceipts(seatJournal).find(
@@ -186,7 +256,7 @@ export function recordActionReceipt(
   receipt: ActionReceipt,
   scope?: string,
 ): ActionJournalState {
-  const current = journal[seat];
+  const current = journal[seat] ?? emptySeatJournal();
   const key = normalizedScope(scope);
   const scopes: Record<string, ActionJournalScopeState> = Object.fromEntries(
     Object.entries(current.scopes ?? {}).map(([name, state]) => [
@@ -282,7 +352,7 @@ export function actionReceiptsFor(
   // Scope storage is grouped by connection, so flattening it directly can
   // interleave revisions. Array#sort is stable for equal revisions, retaining
   // the original rejection order within one revision.
-  return allScopeReceipts(journal[seat])
+  return allScopeReceipts(journal[seat] ?? emptySeatJournal())
     .map(({ receipt }) => receipt)
     .sort((left, right) =>
       left.revision === right.revision

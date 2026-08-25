@@ -3,6 +3,7 @@ import {
   LANDING_GAME_CATALOG,
   localGameIdFromPath,
   resolveChaseLaunch,
+  resolveChineseCheckersLaunch,
   resolveMinesweeperLaunch,
   resolveRematchModeOptions,
   shouldPromptForDisplayName,
@@ -30,10 +31,29 @@ describe("landing game catalog", () => {
     ).toEqual([
       { kind: "picker", gameType: "chase" },
       { kind: "picker", gameType: "minesweeper" },
+      { kind: "picker", gameType: "chinese-checkers" },
     ]);
     expect(
       LANDING_GAME_CATALOG.find((entry) => entry.id === "2048")?.launch,
     ).toEqual({ kind: "navigate", href: "/2048" });
+  });
+
+  it.each([2, 3, 4] as const)(
+    "maps %s-player Chinese Checkers to a fixed-capacity room rule",
+    (playerCount) => {
+      expect(resolveChineseCheckersLaunch("room", playerCount)).toEqual({
+        kind: "room",
+        gameType: "chinese-checkers",
+        ruleSetId: `chinese-checkers.room.${playerCount}p.v1`,
+      });
+    },
+  );
+
+  it("keeps same-device Chinese Checkers available from the shared picker", () => {
+    expect(resolveChineseCheckersLaunch("local", 3)).toEqual({
+      kind: "navigate",
+      href: "/chinese-checkers?players=3",
+    });
   });
 
   it("projects direct room entries from the registered game adapters", () => {
@@ -43,7 +63,9 @@ describe("landing game catalog", () => {
       availableGameAdapters
         .filter(
           (adapter) =>
-            adapter.gameType !== "minesweeper" && adapter.gameType !== "chase",
+            adapter.gameType !== "minesweeper" &&
+            adapter.gameType !== "chase" &&
+            adapter.gameType !== "chinese-checkers",
         )
         .map((adapter) => ({
           id: adapter.gameType,

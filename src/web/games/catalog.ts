@@ -110,6 +110,27 @@ const RENDERER_LOADERS = {
     load: () =>
       import("./tiaojiaqi/Board").then(({ TiaojiaqiBoard }) => TiaojiaqiBoard),
   },
+  "chinese-checkers.room.2p.v1": {
+    gameId: "chinese-checkers",
+    load: () =>
+      import("./chinese-checkers/Board").then(
+        ({ ChineseCheckersBoard }) => ChineseCheckersBoard,
+      ),
+  },
+  "chinese-checkers.room.3p.v1": {
+    gameId: "chinese-checkers",
+    load: () =>
+      import("./chinese-checkers/Board").then(
+        ({ ChineseCheckersBoard }) => ChineseCheckersBoard,
+      ),
+  },
+  "chinese-checkers.room.4p.v1": {
+    gameId: "chinese-checkers",
+    load: () =>
+      import("./chinese-checkers/Board").then(
+        ({ ChineseCheckersBoard }) => ChineseCheckersBoard,
+      ),
+  },
 } as const satisfies Readonly<Record<string, RendererRegistration>>;
 
 /* Page imports are allowlisted independently from room renderers. */

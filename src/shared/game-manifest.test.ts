@@ -7,15 +7,24 @@ import {
 } from "./game-manifest";
 
 describe("game manifest", () => {
-  it("exposes Chinese Checkers as a local 2-to-4-player game", () => {
+  it("exposes Chinese Checkers local recovery and 2-to-4-player room rules", () => {
     expect(getGameManifest("chinese-checkers")).toMatchObject({
       gameId: "chinese-checkers",
       title: "跳棋",
       description: "标准 121 孔 · 2 / 3 / 4 人同屏对战",
       creationPolicy: "enabled",
-      launchKind: "local-game",
-      ruleSetIds: ["chinese-checkers.local.v1"],
-      creatableRuleSetIds: [],
+      launchKind: "turn-room",
+      ruleSetIds: [
+        "chinese-checkers.local.v1",
+        "chinese-checkers.room.2p.v1",
+        "chinese-checkers.room.3p.v1",
+        "chinese-checkers.room.4p.v1",
+      ],
+      creatableRuleSetIds: [
+        "chinese-checkers.room.2p.v1",
+        "chinese-checkers.room.3p.v1",
+        "chinese-checkers.room.4p.v1",
+      ],
     });
     expect(
       isManifestRuleSet(
@@ -23,6 +32,13 @@ describe("game manifest", () => {
         "chinese-checkers.local.v1",
       ),
     ).toBe(true);
+    for (const playerCount of [2, 3, 4] as const) {
+      const ruleSetId = `chinese-checkers.room.${playerCount}p.v1`;
+      expect(isManifestRuleSet("chinese-checkers", ruleSetId)).toBe(true);
+      expect(isCreatableManifestRuleSet("chinese-checkers", ruleSetId)).toBe(
+        true,
+      );
+    }
     expect(
       isCreatableManifestRuleSet(
         "chinese-checkers",

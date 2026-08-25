@@ -1,4 +1,4 @@
-import type { GameRules, RulePosition } from "./game-rules";
+import type { GameRules, RulePosition, Seats } from "./game-rules";
 import type {
   ActionReceipt,
   PrepareRoleCommand,
@@ -8,6 +8,7 @@ import {
   actionReceiptsFor,
   admitAction,
   createActionJournal,
+  isActionJournalSeatState,
   MAX_RECENT_ACTION_RECEIPTS,
   migrateReceiptJournal,
   recordActionReceipt,
@@ -18,7 +19,15 @@ export { MAX_RECENT_ACTION_RECEIPTS } from "./action-journal";
 
 export const SEAT_A = "seat-a";
 export const SEAT_B = "seat-b";
-export type PlatformSeatId = typeof SEAT_A | typeof SEAT_B;
+export const SEAT_C = "seat-c";
+export const SEAT_D = "seat-d";
+export type PlatformSeatId =
+  | typeof SEAT_A
+  | typeof SEAT_B
+  | typeof SEAT_C
+  | typeof SEAT_D;
+export const ALL_PLATFORM_SEATS = [SEAT_A, SEAT_B, SEAT_C, SEAT_D] as const;
+export type PlayerCount = 2 | 3 | 4;
 export const WAITING_ROOM_TTL_MS = 60 * 60 * 1_000;
 export const ACTIVE_ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const FINISHED_ROOM_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -29,10 +38,14 @@ export interface RoomSeat {
 }
 
 export interface RoomPreparationState {
-  roleBySeat: {
-    [SEAT_A]: string | null;
-    [SEAT_B]: string | null;
-  };
+  roleBySeat: Partial<Record<PlatformSeatId, string | null>>;
+}
+
+export interface RoomSeats {
+  [SEAT_A]: RoomSeat;
+  [SEAT_B]: RoomSeat | null;
+  [SEAT_C]?: RoomSeat | null;
+  [SEAT_D]?: RoomSeat | null;
 }
 
 interface StoredRoomBase {
@@ -60,7 +73,11 @@ export interface LegacyStoredRoomV1 extends StoredRoomBase {
 export interface LegacyStoredRoomV2 extends StoredRoomBase {
   schemaVersion: 2;
   roundStartRevision: number;
-  recentActionReceipts: Record<PlatformSeatId, ActionReceipt[]>;
+  /** Schema v2 predates the four-seat extension and stores two seats only. */
+  recentActionReceipts: {
+    [SEAT_A]: ActionReceipt[];
+    [SEAT_B]: ActionReceipt[];
+  };
 }
 
 /** Room shape written before opening-role preparation was introduced. */
@@ -77,20 +94,42 @@ export interface LegacyStoredRoomV4 extends StoredRoomBase {
   actionJournal: ActionJournalState;
   /** Non-null only while a turn-based room is choosing opening roles. */
   preparation: RoomPreparationState | null;
-  /** Role order currently passed to GameRules.create(). */
-  activeSeatOrder: readonly [PlatformSeatId, PlatformSeatId] | null;
+  /** Older rooms used two seats; accept a wider array for migration. */
+  activeSeatOrder: readonly PlatformSeatId[] | null;
 }
 
-/** Current authoritative Room shape persisted by the Worker. */
-export interface StoredRoom extends StoredRoomBase {
+/** Room shape written by the previous two-seat schema. */
+export interface LegacyStoredRoomV5 extends StoredRoomBase {
   schemaVersion: 5;
   roundStartRevision: number;
   actionJournal: ActionJournalState;
   /** Non-null only while a turn-based room is choosing opening roles. */
   preparation: RoomPreparationState | null;
   /** Role order currently passed to GameRules.create(). */
-  activeSeatOrder: readonly [PlatformSeatId, PlatformSeatId] | null;
+  activeSeatOrder: readonly PlatformSeatId[] | null;
   /** A trusted rule selected for the next round; null keeps the current rule. */
+  rematchRuleSetId: string | null;
+}
+
+/** Current authoritative Room shape persisted by the Worker. */
+export interface StoredRoom {
+  schemaVersion: 6;
+  roomId: string;
+  gameType: string;
+  ruleSetId: string;
+  revision: number;
+  round: number;
+  /** Stable player-seat order; all room lifecycle decisions use this list. */
+  seatOrder: readonly PlatformSeatId[];
+  seats: RoomSeats;
+  position: RulePosition | null;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  roundStartRevision: number;
+  actionJournal: ActionJournalState;
+  preparation: RoomPreparationState | null;
+  activeSeatOrder: readonly PlatformSeatId[] | null;
   rematchRuleSetId: string | null;
 }
 
@@ -99,17 +138,187 @@ export type PersistedRoom =
   | LegacyStoredRoomV2
   | LegacyStoredRoomV3
   | LegacyStoredRoomV4
+  | LegacyStoredRoomV5
   | StoredRoom;
 
+function isRoomSeat(value: unknown): value is RoomSeat {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.guestId === "string" &&
+    record.guestId.length > 0 &&
+    typeof record.rematchReady === "boolean"
+  );
+}
+
+function isJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object") return false;
+  if (ancestors.has(value)) return false;
+  ancestors.add(value);
+  let valid: boolean;
+  if (Array.isArray(value)) {
+    valid = true;
+    for (let index = 0; index < value.length; index += 1) {
+      if (
+        !Object.hasOwn(value, index) ||
+        !isJsonValue(value[index], ancestors)
+      ) {
+        valid = false;
+        break;
+      }
+    }
+  } else {
+    valid = Object.values(value).every((item) =>
+      isJsonValue(item, ancestors),
+    );
+  }
+  ancestors.delete(value);
+  return valid;
+}
+
+function isRulePosition(
+  value: unknown,
+  seatOrder: readonly PlatformSeatId[],
+): value is RulePosition {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (!Object.hasOwn(record, "data") || !isJsonValue(record.data)) {
+    return false;
+  }
+  if (
+    record.turn !== null &&
+    (typeof record.turn !== "string" ||
+      !seatOrder.includes(record.turn as PlatformSeatId))
+  ) {
+    return false;
+  }
+  const outcome = record.outcome;
+  if (outcome === null) return true;
+  if (typeof outcome !== "object" || Array.isArray(outcome)) return false;
+  const result = outcome as Record<string, unknown>;
+  if (typeof result.reason !== "string" || record.turn !== null) return false;
+  if (result.kind === "draw") return true;
+  return (
+    result.kind === "win" &&
+    typeof result.winner === "string" &&
+    seatOrder.includes(result.winner as PlatformSeatId)
+  );
+}
+
 /** Migrates any supported persisted Room schema to the current shape. */
-export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
+function migrateStoredRoom(room: PersistedRoom): StoredRoom {
   const schemaVersion = (room as { schemaVersion: unknown }).schemaVersion;
-  if (schemaVersion === 5) return room as StoredRoom;
+  if (schemaVersion === 6) {
+    const current = room as StoredRoom;
+    if (!Array.isArray(current.seatOrder)) {
+      throw new Error("Invalid Room seat order");
+    }
+    if (
+      typeof current.seats !== "object" ||
+      current.seats === null ||
+      Array.isArray(current.seats)
+    ) {
+      throw new Error("Invalid Room seat state");
+    }
+    const seatOrder = normalizeSeatOrder(current.seatOrder);
+    if (
+      seatOrder.length !== current.seatOrder.length ||
+      seatOrder.some((seat, index) => seat !== current.seatOrder[index])
+    ) {
+      throw new Error("Invalid Room seat order");
+    }
+    const storedSeatIds = Object.keys(current.seats);
+    if (
+      storedSeatIds.length !== seatOrder.length ||
+      !seatOrder.every((seat) => Object.hasOwn(current.seats, seat))
+    ) {
+      throw new Error("Invalid Room seat state");
+    }
+    const occupiedGuestIds = new Set<string>();
+    for (const seat of seatOrder) {
+      const storedSeat = current.seats[seat];
+      if (
+        (seat === SEAT_A && !isRoomSeat(storedSeat)) ||
+        (storedSeat !== null && !isRoomSeat(storedSeat)) ||
+        (isRoomSeat(storedSeat) && occupiedGuestIds.has(storedSeat.guestId))
+      ) {
+        throw new Error("Invalid Room seat state");
+      }
+      if (isRoomSeat(storedSeat)) occupiedGuestIds.add(storedSeat.guestId);
+    }
+    const journalSeatIds = Object.keys(current.actionJournal);
+    if (
+      journalSeatIds.length !== seatOrder.length ||
+      !seatOrder.every(
+        (seat) =>
+          Object.hasOwn(current.actionJournal, seat) &&
+          isActionJournalSeatState(current.actionJournal[seat]),
+      )
+    ) {
+      throw new Error("Invalid Room action journal");
+    }
+    const activeSeatOrder = current.activeSeatOrder;
+    if (
+      (activeSeatOrder === null) !== (current.position === null) ||
+      (activeSeatOrder !== null &&
+        (!Array.isArray(activeSeatOrder) ||
+          activeSeatOrder.length !== seatOrder.length ||
+          seatOrder.some(
+            (_, index) => !Object.hasOwn(activeSeatOrder, index),
+          ) ||
+          new Set(activeSeatOrder).size !== seatOrder.length ||
+          !activeSeatOrder.every((seat) => seatOrder.includes(seat))))
+    ) {
+      throw new Error("Invalid Room active seat order");
+    }
+    if (
+      current.position !== null &&
+      !isRulePosition(current.position, seatOrder)
+    ) {
+      throw new Error("Invalid Room position");
+    }
+    return {
+      ...current,
+      seatOrder,
+      seats: expandSeats(current.seats),
+      actionJournal: current.actionJournal,
+    };
+  }
+  if (schemaVersion === 5) {
+    const legacyRoom = room as LegacyStoredRoomV5;
+    const seatOrder = [SEAT_A, SEAT_B] as const;
+    return {
+      ...legacyRoom,
+      schemaVersion: 6,
+      seatOrder,
+      seats: expandSeats(legacyRoom.seats),
+      actionJournal: ensureJournalSeats(legacyRoom.actionJournal, seatOrder),
+      activeSeatOrder: legacyRoom.activeSeatOrder,
+    };
+  }
   if (schemaVersion === 4) {
     const legacyRoom = room as LegacyStoredRoomV4;
     return {
       ...legacyRoom,
-      schemaVersion: 5,
+      schemaVersion: 6,
+      seatOrder: [SEAT_A, SEAT_B],
+      seats: expandSeats(legacyRoom.seats),
+      actionJournal: ensureJournalSeats(
+        legacyRoom.actionJournal,
+        [SEAT_A, SEAT_B],
+      ),
       rematchRuleSetId: null,
     };
   }
@@ -117,7 +326,9 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
     const legacyRoom = room as LegacyStoredRoomV3;
     return {
       ...legacyRoom,
-      schemaVersion: 5,
+      schemaVersion: 6,
+      seatOrder: [SEAT_A, SEAT_B],
+      seats: expandSeats(legacyRoom.seats),
       preparation: null,
       activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
       rematchRuleSetId: null,
@@ -128,8 +339,13 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
     const { recentActionReceipts, ...base } = legacyRoom;
     return {
       ...base,
-      schemaVersion: 5,
-      actionJournal: migrateReceiptJournal(recentActionReceipts),
+      schemaVersion: 6,
+      seatOrder: [SEAT_A, SEAT_B],
+      seats: expandSeats(base.seats),
+      actionJournal: migrateReceiptJournal(
+        recentActionReceipts,
+        [SEAT_A, SEAT_B],
+      ),
       preparation: null,
       activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
       rematchRuleSetId: null,
@@ -142,13 +358,34 @@ export function hydrateStoredRoom(room: PersistedRoom): StoredRoom {
 
   return {
     ...legacyRoom,
-    schemaVersion: 5,
+    schemaVersion: 6,
+    seatOrder: [SEAT_A, SEAT_B],
+    seats: expandSeats(legacyRoom.seats),
     roundStartRevision: legacyRoom.revision,
-    actionJournal: createActionJournal(),
+    actionJournal: createActionJournal([SEAT_A, SEAT_B]),
     preparation: null,
     activeSeatOrder: legacyActiveSeatOrder(legacyRoom),
     rematchRuleSetId: null,
   };
+}
+
+/**
+ * Restores a persisted Room and verifies the immutable RuleSet contract
+ * before the state can re-enter the runtime.
+ */
+export function hydrateStoredRoom(
+  room: PersistedRoom,
+  rules: GameRules,
+): StoredRoom {
+  const hydrated = migrateStoredRoom(room);
+  if (
+    hydrated.gameType !== rules.definition.gameType ||
+    hydrated.ruleSetId !== rules.definition.ruleSetId ||
+    hydrated.seatOrder.length !== playerCountForRules(rules)
+  ) {
+    throw new Error("Stored Room does not match its rules");
+  }
+  return hydrated;
 }
 
 function legacyActiveSeatOrder(
@@ -158,6 +395,78 @@ function legacyActiveSeatOrder(
   return room.round % 2 === 1
     ? [SEAT_A, SEAT_B]
     : [SEAT_B, SEAT_A];
+}
+
+function normalizeSeatOrder(
+  seatOrder: readonly PlatformSeatId[] | undefined,
+): readonly PlatformSeatId[] {
+  if (
+    seatOrder !== undefined &&
+    seatOrder.length >= 2 &&
+    seatOrder.length <= 4 &&
+    seatOrder.every((seat, index) => seat === ALL_PLATFORM_SEATS[index])
+  ) {
+    return [...seatOrder];
+  }
+  return [SEAT_A, SEAT_B];
+}
+
+function expandSeats(
+  seats: {
+    [SEAT_A]: RoomSeat;
+    [SEAT_B]: RoomSeat | null;
+    [SEAT_C]?: RoomSeat | null;
+    [SEAT_D]?: RoomSeat | null;
+  },
+  seatOrder: readonly PlatformSeatId[] = [],
+): RoomSeats {
+  const expanded: RoomSeats = {
+    [SEAT_A]: seats[SEAT_A],
+    [SEAT_B]: seats[SEAT_B],
+    ...(Object.hasOwn(seats, SEAT_C) ? { [SEAT_C]: seats[SEAT_C] } : {}),
+    ...(Object.hasOwn(seats, SEAT_D) ? { [SEAT_D]: seats[SEAT_D] } : {}),
+  };
+  for (const seat of seatOrder) {
+    if (
+      !Object.hasOwn(expanded, seat) &&
+      seat !== SEAT_A &&
+      seat !== SEAT_B
+    ) {
+      expanded[seat] = null;
+    }
+  }
+  return expanded;
+}
+
+function resetRematchReadiness(seats: RoomSeats): RoomSeats {
+  const next: RoomSeats = {
+    [SEAT_A]: { ...seats[SEAT_A], rematchReady: false },
+    [SEAT_B]: seats[SEAT_B] === null
+      ? null
+      : { ...seats[SEAT_B], rematchReady: false },
+  };
+  if (Object.hasOwn(seats, SEAT_C)) {
+    next[SEAT_C] = seats[SEAT_C] === null
+      ? null
+      : { ...seats[SEAT_C]!, rematchReady: false };
+  }
+  if (Object.hasOwn(seats, SEAT_D)) {
+    next[SEAT_D] = seats[SEAT_D] === null
+      ? null
+      : { ...seats[SEAT_D]!, rematchReady: false };
+  }
+  return next;
+}
+
+function ensureJournalSeats(
+  journal: ActionJournalState,
+  seatOrder: readonly PlatformSeatId[],
+): ActionJournalState {
+  const next = { ...journal };
+  for (const seat of seatOrder) {
+    if (next[seat] === undefined) next[seat] = createActionJournal([seat])[seat];
+  }
+  return next;
 }
 
 function openingRoleIds(
@@ -174,23 +483,25 @@ function openingRoleIds(
   return roleIds;
 }
 
-function emptyPreparation(): RoomPreparationState {
+function emptyPreparation(
+  seatOrder: readonly PlatformSeatId[] = [SEAT_A, SEAT_B],
+): RoomPreparationState {
   return {
-    roleBySeat: {
-      [SEAT_A]: null,
-      [SEAT_B]: null,
-    },
+    roleBySeat: Object.fromEntries(
+      seatOrder.map((seat) => [seat, null]),
+    ) as Partial<Record<PlatformSeatId, string | null>>,
   };
 }
 
 function activeOrderFromPreparation(
   preparation: RoomPreparationState,
   roleIds: readonly [string, string],
+  seatOrder: readonly PlatformSeatId[] = [SEAT_A, SEAT_B],
 ): readonly [PlatformSeatId, PlatformSeatId] | null {
-  const firstSeat = ([SEAT_A, SEAT_B] as const).find(
+  const firstSeat = seatOrder.find(
     (seat) => preparation.roleBySeat[seat] === roleIds[0],
   );
-  const secondSeat = ([SEAT_A, SEAT_B] as const).find(
+  const secondSeat = seatOrder.find(
     (seat) => preparation.roleBySeat[seat] === roleIds[1],
   );
   if (firstSeat === undefined || secondSeat === undefined) return null;
@@ -209,6 +520,18 @@ function sameOpeningRoles(left: GameRules, right: GameRules): boolean {
     leftRoles.length === rightRoles.length &&
     leftRoles.every((roleId, index) => roleId === rightRoles[index])
   );
+}
+
+function playerCountForRules(rules: GameRules): PlayerCount {
+  return rules.definition.playerCount ?? 2;
+}
+
+function resignPolicyForRules(
+  rules: GameRules,
+  playerCount = playerCountForRules(rules),
+): "opponent_wins" | "disabled" {
+  return rules.definition.resignPolicy ??
+    (playerCount === 2 ? "opponent_wins" : "disabled");
 }
 
 /**
@@ -232,6 +555,8 @@ function resolveCompatibleRematchRules(
     targetRules.definition.actionConsistency !==
       currentRules.definition.actionConsistency ||
     !sameOpeningRoles(currentRules, targetRules)
+    || playerCountForRules(currentRules) !== playerCountForRules(targetRules)
+    || resignPolicyForRules(currentRules) !== resignPolicyForRules(targetRules)
   ) {
     return null;
   }
@@ -303,21 +628,31 @@ export function createRoom({
   rules,
   now,
 }: CreateRoomInput): StoredRoom {
+  const playerCount = playerCountForRules(rules);
+  const seatOrder = ALL_PLATFORM_SEATS.slice(0, playerCount) as readonly PlatformSeatId[];
+  const roleIds = openingRoleIds(rules);
+  const seats: RoomSeats = {
+    [SEAT_A]: { guestId: creatorGuestId, rematchReady: false },
+    [SEAT_B]: null,
+  };
+  if (playerCount >= 3) seats[SEAT_C] = null;
+  if (playerCount >= 4) seats[SEAT_D] = null;
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     roomId,
     gameType: rules.definition.gameType,
     ruleSetId: rules.definition.ruleSetId,
     revision: 0,
     round: 1,
     roundStartRevision: 0,
-    seats: {
-      [SEAT_A]: { guestId: creatorGuestId, rematchReady: false },
-      [SEAT_B]: null,
-    },
+    seatOrder,
+    seats,
     position: null,
-    actionJournal: createActionJournal(),
-    preparation: openingRoleIds(rules) === null ? null : emptyPreparation(),
+    actionJournal: createActionJournal(seatOrder),
+    preparation:
+      roleIds !== null && playerCount === 2
+        ? emptyPreparation(seatOrder)
+        : null,
     activeSeatOrder: null,
     rematchRuleSetId: null,
     createdAt: now,
@@ -330,7 +665,7 @@ function seatForGuest(
   room: StoredRoom,
   guestId: string,
 ): PlatformSeatId | null {
-  for (const seatId of [SEAT_A, SEAT_B] as const) {
+  for (const seatId of room.seatOrder) {
     if (room.seats[seatId]?.guestId === guestId) return seatId;
   }
   return null;
@@ -346,9 +681,10 @@ export function joinRoom(
   if (seatForGuest(room, guestId) !== null) {
     const ttl =
       room.position === null
-        ? room.seats[SEAT_B] === null || room.preparation === null
-          ? WAITING_ROOM_TTL_MS
-          : ACTIVE_ROOM_TTL_MS
+        ? room.preparation !== null &&
+          room.seatOrder.every((seatId) => room.seats[seatId] !== null)
+          ? ACTIVE_ROOM_TTL_MS
+          : WAITING_ROOM_TTL_MS
         : room.position.outcome === null
           ? ACTIVE_ROOM_TTL_MS
           : FINISHED_ROOM_TTL_MS;
@@ -366,7 +702,8 @@ export function joinRoom(
       broadcast: false,
     };
   }
-  if (room.seats[SEAT_B] !== null) {
+  const targetSeat = room.seatOrder.find((seat) => room.seats[seat] === null);
+  if (targetSeat === undefined) {
     return { ok: false, room, code: "room.full" };
   }
   if (
@@ -378,24 +715,32 @@ export function joinRoom(
 
   const nextRevision = room.revision + 1;
   const roleIds = openingRoleIds(rules);
+  const rolePreparation = roleIds !== null && room.seatOrder.length === 2;
+  const seats = {
+    ...room.seats,
+    [targetSeat]: { guestId, rematchReady: false },
+  };
+  const allSeatsOccupied = room.seatOrder.every((seat) => seats[seat] !== null);
+  const started = allSeatsOccupied && !rolePreparation;
   const next: StoredRoom = {
     ...room,
     revision: nextRevision,
-    roundStartRevision: roleIds === null ? nextRevision : room.roundStartRevision,
-    seats: {
-      ...room.seats,
-      [SEAT_B]: { guestId, rematchReady: false },
-    },
+    roundStartRevision: started ? nextRevision : room.roundStartRevision,
+    seats,
     position:
-      roleIds === null
-        ? rules.create([SEAT_A, SEAT_B], { now, randomSeed })
+      started
+        ? rules.create(room.seatOrder as Seats, { now, randomSeed })
         : null,
-    actionJournal: createActionJournal(),
+    actionJournal: started
+      ? createActionJournal(room.seatOrder)
+      : room.actionJournal,
     preparation:
-      roleIds === null ? null : (room.preparation ?? emptyPreparation()),
-    activeSeatOrder: roleIds === null ? [SEAT_A, SEAT_B] : null,
+      rolePreparation
+        ? (room.preparation ?? emptyPreparation(room.seatOrder))
+        : null,
+    activeSeatOrder: started ? [...room.seatOrder] : null,
     updatedAt: now,
-    expiresAt: now + ACTIVE_ROOM_TTL_MS,
+    expiresAt: now + (started ? ACTIVE_ROOM_TTL_MS : WAITING_ROOM_TTL_MS),
   };
   return { ok: true, room: next, changed: true };
 }
@@ -405,6 +750,16 @@ export function getGuestSeat(
   guestId: string,
 ): PlatformSeatId | null {
   return seatForGuest(room, guestId);
+}
+
+/** Stable player-seat order for UI, transport admission, and rules. */
+export function getRoomSeatOrder(room: StoredRoom): readonly PlatformSeatId[] {
+  return room.seatOrder;
+}
+
+/** Lists the player seats in their stable order. */
+export function listRoomSeats(room: StoredRoom): readonly PlatformSeatId[] {
+  return room.seatOrder;
 }
 
 function applyPrepareRoleCommand(
@@ -422,12 +777,15 @@ function applyPrepareRoleCommand(
   if (room.position !== null) {
     return { ok: false, room, code: "room.preparation_unavailable" };
   }
+  if (room.seatOrder.length !== 2) {
+    return { ok: false, room, code: "room.preparation_unavailable" };
+  }
   if (!roleIds.includes(command.roleId)) {
     return { ok: false, room, code: "room.invalid_role" };
   }
 
-  const otherSeat = seat === SEAT_A ? SEAT_B : SEAT_A;
-  const currentPreparation = room.preparation ?? emptyPreparation();
+  const otherSeat = room.seatOrder.find((seatId) => seatId !== seat)!;
+  const currentPreparation = room.preparation ?? emptyPreparation(room.seatOrder);
   if (currentPreparation.roleBySeat[otherSeat] === command.roleId) {
     return { ok: false, room, code: "room.role_taken" };
   }
@@ -438,10 +796,11 @@ function applyPrepareRoleCommand(
       [seat]: command.roleId,
     },
   };
-  const activeSeatOrder =
-    room.seats[SEAT_B] === null
-      ? null
-      : activeOrderFromPreparation(preparation, roleIds);
+  const activeSeatOrder = room.seatOrder.every(
+    (seatId) => room.seats[seatId] !== null,
+  )
+    ? activeOrderFromPreparation(preparation, roleIds, room.seatOrder)
+    : null;
   const nextRevision = room.revision + 1;
   const started = activeSeatOrder !== null;
   const next: StoredRoom = {
@@ -449,15 +808,17 @@ function applyPrepareRoleCommand(
     revision: nextRevision,
     roundStartRevision: started ? nextRevision : room.roundStartRevision,
     position: started
-      ? rules.create(activeSeatOrder, { now, randomSeed })
+      ? rules.create(activeSeatOrder as Seats, { now, randomSeed })
       : null,
     preparation: started ? null : preparation,
     activeSeatOrder,
-    actionJournal: started ? createActionJournal() : room.actionJournal,
+    actionJournal: started
+      ? createActionJournal(activeSeatOrder ?? room.seatOrder)
+      : room.actionJournal,
     updatedAt: now,
     expiresAt:
       now +
-      (room.seats[SEAT_B] === null
+      (!room.seatOrder.every((seatId) => room.seats[seatId] !== null)
         ? WAITING_ROOM_TTL_MS
         : ACTIVE_ROOM_TTL_MS),
   };
@@ -502,6 +863,13 @@ export function applyRoomCommand(
     );
   }
   if (command.type === "resign") {
+    if (
+      room.seatOrder.length !== 2 ||
+      resignPolicyForRules(rules, room.seatOrder.length as PlayerCount) ===
+        "disabled"
+    ) {
+      return { ok: false, room, code: "room.resign_unavailable" };
+    }
     if (room.position === null) {
       return {
         ok: false,
@@ -515,7 +883,7 @@ export function applyRoomCommand(
     if (room.position.outcome !== null) {
       return { ok: false, room, code: "room.game_finished" };
     }
-    const winner = seat === SEAT_A ? SEAT_B : SEAT_A;
+    const winner = room.seatOrder.find((seatId) => seatId !== seat)!;
     const next: StoredRoom = {
       ...room,
       revision: room.revision + 1,
@@ -552,19 +920,7 @@ export function applyRoomCommand(
       ...room,
       revision: room.revision + 1,
       rematchRuleSetId,
-      seats: {
-        [SEAT_A]: {
-          ...room.seats[SEAT_A],
-          rematchReady: false,
-        },
-        [SEAT_B]:
-          room.seats[SEAT_B] === null
-            ? null
-            : {
-                ...room.seats[SEAT_B],
-                rematchReady: false,
-              },
-      },
+      seats: resetRematchReadiness(room.seats),
       updatedAt: now,
       expiresAt: now + FINISHED_ROOM_TTL_MS,
     };
@@ -576,7 +932,7 @@ export function applyRoomCommand(
     }
 
     const currentSeat = room.seats[seat];
-    if (currentSeat === null) {
+    if (currentSeat === null || currentSeat === undefined) {
       return { ok: false, room, code: "room.not_a_seat" };
     }
     const seats: StoredRoom["seats"] = {
@@ -586,11 +942,11 @@ export function applyRoomCommand(
         rematchReady: command.ready,
       },
     };
-    const bothReady =
-      seats[SEAT_A]?.rematchReady === true &&
-      seats[SEAT_B]?.rematchReady === true;
+    const allReady = room.seatOrder.every(
+      (seatId) => seats[seatId]?.rematchReady === true,
+    );
     const targetRuleSetId = room.rematchRuleSetId ?? room.ruleSetId;
-    const rematchRules = bothReady
+    const rematchRules = allReady
       ? resolveCompatibleRematchRules(
           rules,
           targetRuleSetId,
@@ -600,51 +956,35 @@ export function applyRoomCommand(
     if (rematchRules === null) {
       return { ok: false, room, code: "room.invalid_rematch_rule" };
     }
-    const currentOrder =
-      room.activeSeatOrder ??
-      legacyActiveSeatOrder(room) ??
-      (room.round % 2 === 1
-        ? ([SEAT_A, SEAT_B] as const)
-        : ([SEAT_B, SEAT_A] as const));
-    const nextOrder: readonly [PlatformSeatId, PlatformSeatId] = [
-      currentOrder[1],
-      currentOrder[0],
+    const currentOrder = room.activeSeatOrder ?? room.seatOrder;
+    const nextOrder: readonly PlatformSeatId[] = [
+      ...currentOrder.slice(1),
+      currentOrder[0]!,
     ];
     const nextRevision = room.revision + 1;
     const next: StoredRoom = {
       ...room,
       revision: nextRevision,
-      round: bothReady ? room.round + 1 : room.round,
-      ruleSetId: bothReady
+      round: allReady ? room.round + 1 : room.round,
+      ruleSetId: allReady
         ? rematchRules.definition.ruleSetId
         : room.ruleSetId,
-      rematchRuleSetId: bothReady ? null : room.rematchRuleSetId,
-      roundStartRevision: bothReady
+      rematchRuleSetId: allReady ? null : room.rematchRuleSetId,
+      roundStartRevision: allReady
         ? nextRevision
         : (room.roundStartRevision ?? 0),
-      seats: bothReady
-        ? {
-            [SEAT_A]: {
-              ...seats[SEAT_A],
-              rematchReady: false,
-            },
-            [SEAT_B]: {
-              ...seats[SEAT_B]!,
-              rematchReady: false,
-            },
-          }
-        : seats,
-      position: bothReady
-        ? rematchRules.create(nextOrder, { now, randomSeed })
+      seats: allReady ? resetRematchReadiness(seats) : seats,
+      position: allReady
+        ? rematchRules.create(nextOrder as Seats, { now, randomSeed })
         : room.position,
       preparation: null,
-      activeSeatOrder: bothReady ? nextOrder : room.activeSeatOrder,
-      actionJournal: bothReady
-        ? createActionJournal()
+      activeSeatOrder: allReady ? nextOrder : room.activeSeatOrder,
+      actionJournal: allReady
+        ? createActionJournal(nextOrder)
         : room.actionJournal,
       updatedAt: now,
       expiresAt:
-        now + (bothReady ? ACTIVE_ROOM_TTL_MS : FINISHED_ROOM_TTL_MS),
+        now + (allReady ? ACTIVE_ROOM_TTL_MS : FINISHED_ROOM_TTL_MS),
     };
     return { ok: true, room: next, changed: true };
   }

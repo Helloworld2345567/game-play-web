@@ -1,5 +1,6 @@
 import type { GameRules } from "../core/game-rules";
 import { chaseRules } from "./chase/rules";
+import { chineseCheckersRoomRules } from "./chinese-checkers/rules";
 import { gomokuRules } from "./gomoku/rules";
 import { minesweeperDuelRules } from "./minesweeper/duel-rules";
 import { minesweeperRaceRules } from "./minesweeper/race-rules";
@@ -21,6 +22,9 @@ const registrations: readonly ServerRuleRegistration[] = [
   { rules: xiangqiRules, creationPolicy: "enabled" },
   { rules: ticTacToeRules, creationPolicy: "enabled" },
   { rules: tiaojiaqiRules, creationPolicy: "enabled" },
+  ...Object.values(chineseCheckersRoomRules).map(
+    (rules) => ({ rules, creationPolicy: "enabled" as const }),
+  ),
   ...Object.values(chaseRules).map(
     (rules) => ({
       rules,
@@ -91,6 +95,8 @@ function rematchRulesCompatible(
     current.definition.gameType === target.definition.gameType &&
     current.definition.actionConsistency ===
       target.definition.actionConsistency &&
+    current.definition.playerCount === target.definition.playerCount &&
+    current.definition.resignPolicy === target.definition.resignPolicy &&
     openingRolesMatch(current, target)
   );
 }

@@ -5,7 +5,12 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 export type SeatId = string;
-export type Seats = readonly [SeatId, SeatId];
+/**
+ * The room layer supports two through four seats.  Keeping the first two
+ * tuple elements required preserves the useful invariant for existing games
+ * while allowing rules such as Chinese checkers to receive all players.
+ */
+export type Seats = readonly [SeatId, SeatId, ...SeatId[]];
 
 export type RuleOutcome =
   | { kind: "win"; winner: SeatId; reason: string }
@@ -42,6 +47,10 @@ export interface GameRules {
     gameType: string;
     ruleSetId: string;
     actionConsistency: ActionConsistency;
+    /** Number of player seats required before a room starts (defaults to 2). */
+    playerCount?: 2 | 3 | 4;
+    /** Whether the room-level resign command is available. */
+    resignPolicy?: "opponent_wins" | "disabled";
     /**
      * Optional role order for games that need a room-level opening
      * preparation phase. The first id is the first argument to create(),

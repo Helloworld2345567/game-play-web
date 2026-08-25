@@ -100,8 +100,13 @@ export interface RoomSnapshot {
   revision: number;
   round: number;
   selfSeat: string | null;
+  /** Stable player-seat order; omitted only by pre-v6 persisted snapshots. */
+  seatOrder?: readonly string[];
   seats: Record<string, RoomSeatView>;
   spectators: RoomSpectatorView[];
+  capabilities?: {
+    resign: boolean;
+  };
   /** Present while a turn-based room is waiting for both opening choices. */
   preparation?: RoomPreparationView | null;
   /** Present when the room supports selecting a rule set for the next round. */

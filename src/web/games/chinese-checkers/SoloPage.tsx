@@ -21,6 +21,13 @@ import "./game.css";
 
 export const CHINESE_CHECKERS_PLAYER_COUNTS = [2, 3, 4] as const;
 
+export function readChineseCheckersPlayerCount(
+  search: string,
+): ChineseCheckersPlayerCount {
+  const value = Number(new URLSearchParams(search).get("players"));
+  return value === 3 || value === 4 ? value : 2;
+}
+
 interface ChineseCheckersPlayerMeta {
   readonly name: string;
   readonly color: string;
@@ -127,7 +134,7 @@ export function SoloPage({
   onDisplayNameChange,
 }: LocalGamePageProps) {
   const [game, setGame] = useState<ChineseCheckersState>(() =>
-    createChineseCheckers(2)
+    createChineseCheckers(readChineseCheckersPlayerCount(location.search))
   );
   const [selected, setSelected] = useState<ChineseCheckersPosition | null>(null);
   const [announcement, setAnnouncement] = useState(

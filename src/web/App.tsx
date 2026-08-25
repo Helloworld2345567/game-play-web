@@ -58,7 +58,8 @@ const LANDING_ROOM_ENTRIES = clientGameCatalog.flatMap((manifest) => {
   if (
     manifest.launchKind !== "turn-room" ||
     manifest.creationPolicy !== "enabled" ||
-    manifest.gameId === "chase"
+    manifest.gameId === "chase" ||
+    manifest.gameId === "chinese-checkers"
   ) {
     return [];
   }
@@ -85,6 +86,7 @@ const LANDING_LOCAL_ENTRIES = clientGameCatalog.flatMap((manifest) => {
   if (
     manifest.launchKind !== "local-game" ||
     manifest.creationPolicy !== "enabled" ||
+    manifest.gameId === "chinese-checkers" ||
     manifest.loadPage === undefined
   ) {
     return [];
@@ -117,6 +119,16 @@ export const LANDING_GAME_CATALOG = [
     description: "单人计时 · 双人竞速",
     launch: { kind: "picker" as const, gameType: "minesweeper" as const },
   },
+  {
+    id: "chinese-checkers",
+    label: "跳棋",
+    ariaLabel: "跳棋，选择本机或联机玩法与人数",
+    description: "标准 121 孔 · 2 / 3 / 4 人本机或联机对战",
+    launch: {
+      kind: "picker" as const,
+      gameType: "chinese-checkers" as const,
+    },
+  },
   ...LANDING_LOCAL_ENTRIES,
 ] as const;
 
@@ -124,6 +136,8 @@ export type MinesweeperLaunchMode = "solo" | "race";
 export type MinesweeperPreset = MinefieldPresetId;
 
 export type ChaseDifficulty = "easy" | "medium" | "hard";
+export type ChineseCheckersLaunchMode = "local" | "room";
+export type ChineseCheckersPlayerCount = 2 | 3 | 4;
 
 export function localGameIdFromPath(path: string): string | null {
   const gameId = path.match(LOCAL_GAME_PATH)?.[1];
@@ -143,6 +157,23 @@ export function resolveChaseLaunch(difficulty: ChaseDifficulty) {
     kind: "room" as const,
     gameType: "chase",
     ruleSetId,
+  };
+}
+
+export function resolveChineseCheckersLaunch(
+  mode: ChineseCheckersLaunchMode,
+  playerCount: ChineseCheckersPlayerCount,
+) {
+  if (mode === "local") {
+    return {
+      kind: "navigate" as const,
+      href: `/chinese-checkers?players=${playerCount}`,
+    };
+  }
+  return {
+    kind: "room" as const,
+    gameType: "chinese-checkers",
+    ruleSetId: `chinese-checkers.room.${playerCount}p.v1`,
   };
 }
 
@@ -641,6 +672,155 @@ function ChasePicker({
   );
 }
 
+const CHINESE_CHECKERS_PLAYER_OPTIONS = [2, 3, 4] as const;
+
+function ChineseCheckersPicker({
+  mode,
+  playerCount,
+  creating,
+  error,
+  onModeChange,
+  onPlayerCountChange,
+  onStart,
+  onClose,
+}: {
+  mode: ChineseCheckersLaunchMode;
+  playerCount: ChineseCheckersPlayerCount;
+  creating: boolean;
+  error: string | null;
+  onModeChange(mode: ChineseCheckersLaunchMode): void;
+  onPlayerCountChange(playerCount: ChineseCheckersPlayerCount): void;
+  onStart(): void;
+  onClose(): void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog !== null && !dialog.open) dialog.showModal();
+  }, []);
+
+  const close = () => {
+    if (creating) return;
+    const dialog = dialogRef.current;
+    if (dialog?.open) dialog.close();
+    else onClose();
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      class="minesweeper-picker checkers-picker"
+      aria-labelledby="checkers-picker-title"
+      aria-describedby="checkers-picker-summary"
+      onCancel={(event) => {
+        if (creating) event.preventDefault();
+      }}
+      onClose={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <header class="dialog-heading">
+        <div>
+          <p class="eyebrow">选择玩法</p>
+          <h2 id="checkers-picker-title">跳棋</h2>
+        </div>
+        <button
+          class="dialog-close"
+          type="button"
+          aria-label="关闭跳棋玩法选择"
+          disabled={creating}
+          onClick={close}
+        >
+          <span aria-hidden="true">×</span>
+        </button>
+      </header>
+
+      <form
+        class="minesweeper-picker-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onStart();
+        }}
+      >
+        <fieldset disabled={creating}>
+          <legend>玩法</legend>
+          <div class="choice-segments mode-segments">
+            <label class="choice-segment">
+              <input
+                type="radio"
+                name="checkers-mode"
+                value="local"
+                checked={mode === "local"}
+                autofocus={mode === "local"}
+                onChange={() => onModeChange("local")}
+              />
+              <span>
+                <strong>本机同屏</strong>
+                <small>一台设备轮流走棋</small>
+              </span>
+            </label>
+            <label class="choice-segment">
+              <input
+                type="radio"
+                name="checkers-mode"
+                value="room"
+                checked={mode === "room"}
+                autofocus={mode === "room"}
+                onChange={() => onModeChange("room")}
+              />
+              <span>
+                <strong>邀请联机</strong>
+                <small>每人使用自己的设备</small>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset disabled={creating}>
+          <legend>人数</legend>
+          <div class="choice-segments preset-segments">
+            {CHINESE_CHECKERS_PLAYER_OPTIONS.map((count) => (
+              <label class="choice-segment" key={count}>
+                <input
+                  type="radio"
+                  name="checkers-player-count"
+                  value={count}
+                  checked={playerCount === count}
+                  onChange={() => onPlayerCountChange(count)}
+                />
+                <span>
+                  <strong>{count} 人</strong>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <p id="checkers-picker-summary" class="picker-summary">
+          <strong>{playerCount} 人 · {mode === "local" ? "本机同屏" : "邀请联机"}</strong>
+          <span>
+            {mode === "local"
+              ? "在这台设备上轮流操作，随时可以重新选择人数。"
+              : `创建固定 ${playerCount} 个玩家席位的房间，坐满后自动开始。`}
+          </span>
+        </p>
+
+        {error && <p class="inline-error picker-error" role="alert">{error}</p>}
+
+        <button class="primary-button picker-submit" type="submit" disabled={creating}>
+          {creating
+            ? "正在创建…"
+            : mode === "local"
+              ? `开始 ${playerCount} 人本机游戏`
+              : `创建 ${playerCount} 人联机房间`}
+        </button>
+      </form>
+    </dialog>
+  );
+}
+
 function LandingPage({
   displayName,
   onDisplayNameChange,
@@ -660,8 +840,14 @@ function LandingPage({
   const [chasePickerOpen, setChasePickerOpen] = useState(false);
   const [chaseDifficulty, setChaseDifficulty] =
     useState<ChaseDifficulty>("easy");
+  const [checkersPickerOpen, setCheckersPickerOpen] = useState(false);
+  const [checkersMode, setCheckersMode] =
+    useState<ChineseCheckersLaunchMode>("local");
+  const [checkersPlayerCount, setCheckersPlayerCount] =
+    useState<ChineseCheckersPlayerCount>(2);
   const minesweeperTriggerRef = useRef<HTMLButtonElement>(null);
   const chaseTriggerRef = useRef<HTMLButtonElement>(null);
+  const checkersTriggerRef = useRef<HTMLButtonElement>(null);
 
   const createRoom = async (gameType: string, ruleSetId: string) => {
     if (creating !== null) return;
@@ -720,6 +906,18 @@ function LandingPage({
     void createRoom(launch.gameType, launch.ruleSetId);
   };
 
+  const startChineseCheckers = () => {
+    const launch = resolveChineseCheckersLaunch(
+      checkersMode,
+      checkersPlayerCount,
+    );
+    if (launch.kind === "navigate") {
+      location.assign(launch.href);
+      return;
+    }
+    void createRoom(launch.gameType, launch.ruleSetId);
+  };
+
   const closeMinesweeperPicker = () => {
     setMinesweeperPickerOpen(false);
     setError(null);
@@ -730,6 +928,12 @@ function LandingPage({
     setChasePickerOpen(false);
     setError(null);
     requestAnimationFrame(() => chaseTriggerRef.current?.focus());
+  };
+
+  const closeCheckersPicker = () => {
+    setCheckersPickerOpen(false);
+    setError(null);
+    requestAnimationFrame(() => checkersTriggerRef.current?.focus());
   };
 
   return (
@@ -766,7 +970,9 @@ function LandingPage({
               ref={game.launch.kind === "picker"
                 ? game.launch.gameType === "chase"
                   ? chaseTriggerRef
-                  : minesweeperTriggerRef
+                  : game.launch.gameType === "minesweeper"
+                    ? minesweeperTriggerRef
+                    : checkersTriggerRef
                 : undefined}
               class="secondary-button hero-button game-choice"
               type="button"
@@ -777,8 +983,10 @@ function LandingPage({
                   setError(null);
                   if (game.launch.gameType === "chase") {
                     setChasePickerOpen(true);
-                  } else {
+                  } else if (game.launch.gameType === "minesweeper") {
                     setMinesweeperPickerOpen(true);
+                  } else {
+                    setCheckersPickerOpen(true);
                   }
                 } else if (game.launch.kind === "navigate") {
                   location.assign(game.launch.href);
@@ -806,7 +1014,10 @@ function LandingPage({
             </button>
           ))}
         </div>
-        {error && !minesweeperPickerOpen && !chasePickerOpen && (
+        {error &&
+          !minesweeperPickerOpen &&
+          !chasePickerOpen &&
+          !checkersPickerOpen && (
           <p class="inline-error" role="alert">{error}</p>
         )}
       </section>
@@ -839,6 +1050,24 @@ function LandingPage({
           }}
           onStart={startChase}
           onClose={closeChasePicker}
+        />
+      )}
+      {checkersPickerOpen && (
+        <ChineseCheckersPicker
+          mode={checkersMode}
+          playerCount={checkersPlayerCount}
+          creating={creating !== null}
+          error={error}
+          onModeChange={(mode) => {
+            setCheckersMode(mode);
+            setError(null);
+          }}
+          onPlayerCountChange={(playerCount) => {
+            setCheckersPlayerCount(playerCount);
+            setError(null);
+          }}
+          onStart={startChineseCheckers}
+          onClose={closeCheckersPicker}
         />
       )}
     </main>
@@ -924,7 +1153,7 @@ function mainStatus(
     )?.label;
     return `已选择${roleLabel ?? "角色"}，等待对手`;
   }
-  if (snapshot.position === null) return "等待对手加入";
+  if (snapshot.position === null) return "等待其他玩家加入";
   if (outcome?.kind === "draw") return "本局和棋";
   if (outcome?.kind === "win") {
     return outcome.winner === snapshot.selfSeat ? "你赢了" : "对手获胜";
@@ -970,9 +1199,11 @@ function RoomPage({
   const gameName =
     adapter?.displayName ?? (snapshot === null ? "自由五子棋" : "未知棋类");
   const [shareNotice, setShareNotice] = useState<string | null>(null);
-  const bothOccupied =
-    snapshot?.seats["seat-a"]?.occupied === true &&
-    snapshot.seats["seat-b"]?.occupied === true;
+  const seatOrder = snapshot?.seatOrder ??
+    (snapshot === null ? ["seat-a", "seat-b"] : Object.keys(snapshot.seats));
+  const allOccupied =
+    seatOrder.length >= 2 &&
+    seatOrder.every((seatId) => snapshot?.seats[seatId]?.occupied === true);
   const outcome = snapshot?.position?.outcome ?? null;
   const selfSeat = snapshot?.selfSeat ?? null;
   const isPlayer = selfSeat !== null;
@@ -981,7 +1212,7 @@ function RoomPage({
     !client.leaving &&
     adapter !== null &&
     isPlayer &&
-    bothOccupied &&
+    allOccupied &&
     snapshot?.position !== null &&
     snapshot?.position !== undefined &&
     (snapshot?.preparation === null || snapshot?.preparation === undefined) &&
@@ -1091,12 +1322,19 @@ function RoomPage({
         </header>
 
         <div class="seat-strip">
-          {(["seat-a", "seat-b"] as const).map((seatId) => {
+          {seatOrder.map((seatId, index) => {
             const seat = snapshot?.seats[seatId];
             const isSelf = snapshot?.selfSeat === seatId;
-            const presentation = seatPresentations[seatId];
+            const presentation = seatPresentations[seatId] ?? {
+              label: `席位 ${String.fromCharCode(65 + index)}`,
+              swatchClassName: "neutral",
+            };
             return (
-              <div class={`seat-card ${isSelf ? "is-self" : ""}`}>
+              <div
+                key={seatId}
+                class={`seat-card ${isSelf ? "is-self" : ""}`}
+                data-seat={seatId}
+              >
                 <span
                   class={`stone-swatch ${presentation.swatchClassName}`}
                   aria-hidden="true"
@@ -1169,8 +1407,12 @@ function RoomPage({
             onAction={(payload) => client.sendGameAction(payload)}
           />
         ) : snapshot?.preparation ? null : (
-          <div class="board-placeholder" aria-label="等待对手加入的空棋盘">
-            <span>邀请朋友加入后开始</span>
+          <div class="board-placeholder" aria-label="等待玩家加入的空棋盘">
+            <span>
+              已加入 {seatOrder.filter((seatId) =>
+                snapshot?.seats[seatId]?.occupied === true
+              ).length} / {seatOrder.length} 人，坐满后开始
+            </span>
           </div>
         )}
 
@@ -1212,7 +1454,7 @@ function RoomPage({
             disabled={client.leaving}
             onClick={share}
           >
-            {bothOccupied ? "分享房间" : "邀请好友"}
+            {allOccupied ? "分享房间" : "邀请好友"}
           </button>
           <button
             class="secondary-button"
@@ -1225,7 +1467,8 @@ function RoomPage({
             adapter &&
             snapshot?.position &&
             outcome === null &&
-            bothOccupied && (
+            allOccupied &&
+            snapshot.capabilities?.resign !== false && (
             <button
               class="danger-button"
               disabled={

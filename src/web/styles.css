@@ -753,6 +753,26 @@ button:disabled {
   background: #514b43;
 }
 
+.stone-swatch.checkers-coral {
+  border: 1px solid #9d4b41;
+  background: radial-gradient(circle at 35% 30%, #ffc0b5, #ef806d 70%);
+}
+
+.stone-swatch.checkers-indigo {
+  border: 1px solid #425e9f;
+  background: radial-gradient(circle at 35% 30%, #c0d0ff, #7c9de5 70%);
+}
+
+.stone-swatch.checkers-teal {
+  border: 1px solid #367e72;
+  background: radial-gradient(circle at 35% 30%, #b8f0e6, #67c4b4 70%);
+}
+
+.stone-swatch.checkers-violet {
+  border: 1px solid #704b8a;
+  background: radial-gradient(circle at 35% 30%, #e3c6f5, #bf92df 70%);
+}
+
 .opening-role-panel {
   display: grid;
   gap: 16px;

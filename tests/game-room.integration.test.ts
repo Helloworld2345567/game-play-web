@@ -690,6 +690,134 @@ afterEach(async () => {
 });
 
 describe("GameRoom Durable Object", () => {
+  it("admits four Chinese Checkers players before starting and keeps later guests spectators", async () => {
+    const ruleset = "chinese-checkers.room.4p.v1";
+    const stub = await initializeRoom(
+      "room-checkers-4p",
+      "guest-checkers-a",
+      "chinese-checkers",
+      ruleset,
+    );
+    const players = [] as TestConnection[];
+    for (const guestId of [
+      "guest-checkers-a",
+      "guest-checkers-b",
+      "guest-checkers-c",
+      "guest-checkers-d",
+    ]) {
+      players.push(await connect(stub, guestId));
+    }
+
+    const started = players[3]!.firstMessage;
+    expect(started).toMatchObject({
+      type: "snapshot",
+      revision: 3,
+      seatOrder: ["seat-a", "seat-b", "seat-c", "seat-d"],
+      selfSeat: "seat-d",
+      position: { turn: "seat-a" },
+    });
+    expect(Object.keys(started.seats as Record<string, unknown>)).toEqual([
+      "seat-a",
+      "seat-b",
+      "seat-c",
+      "seat-d",
+    ]);
+
+    const spectator = await connect(stub, "guest-checkers-spectator");
+    expect(spectator.firstMessage).toMatchObject({
+      type: "snapshot",
+      revision: 3,
+      selfSeat: null,
+      seatOrder: ["seat-a", "seat-b", "seat-c", "seat-d"],
+      position: { turn: "seat-a" },
+    });
+
+    const revisionFour = Promise.all(
+      [...players, spectator].map((connection) =>
+        connection.inbox.nextMatching(
+          (message) => message.type === "snapshot" && message.revision === 4,
+        ),
+      ),
+    );
+    players[0]!.socket.send(
+      JSON.stringify({
+        v: 1,
+        type: "game_action",
+        gameType: "chinese-checkers",
+        ruleSetId: ruleset,
+        expectedRevision: 3,
+        payload: {
+          type: "move",
+          from: "-6,-4",
+          to: "-5,-3",
+        },
+      }),
+    );
+    // Keep the assertion below independent of which connection receives the
+    // broadcast first; every player and spectator must observe the revision.
+    const snapshots = await revisionFour;
+    expect(snapshots[0]).toMatchObject({
+      selfSeat: "seat-a",
+      position: { turn: "seat-b" },
+    });
+    expect(snapshots[3]).toMatchObject({
+      selfSeat: "seat-d",
+      position: { turn: "seat-b" },
+    });
+    expect(snapshots[4]).toMatchObject({
+      selfSeat: null,
+      position: { turn: "seat-b" },
+    });
+  });
+
+  it("reserves independent player and spectator budgets in a four-player Room", async () => {
+    const ruleset = "chinese-checkers.room.4p.v1";
+    const stub = await initializeRoom(
+      "room-checkers-4p-connection-cap",
+      "guest-checkers-a",
+      "chinese-checkers",
+      ruleset,
+    );
+    const playerIds = [
+      "guest-checkers-a",
+      "guest-checkers-b",
+      "guest-checkers-c",
+      "guest-checkers-d",
+    ];
+
+    for (const guestId of playerIds) {
+      expect((await connect(stub, guestId)).firstMessage).toMatchObject({
+        type: "snapshot",
+      });
+    }
+    for (const guestId of playerIds) {
+      expect((await connect(stub, guestId)).firstMessage).toMatchObject({
+        type: "snapshot",
+      });
+    }
+
+    expect(
+      (await connect(stub, "guest-checkers-a")).firstMessage,
+    ).toEqual({
+      v: 1,
+      type: "error",
+      code: "room.too_many_connections",
+    });
+
+    for (let index = 0; index < 8; index += 1) {
+      expect(
+        (await connect(stub, `guest-checkers-spectator-${index}`)).firstMessage,
+      ).toMatchObject({ type: "snapshot", selfSeat: null });
+    }
+    expect(
+      (await connect(stub, "guest-checkers-spectator-overflow")).firstMessage,
+    ).toEqual({
+      v: 1,
+      type: "error",
+      code: "room.too_many_connections",
+    });
+  });
+
   it("rejects initialization that attempts to bypass Room capacity", async () => {
     const testEnv = env as unknown as TestEnv;
     const roomId = "bypass-room-0001";
