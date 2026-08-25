@@ -1,0 +1,692 @@
+.game-sokoban-page {
+  width: min(100%, 1260px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding:
+    max(18px, env(safe-area-inset-top))
+    max(18px, env(safe-area-inset-right))
+    max(36px, env(safe-area-inset-bottom))
+    max(18px, env(safe-area-inset-left));
+}
+
+.game-sokoban-topbar {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.game-sokoban-home-link {
+  min-height: 40px;
+  padding-inline: 14px;
+  text-decoration: none;
+}
+
+.game-sokoban-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: clamp(22px, 5vw, 54px);
+  padding: clamp(40px, 8vw, 78px) 0 30px;
+}
+
+.game-sokoban-header h1 {
+  margin: 4px 0 0;
+  color: var(--theme-text);
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: clamp(3.6rem, 10vw, 6.7rem);
+  font-weight: 500;
+  letter-spacing: -0.07em;
+  line-height: 0.9;
+}
+
+.game-sokoban-status {
+  max-width: 620px;
+  min-height: 1.5em;
+  margin: 19px 0 0;
+  color: var(--theme-muted);
+  font-size: clamp(0.9rem, 2vw, 1.02rem);
+  line-height: 1.55;
+}
+
+.game-sokoban-stat-cards {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(86px, 1fr));
+}
+
+.game-sokoban-stat-card {
+  display: grid;
+  min-width: 88px;
+  gap: 6px;
+  padding: 13px 15px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 16px;
+  background: var(--theme-surface-soft);
+}
+
+.game-sokoban-stat-card small {
+  color: var(--theme-subtle);
+  font-size: 0.67rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.game-sokoban-stat-card strong {
+  color: var(--theme-text);
+  font-size: 1.12rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.game-sokoban-layout {
+  display: grid;
+  align-items: start;
+  gap: clamp(24px, 4vw, 42px);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+}
+
+.game-sokoban-board-column,
+.game-sokoban-sidebar {
+  min-width: 0;
+}
+
+.game-sokoban-board-heading,
+.game-sokoban-level-panel > header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.game-sokoban-board-heading h2,
+.game-sokoban-level-panel h2,
+.game-sokoban-guide h2 {
+  margin: 0;
+  color: var(--theme-text);
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: clamp(1.35rem, 3vw, 1.7rem);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.game-sokoban-state-chip {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  padding: 0 13px;
+  border: 1px solid var(--theme-border);
+  border-radius: 999px;
+  color: var(--theme-muted);
+  background: var(--theme-surface-soft);
+  font-size: 0.75rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.game-sokoban-state-chip.is-won {
+  border-color: color-mix(in srgb, var(--theme-success) 68%, var(--theme-border));
+  color: var(--theme-success);
+  background: color-mix(in srgb, var(--theme-success) 10%, var(--theme-surface));
+}
+
+.game-sokoban-board-shell {
+  display: grid;
+  min-height: 420px;
+  place-items: center;
+  overflow: hidden;
+  padding: clamp(16px, 4vw, 34px);
+  border: 1px solid color-mix(in srgb, #c58b55 46%, var(--theme-border));
+  border-radius: clamp(22px, 4vw, 32px);
+  background:
+    radial-gradient(circle at 52% 42%, rgba(236, 184, 116, 0.14), transparent 53%),
+    linear-gradient(145deg, #27231e, #161412 72%);
+  box-shadow:
+    0 30px 76px rgba(0, 0, 0, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.game-sokoban-board-shell.is-won {
+  border-color: color-mix(in srgb, var(--theme-success) 75%, var(--theme-border));
+  box-shadow:
+    0 30px 76px rgba(0, 0, 0, 0.28),
+    0 0 0 5px color-mix(in srgb, var(--theme-success) 10%, transparent),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.game-sokoban-board {
+  display: grid;
+  width: min(100%, calc(var(--sokoban-columns) * 62px));
+  max-height: 70vh;
+  max-height: 70dvh;
+  aspect-ratio: var(--sokoban-columns) / var(--sokoban-rows);
+  overflow: hidden;
+  border-radius: 7px;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  grid-template-rows: repeat(var(--sokoban-rows), minmax(0, 1fr));
+  filter: drop-shadow(0 16px 22px rgba(0, 0, 0, 0.25));
+}
+
+.game-sokoban-board:focus-visible {
+  outline: 3px solid var(--theme-accent);
+  outline-offset: 6px;
+}
+
+.game-sokoban-row {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: repeat(var(--sokoban-columns), minmax(0, 1fr));
+}
+
+.game-sokoban-cell {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+}
+
+.game-sokoban-cell-floor,
+.game-sokoban-cell-target,
+.game-sokoban-cell-crate,
+.game-sokoban-cell-crate-on-target,
+.game-sokoban-cell-player,
+.game-sokoban-cell-player-on-target {
+  border: 1px solid rgba(89, 63, 34, 0.2);
+  background:
+    radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.1), transparent 34%),
+    #cbb18a;
+  box-shadow: inset 0 0 12px rgba(78, 50, 24, 0.1);
+}
+
+.game-sokoban-cell-floor:nth-child(odd),
+.game-sokoban-cell-target:nth-child(odd),
+.game-sokoban-cell-crate:nth-child(odd),
+.game-sokoban-cell-crate-on-target:nth-child(odd),
+.game-sokoban-cell-player:nth-child(odd),
+.game-sokoban-cell-player-on-target:nth-child(odd) {
+  background-color: #c3a67c;
+}
+
+.game-sokoban-cell-wall {
+  z-index: 1;
+  border: 1px solid rgba(27, 23, 19, 0.76);
+  background:
+    linear-gradient(90deg, transparent 48%, rgba(28, 23, 18, 0.46) 49%, rgba(28, 23, 18, 0.46) 52%, transparent 53%),
+    linear-gradient(0deg, transparent 47%, rgba(28, 23, 18, 0.5) 48%, rgba(28, 23, 18, 0.5) 53%, transparent 54%),
+    linear-gradient(145deg, #625c52, #3f3a33);
+  box-shadow:
+    inset 2px 2px 2px rgba(255, 255, 255, 0.11),
+    inset -3px -3px 4px rgba(0, 0, 0, 0.29);
+}
+
+.game-sokoban-cell-target::before,
+.game-sokoban-cell-crate-on-target::before,
+.game-sokoban-cell-player-on-target::before {
+  position: absolute;
+  width: 43%;
+  height: 43%;
+  border: clamp(2px, 0.35vw, 3px) solid #9f3f32;
+  border-radius: 50%;
+  background: rgba(159, 63, 50, 0.1);
+  box-shadow:
+    0 0 0 3px rgba(247, 218, 166, 0.28),
+    inset 0 0 8px rgba(107, 35, 29, 0.18);
+  content: "";
+}
+
+.game-sokoban-cell-crate-on-target::before {
+  width: 82%;
+  height: 82%;
+  border-color: color-mix(in srgb, var(--theme-success) 78%, #49634a);
+  border-radius: 15%;
+  background: color-mix(in srgb, var(--theme-success) 14%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--theme-success) 35%, transparent);
+}
+
+.game-sokoban-crate-face {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  width: 77%;
+  height: 77%;
+  place-items: center;
+  border: 2px solid #6b351b;
+  border-radius: 13%;
+  color: rgba(65, 30, 13, 0.78);
+  background:
+    linear-gradient(45deg, transparent 43%, rgba(91, 43, 18, 0.48) 44%, rgba(91, 43, 18, 0.48) 50%, transparent 51%),
+    linear-gradient(-45deg, transparent 43%, rgba(91, 43, 18, 0.48) 44%, rgba(91, 43, 18, 0.48) 50%, transparent 51%),
+    linear-gradient(145deg, #d99448, #a95e28);
+  box-shadow:
+    inset 3px 3px 3px rgba(255, 233, 181, 0.28),
+    inset -4px -4px 5px rgba(61, 25, 8, 0.25),
+    0 3px 4px rgba(47, 24, 11, 0.3);
+  font-size: clamp(0.48rem, 1.7vw, 0.9rem);
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 1px rgba(255, 221, 164, 0.28);
+}
+
+.game-sokoban-cell-crate-on-target .game-sokoban-crate-face {
+  border-color: color-mix(in srgb, var(--theme-success) 55%, #683318);
+  box-shadow:
+    inset 3px 3px 3px rgba(255, 233, 181, 0.3),
+    inset -4px -4px 5px rgba(61, 25, 8, 0.22),
+    0 0 11px color-mix(in srgb, var(--theme-success) 45%, transparent);
+}
+
+.game-sokoban-player-figure {
+  position: relative;
+  z-index: 3;
+  width: 58%;
+  height: 58%;
+  border: 2px solid #294965;
+  border-radius: 50% 50% 42% 42%;
+  background:
+    radial-gradient(circle at 50% 29%, #f2c89d 0 17%, transparent 18%),
+    linear-gradient(to bottom, #3d6f91 39%, #2d536f 40% 100%);
+  box-shadow:
+    inset 2px 2px 3px rgba(255, 255, 255, 0.22),
+    0 3px 5px rgba(25, 35, 43, 0.32);
+}
+
+.game-sokoban-player-figure::after {
+  position: absolute;
+  right: 19%;
+  bottom: -10%;
+  left: 19%;
+  height: 24%;
+  border-radius: 3px 3px 40% 40%;
+  background: #243f55;
+  content: "";
+}
+
+.game-sokoban-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.game-sokoban-direction-pad {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 5px;
+  grid-template-areas:
+    ". up ."
+    "left down right";
+  grid-template-columns: repeat(3, 48px);
+}
+
+.game-sokoban-direction {
+  display: grid;
+  width: 48px;
+  height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--theme-border);
+  border-radius: 13px;
+  color: var(--theme-text);
+  background: var(--theme-surface-raised);
+  box-shadow: 0 5px 12px rgba(0, 0, 0, 0.13);
+  cursor: pointer;
+  font-size: 1.1rem;
+  font-weight: 850;
+  transition: transform 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+
+.game-sokoban-direction:hover:not(:disabled) {
+  border-color: var(--theme-accent);
+  color: var(--theme-accent);
+  transform: translateY(-1px);
+}
+
+.game-sokoban-direction:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.game-sokoban-direction:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.game-sokoban-direction-up { grid-area: up; }
+.game-sokoban-direction-left { grid-area: left; }
+.game-sokoban-direction-down { grid-area: down; }
+.game-sokoban-direction-right { grid-area: right; }
+
+.game-sokoban-action-buttons {
+  display: grid;
+  min-width: 144px;
+  gap: 8px;
+}
+
+.game-sokoban-action-buttons .primary-button,
+.game-sokoban-action-buttons .secondary-button {
+  min-height: 44px;
+  padding-inline: 15px;
+}
+
+.game-sokoban-instructions {
+  max-width: 680px;
+  margin: 16px auto 0;
+  color: var(--theme-subtle);
+  font-size: 0.76rem;
+  line-height: 1.65;
+  text-align: center;
+}
+
+.game-sokoban-sidebar {
+  display: grid;
+  gap: 16px;
+}
+
+.game-sokoban-level-panel,
+.game-sokoban-guide {
+  padding: 18px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 21px;
+  background: var(--theme-surface-soft);
+}
+
+.game-sokoban-level-panel > header > span {
+  color: var(--theme-subtle);
+  font-size: 0.68rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.game-sokoban-level-grid {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.game-sokoban-level-grid button {
+  display: grid;
+  min-width: 0;
+  min-height: 62px;
+  place-items: center;
+  gap: 3px;
+  padding: 8px 3px;
+  border: 1px solid var(--theme-border-soft);
+  border-radius: 13px;
+  color: var(--theme-muted);
+  background: color-mix(in srgb, var(--theme-surface) 72%, transparent);
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+.game-sokoban-level-grid button:hover {
+  border-color: var(--theme-accent);
+  color: var(--theme-text);
+  transform: translateY(-1px);
+}
+
+.game-sokoban-level-grid button.is-current {
+  border-color: var(--theme-accent);
+  color: var(--theme-accent);
+  background: color-mix(in srgb, var(--theme-accent) 11%, var(--theme-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--theme-accent) 23%, transparent);
+}
+
+.game-sokoban-level-grid button.is-completed {
+  border-color: color-mix(in srgb, var(--theme-success) 62%, var(--theme-border));
+}
+
+.game-sokoban-level-grid button strong {
+  font-size: 0.91rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.game-sokoban-level-grid button span {
+  overflow: hidden;
+  width: 100%;
+  font-size: 0.53rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-sokoban-level-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.game-sokoban-level-actions .primary-button,
+.game-sokoban-level-actions .secondary-button {
+  min-height: 43px;
+  padding-inline: 10px;
+  font-size: 0.78rem;
+}
+
+.game-sokoban-guide .eyebrow,
+.game-sokoban-level-panel .eyebrow,
+.game-sokoban-board-heading .eyebrow {
+  margin-bottom: 6px;
+}
+
+.game-sokoban-legend {
+  display: grid;
+  gap: 8px 12px;
+  margin: 16px 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.game-sokoban-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--theme-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.game-sokoban-legend i {
+  display: inline-grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  background: #cbb18a;
+  box-shadow: inset 0 0 5px rgba(64, 41, 20, 0.1);
+}
+
+.game-sokoban-legend i.is-player {
+  border-radius: 50%;
+  background: #3d6f91;
+}
+
+.game-sokoban-legend i.is-crate {
+  border: 2px solid #6b351b;
+  background: linear-gradient(145deg, #d99448, #a95e28);
+}
+
+.game-sokoban-legend i.is-target {
+  border: 3px solid #9f3f32;
+  border-radius: 50%;
+  background: rgba(159, 63, 50, 0.08);
+}
+
+.game-sokoban-legend i.is-wall {
+  border-color: #302a24;
+  background: linear-gradient(145deg, #625c52, #3f3a33);
+}
+
+.game-sokoban-guide ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 1.25rem;
+  color: var(--theme-muted);
+  font-size: 0.74rem;
+  line-height: 1.55;
+}
+
+.game-sokoban-guide li::marker {
+  color: var(--theme-accent);
+  font-weight: 800;
+}
+
+.game-sokoban-attribution {
+  margin: 0;
+  padding: 0 3px;
+  color: var(--theme-subtle);
+  font-size: 0.66rem;
+  line-height: 1.6;
+}
+
+.game-sokoban-attribution strong {
+  color: var(--theme-muted);
+}
+
+.game-sokoban-attribution a {
+  color: var(--theme-accent);
+  text-underline-offset: 3px;
+}
+
+html[data-theme="light"] .game-sokoban-stat-card,
+html[data-theme="light"] .game-sokoban-state-chip,
+html[data-theme="light"] .game-sokoban-level-panel,
+html[data-theme="light"] .game-sokoban-guide {
+  border-color: var(--theme-border);
+  background: rgba(255, 253, 249, 0.78);
+}
+
+html[data-theme="light"] .game-sokoban-board-shell {
+  border-color: color-mix(in srgb, #a96c34 62%, var(--theme-border));
+  background:
+    radial-gradient(circle at 52% 42%, rgba(143, 92, 40, 0.09), transparent 54%),
+    #f5eee3;
+  box-shadow:
+    0 28px 68px rgba(73, 62, 47, 0.14),
+    inset 0 0 0 1px rgba(73, 62, 47, 0.08);
+}
+
+html[data-theme="light"] .game-sokoban-direction {
+  background: #fffaf2;
+  box-shadow: 0 5px 12px rgba(73, 62, 47, 0.1);
+}
+
+@media (max-width: 940px) {
+  .game-sokoban-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .game-sokoban-stat-cards {
+    width: 100%;
+  }
+
+  .game-sokoban-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .game-sokoban-sidebar {
+    align-items: start;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .game-sokoban-attribution {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .game-sokoban-page {
+    padding-inline:
+      max(12px, env(safe-area-inset-left))
+      max(12px, env(safe-area-inset-right));
+  }
+
+  .game-sokoban-topbar .topbar-actions {
+    gap: 5px;
+  }
+
+  .game-sokoban-topbar .profile-trigger {
+    max-width: 112px;
+    padding-inline: 9px;
+  }
+
+  .game-sokoban-topbar .theme-toggle {
+    min-width: 40px;
+    padding-inline: 8px;
+  }
+
+  .game-sokoban-topbar .theme-toggle-label {
+    display: none;
+  }
+
+  .game-sokoban-header {
+    padding-top: 38px;
+  }
+
+  .game-sokoban-header h1 {
+    font-size: clamp(3.5rem, 19vw, 4.9rem);
+  }
+
+  .game-sokoban-stat-cards {
+    gap: 6px;
+  }
+
+  .game-sokoban-stat-card {
+    min-width: 0;
+    padding: 11px 9px;
+  }
+
+  .game-sokoban-board-shell {
+    min-height: 330px;
+    padding: 13px;
+    border-radius: 21px;
+  }
+
+  .game-sokoban-board-heading {
+    align-items: flex-start;
+  }
+
+  .game-sokoban-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .game-sokoban-direction-pad {
+    align-self: center;
+  }
+
+  .game-sokoban-action-buttons {
+    width: min(100%, 310px);
+    align-self: center;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .game-sokoban-sidebar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .game-sokoban-attribution {
+    grid-column: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game-sokoban-board-shell,
+  .game-sokoban-direction,
+  .game-sokoban-level-grid button {
+    transition: none;
+  }
+}

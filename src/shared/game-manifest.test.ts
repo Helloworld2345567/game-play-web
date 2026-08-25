@@ -91,6 +91,24 @@ describe("game manifest", () => {
     expect(isManifestRuleSet("snake", "snake.solo.20x20.v2")).toBe(false);
   });
 
+  it("exposes Sokoban as a local classic-level game", () => {
+    expect(getGameManifest("sokoban")).toMatchObject({
+      gameId: "sokoban",
+      title: "推箱子",
+      creationPolicy: "enabled",
+      launchKind: "local-game",
+      ruleSetIds: ["sokoban.microban-1-10.v1"],
+      creatableRuleSetIds: [],
+    });
+    expect(
+      isManifestRuleSet("sokoban", "sokoban.microban-1-10.v1"),
+    ).toBe(true);
+    expect(
+      isCreatableManifestRuleSet("sokoban", "sokoban.microban-1-10.v1"),
+    ).toBe(false);
+    expect(isManifestRuleSet("sokoban", "sokoban.unknown.v1")).toBe(false);
+  });
+
   it("exposes one police-chase family with all three map rule sets", () => {
     const manifest = getGameManifest("chase");
     expect(manifest).toMatchObject({

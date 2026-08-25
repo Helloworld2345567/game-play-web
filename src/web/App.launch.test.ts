@@ -21,6 +21,7 @@ describe("landing game catalog", () => {
       "chinese-checkers",
       "2048",
       "snake",
+      "sokoban",
     ]);
     expect(
       LANDING_GAME_CATALOG.filter((entry) => entry.launch.kind === "picker").map(
@@ -87,6 +88,8 @@ describe("landing game catalog", () => {
     expect(localGameIdFromPath("/2048/")).toBe("2048");
     expect(localGameIdFromPath("/snake")).toBe("snake");
     expect(localGameIdFromPath("/snake/")).toBe("snake");
+    expect(localGameIdFromPath("/sokoban")).toBe("sokoban");
+    expect(localGameIdFromPath("/sokoban/")).toBe("sokoban");
     expect(localGameIdFromPath("/minesweeper")).toBe("minesweeper");
     expect(localGameIdFromPath("/chinese-checkers")).toBe(
       "chinese-checkers",

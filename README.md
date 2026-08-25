@@ -1,6 +1,6 @@
 # ym0v0 棋局
 
-一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、跳棋、2048 和贪吃蛇九个入口；扫雷入口内可选单人或双人竞速及三种难度，跳棋支持 2、3、4 人同屏轮流对战，2048 可选 4×4、5×5 或 6×6 单机地图。无需注册，创建房间后把邀请链接发给朋友即可开始；本地游戏直接在本机开始，不创建房间。
+一个部署在 Cloudflare 上的极简实时棋类对战平台。首页提供五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、跳棋、2048、贪吃蛇和推箱子十个入口；扫雷入口内可选单人或双人竞速及三种难度，跳棋支持 2、3、4 人同屏轮流对战，2048 可选 4×4、5×5 或 6×6 单机地图，推箱子首批提供 10 个经典简单关卡。无需注册，创建房间后把邀请链接发给朋友即可开始；本地游戏直接在本机开始，不创建房间。
 
 - 线上地址：<https://play.ym0v0.com>
 - 服务端权威裁决：严格棋类拒绝旧修订；并发棋类始终按最新权威局面验证动作
@@ -22,6 +22,8 @@
 - 2048 按地图尺寸独立排名；每个签名 Guest 在每种地图保留一条个人最高分，按 `score` 降序取 Top 10，同分按 `achieved_at`、`guest_id` 确定性排序；三种地图分别绑定不可变的 `2048.solo.4x4.v1`、`2048.solo.5x5.v1`、`2048.solo.6x6.v1`，成绩最多保留 180 天
 - 贪吃蛇使用经典 20×20 有墙地图，支持方向键/WASD、触摸滑动、屏幕方向按钮、暂停和重开；吃到食物后增长、加分并逐步加速，撞墙或撞到自身后结束
 - 贪吃蛇显示个人最高分和全站 Top 10；每个签名 Guest 在不可变规则版本 `snake.solo.20x20.v1` 下保留一条个人最高分，成绩最多保留 180 天
+- 推箱子首批内置 Microban 第 1–10 关，支持方向键/WASD、触摸滑动、屏幕方向按钮、撤销、重开、上一关/下一关和关卡选择；纯本地运行，不创建房间
+- Microban 关卡由 David W. Skinner 创作，依“可自由转载但须署名”的原作者许可分发；游戏页保留可见署名，固定 GitHub 来源与核验记录见 [`docs/research/SOKOBAN_LEVELS.md`](docs/research/SOKOBAN_LEVELS.md)
 
 ## 架构
 
@@ -34,6 +36,8 @@
 2048 是独立的 `local-game` 页面，首页导航到 `/2048` 后才通过客户端静态 allowlist 动态加载；它只在浏览器内运行 4×4、5×5 或 6×6 规则，不进入房间协议，不创建 `GameRoom`。`/2048` 默认打开 4×4，也可用 `?size=5` 或 `?size=6` 直达其他地图。结束时通过独立的 `/api/2048/leaderboard` 与 `/api/2048/leaderboard/record` 接口提交或读取客户端分数；`Game2048Leaderboard` 按不可变地图规则版本隔离数据，每个签名 Guest 在每种地图只保留个人最高分，按分数降序返回各自的全站 Top 10。
 
 贪吃蛇也是独立的 `local-game` 页面，访问 `/snake` 时才动态加载。纯函数引擎在 20×20 有墙地图上维护蛇身、食物、方向、暂停与终局状态，随机食物生成由调用方注入随机源；页面只负责定时推进和输入。结束时通过 `/api/snake/leaderboard` 与 `/api/snake/leaderboard/record` 读取或提交成绩；`SnakeLeaderboard` 在 `snake.solo.20x20.v1` 下为每个签名 Guest 保留最高分并返回全站 Top 10。
+
+推箱子通过 `/sokoban` 按需加载为独立的 `local-game` 页面，`?level=1..10` 可直达关卡。纯函数引擎解析 XSB 关卡并严格区分外部空白、墙、地板和目标点，通过不可变的 `createSokoban` / `moveSokoban` 接口统一验证移动、推箱、计步和胜利；页面只维护撤销栈、关卡选择与展示状态。首批不可变规则版本 `sokoban.microban-1-10.v1` 使用独立的 `src/games/sokoban/levels.ts` 数据目录，后续可继续追加关卡而不修改移动引擎。
 
 跳棋通过 `/chinese-checkers` 按需加载为独立的 `local-game` 页面。纯函数引擎生成标准 121 孔棋盘和 2/3/4 人营地布局，统一验证相邻单步、同子连续跳跃、回合轮转与目标营胜负；页面只维护选择与展示状态。不可变规则版本 `chinese-checkers.local.v1` 采用同屏轮流模式，不进入当前固定双席位的房间协议，也不占用房间名额。
 
@@ -71,7 +75,7 @@ npm run test:e2e
 npm run build
 ```
 
-测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、跳棋和贪吃蛇引擎、4×4/5×5/6×6 的 2048 引擎与本地页交互、排行榜客户端解析、三个独立排行榜 Durable Object、真实 workerd Durable Object、Worker 边界校验、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
+测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、跳棋、贪吃蛇和推箱子引擎、4×4/5×5/6×6 的 2048 引擎与本地页交互、排行榜客户端解析、三个独立排行榜 Durable Object、真实 workerd Durable Object、Worker 边界校验、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
 
 ## 部署
 
@@ -99,6 +103,8 @@ npm run deploy
 安全边界：Worker 对 JSON 请求执行 Content-Type、Content-Length 和字节上限校验；会话、建房、房间 HTTP/WebSocket 握手、统计和排行榜入口都有 Guest/IP 维度的软限流，房间内 WebSocket 消息还受 Guest 级限流约束，生产环境还应在 Cloudflare WAF/Rate Limiting 配置分布式规则。静态资源使用 CSP、HSTS、同源隔离、`nosniff` 和禁止 iframe；生产构建不发布 source map。`SESSION_SECRET` 缺失或过弱时 Worker 拒绝启动，客户端清单不是服务端授权边界。
 
 ## 增加棋种
+
+本地游戏只需在共享 `GameManifest` 增加 `local-game` 元数据，在客户端 `PAGE_LOADERS` 使用字面量路径加入页面，并实现独立纯函数引擎；不进入房间协议或服务端规则注册表。推箱子新增关卡时在 `src/games/sokoban/levels.ts` 追加经过许可核验的 XSB 数据，同时更新不可变规则版本、来源记录和解析测试。
 
 1. 在 `src/games/<game>/` 实现并测试确定性的 `GameRules`，注册到 `src/games/registry.ts`。
 2. 在 `src/web/games/<game>/` 实现棋盘与展示 adapter，注册到 `src/web/games/registry.tsx`。

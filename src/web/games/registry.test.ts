@@ -140,6 +140,19 @@ describe("game outcome presentation", () => {
     ).toBeNull();
   });
 
+  it("allowlists the local Sokoban page without a room renderer", async () => {
+    const loader = getClientGamePageLoader("sokoban");
+    expect(loader).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("sokoban")?.loadPage).toBe(loader);
+    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader(
+        "sokoban",
+        "sokoban.microban-1-10.v1",
+      ),
+    ).toBeNull();
+  });
+
   it("exposes allowlisted renderer loading through every catalog entry", () => {
     expect(
       clientGameCatalog.every(

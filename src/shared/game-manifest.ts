@@ -140,6 +140,15 @@ export const GAME_MANIFESTS = [
     ruleSetIds: ["snake.solo.20x20.v1"],
     creatableRuleSetIds: [],
   },
+  {
+    gameId: "sokoban",
+    title: "推箱子",
+    description: "Microban 经典前 10 关 · 单人解谜 · 可撤销",
+    creationPolicy: "enabled",
+    launchKind: "local-game",
+    ruleSetIds: ["sokoban.microban-1-10.v1"],
+    creatableRuleSetIds: [],
+  },
 ] as const satisfies readonly GameManifest[];
 
 export type GameId = (typeof GAME_MANIFESTS)[number]["gameId"];
