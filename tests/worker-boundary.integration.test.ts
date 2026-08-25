@@ -922,8 +922,9 @@ describe("Worker request boundary", () => {
       const roomId = "AAAAAAAAAAAAAAAA";
       const clientIp = `room-http-${crypto.randomUUID()}`;
       // The rate check runs before body parsing and forwarding. Keep these
-      // requests concurrent so the test focuses on the edge bucket rather
-      // than spending its five-second budget on sequential request plumbing.
+      // requests concurrent so the test focuses on the edge bucket. The
+      // workerd pool can contend with other integration files on local/CI
+      // runners, so this stress case has a wider timeout than ordinary tests.
       const responses = await Promise.all(
         Array.from({ length: 241 }, () =>
           app.default.fetch(
@@ -965,7 +966,7 @@ describe("Worker request boundary", () => {
     } finally {
       clock.mockRestore();
     }
-  }, 20_000);
+  }, 40_000);
 
   it("records and reads a Minesweeper score using only the signed session nickname", async () => {
     const origin = "http://localhost:5173";
