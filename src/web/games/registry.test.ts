@@ -106,9 +106,13 @@ describe("game outcome presentation", () => {
     expect(loader).toBeTypeOf("function");
     expect(getClientGameCatalogEntry("2048")?.loadPage).toBe(loader);
     await expect(loader?.()).resolves.toBeTypeOf("function");
-    expect(
-      getClientGameRendererLoader("2048", "2048.solo.4x4.v1"),
-    ).toBeNull();
+    for (const ruleSetId of [
+      "2048.solo.4x4.v1",
+      "2048.solo.5x5.v1",
+      "2048.solo.6x6.v1",
+    ]) {
+      expect(getClientGameRendererLoader("2048", ruleSetId)).toBeNull();
+    }
   });
 
   it("exposes allowlisted renderer loading through every catalog entry", () => {

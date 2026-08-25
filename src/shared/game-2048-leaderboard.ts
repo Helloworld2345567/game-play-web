@@ -1,11 +1,10 @@
-/**
- * Immutable scoring semantics for the local 2048 leaderboard.
- *
- * Change this identifier whenever the board size, tile/score rules, win or
- * game-over behavior, or another rule that affects comparable results
- * changes. Old versions must not be mixed into the current ranking.
- */
-export const GAME_2048_SOLO_RULE_VERSION = "2048.solo.4x4.v1" as const;
+import {
+  GAME_2048_RULE_VERSION_BY_SIZE,
+  type Game2048RuleVersion,
+} from "./game-2048-rules";
+
+/** Backwards-compatible alias for the default 4×4 leaderboard version. */
+export const GAME_2048_SOLO_RULE_VERSION = GAME_2048_RULE_VERSION_BY_SIZE[4];
 
 export interface Game2048LeaderboardEntry {
   rank: number;
@@ -14,7 +13,9 @@ export interface Game2048LeaderboardEntry {
 }
 
 export interface Game2048LeaderboardSnapshot {
-  ruleVersion: typeof GAME_2048_SOLO_RULE_VERSION;
+  ruleVersion: Game2048RuleVersion;
   personalBestScore: number | null;
   top: Game2048LeaderboardEntry[];
 }
+
+export type { Game2048RuleVersion } from "./game-2048-rules";

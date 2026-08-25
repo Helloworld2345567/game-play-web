@@ -1,20 +1,33 @@
 import { describe, expect, it } from "vitest";
 import type { Game2048LeaderboardSnapshot } from "./leaderboard-client";
+import type { Game2048RuleVersion } from "../../../shared/game-2048-rules";
 import {
+  game2048BoardSizeFromSearch,
   higherGame2048PersonalBest,
   isNewGame2048PersonalBest,
   preferHigherGame2048Snapshot,
 } from "./SoloPage";
 
-function snapshot(personalBestScore: number | null): Game2048LeaderboardSnapshot {
+function snapshot(
+  personalBestScore: number | null,
+  ruleVersion: Game2048RuleVersion = "2048.solo.4x4.v1",
+): Game2048LeaderboardSnapshot {
   return {
-    ruleVersion: "2048.solo.4x4.v1",
+    ruleVersion,
     personalBestScore,
     top: [],
   };
 }
 
 describe("2048 SoloPage", () => {
+  it("selects a supported board size from a refresh-safe query string", () => {
+    expect(game2048BoardSizeFromSearch("?size=4")).toBe(4);
+    expect(game2048BoardSizeFromSearch("?size=5")).toBe(5);
+    expect(game2048BoardSizeFromSearch("?size=6")).toBe(6);
+    expect(game2048BoardSizeFromSearch("?size=7")).toBe(4);
+    expect(game2048BoardSizeFromSearch("")).toBe(4);
+  });
+
   it("announces a personal best only after the server confirms it", () => {
     expect(isNewGame2048PersonalBest(null, 8_192, 8_192, true)).toBe(true);
     expect(isNewGame2048PersonalBest(4_096, 8_192, 8_192, true)).toBe(true);
@@ -39,5 +52,14 @@ describe("2048 SoloPage", () => {
     expect(preferHigherGame2048Snapshot(current, snapshot(16_384))).toEqual(
       snapshot(16_384),
     );
+  });
+
+  it("replaces the visible snapshot when the selected map changes", () => {
+    expect(
+      preferHigherGame2048Snapshot(
+        snapshot(32_000, "2048.solo.4x4.v1"),
+        snapshot(4_000, "2048.solo.5x5.v1"),
+      ),
+    ).toEqual(snapshot(4_000, "2048.solo.5x5.v1"));
   });
 });

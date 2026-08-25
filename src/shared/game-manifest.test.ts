@@ -31,18 +31,26 @@ describe("game manifest", () => {
     expect(isManifestRuleSet("tiaojiaqi", "tiaojiaqi.unknown.v1")).toBe(false);
   });
 
-  it("exposes 2048 only as a fixed local 4×4 game", () => {
+  it("exposes 2048 maps only as local games with independent rule versions", () => {
     expect(getGameManifest("2048")).toMatchObject({
       gameId: "2048",
       title: "2048",
-      description: "4×4 · 单人合并 · 最高分榜",
+      description: "4×4 / 5×5 / 6×6 · 单人合并 · 独立最高分榜",
       creationPolicy: "enabled",
       launchKind: "local-game",
-      ruleSetIds: ["2048.solo.4x4.v1"],
+      ruleSetIds: [
+        "2048.solo.4x4.v1",
+        "2048.solo.5x5.v1",
+        "2048.solo.6x6.v1",
+      ],
       creatableRuleSetIds: [],
     });
     expect(isManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(true);
+    expect(isManifestRuleSet("2048", "2048.solo.5x5.v1")).toBe(true);
+    expect(isManifestRuleSet("2048", "2048.solo.6x6.v1")).toBe(true);
     expect(isCreatableManifestRuleSet("2048", "2048.solo.4x4.v1")).toBe(false);
+    expect(isCreatableManifestRuleSet("2048", "2048.solo.5x5.v1")).toBe(false);
+    expect(isCreatableManifestRuleSet("2048", "2048.solo.6x6.v1")).toBe(false);
   });
 
   it("exposes one police-chase family with all three map rule sets", () => {

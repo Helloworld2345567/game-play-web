@@ -42,6 +42,65 @@
   line-height: 0.9;
 }
 
+.game-2048-size-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 0 0 24px;
+  padding: 0;
+  border: 0;
+}
+
+.game-2048-size-picker legend {
+  float: left;
+  padding: 0;
+  color: var(--theme-subtle);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.game-2048-size-picker > div {
+  display: flex;
+  gap: 6px;
+}
+
+.game-2048-size-picker label {
+  position: relative;
+  cursor: pointer;
+}
+
+.game-2048-size-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.game-2048-size-picker span {
+  display: grid;
+  min-width: 66px;
+  min-height: 40px;
+  padding: 7px 12px;
+  place-items: center;
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  color: var(--theme-muted);
+  background: var(--theme-surface-soft);
+  font-weight: 750;
+}
+
+.game-2048-size-picker label:hover span,
+.game-2048-size-picker label.is-selected span {
+  border-color: var(--theme-accent);
+  color: var(--theme-accent);
+}
+
+.game-2048-size-picker input:focus-visible + span {
+  outline: 3px solid color-mix(in srgb, var(--theme-accent) 38%, transparent);
+  outline-offset: 2px;
+}
+
 .game-2048-status {
   margin: 14px 0 0;
   color: var(--theme-muted);
@@ -115,7 +174,7 @@
   display: grid;
   min-width: 0;
   gap: clamp(7px, 2vw, 12px);
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--game-2048-size), minmax(0, 1fr));
 }
 
 .game-2048-cell {
@@ -141,6 +200,24 @@
 .game-2048-cell[data-digits="5"],
 .game-2048-cell[data-digits="6"] {
   font-size: clamp(0.88rem, 4.7vw, 2.35rem);
+}
+
+.game-2048-board[data-size="5"] .game-2048-cell,
+.game-2048-board[data-size="6"] .game-2048-cell {
+  border-radius: clamp(7px, 2vw, 14px);
+  font-size: clamp(1rem, 5.4vw, 2.8rem);
+}
+
+.game-2048-board[data-size="5"] .game-2048-cell[data-digits="4"],
+.game-2048-board[data-size="6"] .game-2048-cell[data-digits="4"] {
+  font-size: clamp(0.86rem, 4.6vw, 2.3rem);
+}
+
+.game-2048-board[data-size="5"] .game-2048-cell[data-digits="5"],
+.game-2048-board[data-size="5"] .game-2048-cell[data-digits="6"],
+.game-2048-board[data-size="6"] .game-2048-cell[data-digits="5"],
+.game-2048-board[data-size="6"] .game-2048-cell[data-digits="6"] {
+  font-size: clamp(0.7rem, 3.8vw, 1.85rem);
 }
 
 .game-2048-cell[data-value="2"] { color: #3b332b; background: #eee4d5; }

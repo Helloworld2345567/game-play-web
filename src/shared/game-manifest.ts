@@ -112,10 +112,14 @@ export const GAME_MANIFESTS = [
   {
     gameId: "2048",
     title: "2048",
-    description: "4×4 · 单人合并 · 最高分榜",
+    description: "4×4 / 5×5 / 6×6 · 单人合并 · 独立最高分榜",
     creationPolicy: "enabled",
     launchKind: "local-game",
-    ruleSetIds: ["2048.solo.4x4.v1"],
+    ruleSetIds: [
+      "2048.solo.4x4.v1",
+      "2048.solo.5x5.v1",
+      "2048.solo.6x6.v1",
+    ],
     creatableRuleSetIds: [],
   },
 ] as const satisfies readonly GameManifest[];

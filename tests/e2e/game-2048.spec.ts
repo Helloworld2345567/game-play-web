@@ -1,9 +1,15 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const GAME_2048_RULE_VERSION = "2048.solo.4x4.v1";
+const GAME_2048_RULE_VERSION_BY_SIZE = {
+  4: "2048.solo.4x4.v1",
+  5: "2048.solo.5x5.v1",
+  6: "2048.solo.6x6.v1",
+} as const;
 
-function gameBoard(page: Page): Locator {
-  return page.getByRole("grid", { name: "2048 棋盘，4 行 4 列" });
+function gameBoard(page: Page, boardSize = 4): Locator {
+  return page.getByRole("grid", {
+    name: `2048 棋盘，${boardSize} 行 ${boardSize} 列`,
+  });
 }
 
 async function boardValues(board: Locator): Promise<string[]> {
@@ -41,12 +47,14 @@ async function stubLeaderboard(
   onRequest: (body: unknown) => void = () => undefined,
 ): Promise<void> {
   await page.route("**/api/2048/leaderboard", async (route) => {
-    onRequest(route.request().postDataJSON());
+    const body = route.request().postDataJSON() as { ruleVersion?: string };
+    onRequest(body);
+    const ruleVersion = body.ruleVersion ?? GAME_2048_RULE_VERSION_BY_SIZE[4];
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        ruleVersion: GAME_2048_RULE_VERSION,
+        ruleVersion,
         personalBestScore: 4_096,
         top: Array.from({ length: 10 }, (_, index) => ({
           rank: index + 1,
@@ -106,6 +114,42 @@ test("requests and renders the 2048 top-10 leaderboard", async ({ page }) => {
   await expect(page.locator('[aria-label="本局统计"] strong').nth(2)).toHaveText("4,096");
   await expect.poll(() => requestBodies.length).toBe(1);
   expect(requestBodies[0]).toEqual({
-    ruleVersion: GAME_2048_RULE_VERSION,
+    ruleVersion: GAME_2048_RULE_VERSION_BY_SIZE[4],
+  });
+});
+
+test("supports refresh-safe 5×5 and 6×6 maps with separate leaderboard versions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const requestBodies: unknown[] = [];
+  await stubLeaderboard(page, (body) => requestBodies.push(body));
+  await page.goto("/2048?size=5");
+
+  const board5 = gameBoard(page, 5);
+  await expect(board5).toHaveAttribute("aria-rowcount", "5");
+  await expect(board5).toHaveAttribute("aria-colcount", "5");
+  await expect(board5.getByRole("row")).toHaveCount(5);
+  await expect(board5.getByRole("gridcell")).toHaveCount(25);
+  await expect(page.getByLabel("5×5")).toBeChecked();
+  await expect.poll(() => requestBodies.length).toBe(1);
+  expect(requestBodies[0]).toEqual({
+    ruleVersion: GAME_2048_RULE_VERSION_BY_SIZE[5],
+  });
+
+  await page.getByLabel("6×6").check();
+  await expect(page).toHaveURL(/\/2048\?size=6$/u);
+  const board6 = gameBoard(page, 6);
+  await expect(board6.getByRole("row")).toHaveCount(6);
+  await expect(board6.getByRole("gridcell")).toHaveCount(36);
+  expect(
+    await page.evaluate(() =>
+      document.documentElement.scrollWidth <=
+      document.documentElement.clientWidth
+    ),
+  ).toBe(true);
+  await expect.poll(() => requestBodies.length).toBe(2);
+  expect(requestBodies[1]).toEqual({
+    ruleVersion: GAME_2048_RULE_VERSION_BY_SIZE[6],
   });
 });

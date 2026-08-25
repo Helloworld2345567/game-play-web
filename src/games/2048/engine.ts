@@ -1,11 +1,17 @@
-export const GAME_2048_BOARD_SIZE = 4;
-export const GAME_2048_CELL_COUNT = GAME_2048_BOARD_SIZE ** 2;
+import {
+  DEFAULT_GAME_2048_BOARD_SIZE,
+  isGame2048BoardSize,
+  type Game2048BoardSize,
+} from "../../shared/game-2048-rules";
+
+export { type Game2048BoardSize } from "../../shared/game-2048-rules";
 
 export type Game2048Direction = "left" | "right" | "up" | "down";
 export type Game2048Status = "playing" | "over";
 export type Game2048Random = () => number;
 
 export interface Game2048State {
+  readonly boardSize: Game2048BoardSize;
   readonly board: readonly number[];
   readonly score: number;
   readonly status: Game2048Status;
@@ -18,7 +24,7 @@ export interface Game2048MoveResult {
   readonly gainedScore: number;
 }
 
-function mergeLine(line: readonly number[]): {
+function mergeLine(line: readonly number[], boardSize: Game2048BoardSize): {
   values: number[];
   gainedScore: number;
 } {
@@ -36,7 +42,7 @@ function mergeLine(line: readonly number[]): {
       values.push(value);
     }
   }
-  while (values.length < GAME_2048_BOARD_SIZE) values.push(0);
+  while (values.length < boardSize) values.push(0);
   return { values, gainedScore };
 }
 
@@ -54,15 +60,18 @@ function spawnTile(board: readonly number[], random: Game2048Random): number[] {
   return next;
 }
 
-function hasAvailableMove(board: readonly number[]): boolean {
+function hasAvailableMove(
+  board: readonly number[],
+  boardSize: Game2048BoardSize,
+): boolean {
   if (board.includes(0)) return true;
-  for (let row = 0; row < GAME_2048_BOARD_SIZE; row += 1) {
-    for (let column = 0; column < GAME_2048_BOARD_SIZE; column += 1) {
-      const index = row * GAME_2048_BOARD_SIZE + column;
+  for (let row = 0; row < boardSize; row += 1) {
+    for (let column = 0; column < boardSize; column += 1) {
+      const index = row * boardSize + column;
       const value = board[index];
       if (
-        (column + 1 < GAME_2048_BOARD_SIZE && value === board[index + 1]) ||
-        (row + 1 < GAME_2048_BOARD_SIZE && value === board[index + GAME_2048_BOARD_SIZE])
+        (column + 1 < boardSize && value === board[index + 1]) ||
+        (row + 1 < boardSize && value === board[index + boardSize])
       ) {
         return true;
       }
@@ -72,10 +81,16 @@ function hasAvailableMove(board: readonly number[]): boolean {
 }
 
 export function createGame2048(
+  boardSize: Game2048BoardSize = DEFAULT_GAME_2048_BOARD_SIZE,
   random: Game2048Random = Math.random,
 ): Game2048State {
-  const firstTile = spawnTile(Array<number>(GAME_2048_CELL_COUNT).fill(0), random);
+  if (!isGame2048BoardSize(boardSize)) {
+    throw new RangeError("2048 board size must be 4, 5, or 6");
+  }
+  const cellCount = boardSize ** 2;
+  const firstTile = spawnTile(Array<number>(cellCount).fill(0), random);
   return {
+    boardSize,
     board: spawnTile(firstTile, random),
     score: 0,
     status: "playing",
@@ -86,15 +101,16 @@ export function createGame2048(
 function lineIndexes(
   direction: Game2048Direction,
   line: number,
+  boardSize: Game2048BoardSize,
 ): readonly number[] {
-  const forward = [0, 1, 2, 3];
-  const reverse = [3, 2, 1, 0];
+  const forward = Array.from({ length: boardSize }, (_, index) => index);
+  const reverse = [...forward].reverse();
   if (direction === "left" || direction === "right") {
     const columns = direction === "left" ? forward : reverse;
-    return columns.map((column) => line * GAME_2048_BOARD_SIZE + column);
+    return columns.map((column) => line * boardSize + column);
   }
   const rows = direction === "up" ? forward : reverse;
-  return rows.map((row) => row * GAME_2048_BOARD_SIZE + line);
+  return rows.map((row) => row * boardSize + line);
 }
 
 export function moveGame2048(
@@ -102,17 +118,25 @@ export function moveGame2048(
   direction: Game2048Direction,
   random: Game2048Random = Math.random,
 ): Game2048MoveResult {
-  if (state.board.length !== GAME_2048_CELL_COUNT) {
-    throw new RangeError("2048 board must contain exactly 16 cells");
+  if (
+    !isGame2048BoardSize(state.boardSize) ||
+    state.board.length !== state.boardSize ** 2
+  ) {
+    throw new RangeError(
+      "2048 board must match a supported 4×4, 5×5, or 6×6 size",
+    );
   }
   if (state.status === "over") {
     return { state, moved: false, gainedScore: 0 };
   }
-  const movedBoard = Array<number>(GAME_2048_CELL_COUNT).fill(0);
+  const movedBoard = Array<number>(state.boardSize ** 2).fill(0);
   let gainedScore = 0;
-  for (let line = 0; line < GAME_2048_BOARD_SIZE; line += 1) {
-    const indexes = lineIndexes(direction, line);
-    const merged = mergeLine(indexes.map((index) => state.board[index] ?? 0));
+  for (let line = 0; line < state.boardSize; line += 1) {
+    const indexes = lineIndexes(direction, line, state.boardSize);
+    const merged = mergeLine(
+      indexes.map((index) => state.board[index] ?? 0),
+      state.boardSize,
+    );
     indexes.forEach((boardIndex, lineIndex) => {
       movedBoard[boardIndex] = merged.values[lineIndex] ?? 0;
     });
@@ -120,7 +144,7 @@ export function moveGame2048(
   }
   if (boardsEqual(state.board, movedBoard)) {
     return {
-      state: hasAvailableMove(state.board)
+      state: hasAvailableMove(state.board, state.boardSize)
         ? state
         : { ...state, status: "over" },
       moved: false,
@@ -132,9 +156,10 @@ export function moveGame2048(
     moved: true,
     gainedScore,
     state: {
+      boardSize: state.boardSize,
       board,
       score: state.score + gainedScore,
-      status: hasAvailableMove(board) ? "playing" : "over",
+      status: hasAvailableMove(board, state.boardSize) ? "playing" : "over",
       reached2048: state.reached2048 || board.some((value) => value >= 2048),
     },
   };

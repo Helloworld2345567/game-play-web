@@ -1,7 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { normalizeDisplayName } from "./shared/display-name";
 import {
-  GAME_2048_SOLO_RULE_VERSION,
+  GAME_2048_RULE_VERSION_BY_SIZE,
+  isGame2048RuleVersion,
+  type Game2048RuleVersion,
+} from "./shared/game-2048-rules";
+import {
   type Game2048LeaderboardSnapshot,
 } from "./shared/game-2048-leaderboard";
 
@@ -21,6 +25,12 @@ interface PersonalBestRow {
 
 interface LeaderboardRow extends PersonalBestRow {
   display_name: string;
+}
+
+interface TableInfoRow {
+  [column: string]: SqlStorageValue;
+  name: string;
+  pk: number;
 }
 
 type EmptyEnv = Record<string, never>;
@@ -48,26 +58,26 @@ function assertScore(value: unknown): asserts value is number {
   }
 }
 
+function assertRuleVersion(
+  value: unknown,
+): asserts value is Game2048RuleVersion {
+  if (!isGame2048RuleVersion(value)) {
+    throw new TypeError("Invalid 2048 rule version");
+  }
+}
+
 /**
- * Global casual leaderboard for the fixed 4×4 solo 2048 rules.
+ * Global casual leaderboards for the supported solo 2048 board sizes.
  *
- * The Durable Object stores one personal best for each signed Guest. The
- * public snapshot deliberately projects only display names and scores; the
- * Guest identifier and achieved timestamp are ranking-only fields.
+ * The Durable Object stores one personal best per signed Guest and immutable
+ * rule version. The public snapshot deliberately projects only display names
+ * and scores; the Guest identifier and achieved timestamp are ranking-only
+ * fields.
  */
 export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
   constructor(ctx: DurableObjectState, env: EmptyEnv) {
     super(ctx, env);
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS personal_bests (
-        guest_id TEXT NOT NULL,
-        display_name TEXT NOT NULL,
-        score INTEGER NOT NULL,
-        achieved_at INTEGER NOT NULL,
-        rule_version TEXT NOT NULL,
-        PRIMARY KEY (guest_id)
-      )
-    `);
+    this.ensureSchema();
     this.ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS personal_bests_ranking
       ON personal_bests (rule_version, score DESC, achieved_at ASC, guest_id ASC)
@@ -79,7 +89,15 @@ export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
     });
   }
 
-  async snapshot(guestId: string): Promise<Game2048LeaderboardSnapshot> {
+  async snapshot(
+    ruleVersionOrGuestId: string,
+    maybeGuestId?: string,
+  ): Promise<Game2048LeaderboardSnapshot> {
+    const ruleVersion = maybeGuestId === undefined
+      ? GAME_2048_RULE_VERSION_BY_SIZE[4]
+      : ruleVersionOrGuestId;
+    const guestId = maybeGuestId ?? ruleVersionOrGuestId;
+    assertRuleVersion(ruleVersion);
     assertGuestId(guestId);
     this.pruneExpired(Date.now());
     const personal = this.ctx.storage.sql
@@ -87,7 +105,7 @@ export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
         `SELECT score
          FROM personal_bests
          WHERE rule_version = ? AND guest_id = ?`,
-        GAME_2048_SOLO_RULE_VERSION,
+        ruleVersion,
         guestId,
       )
       .toArray()[0];
@@ -98,11 +116,11 @@ export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
          WHERE rule_version = ?
          ORDER BY score DESC, achieved_at ASC, guest_id ASC
          LIMIT 10`,
-        GAME_2048_SOLO_RULE_VERSION,
+        ruleVersion,
       )
       .toArray();
     return {
-      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+      ruleVersion,
       personalBestScore: personal?.score ?? null,
       top: rows.map((row, index) => ({
         rank: index + 1,
@@ -113,10 +131,23 @@ export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
   }
 
   async recordScore(
-    guestId: string,
-    displayName: string,
-    score: number,
+    ruleVersionOrGuestId: string,
+    guestIdOrDisplayName: string,
+    displayNameOrScore: string | number,
+    maybeScore?: number,
   ): Promise<Game2048LeaderboardSnapshot> {
+    const usesExplicitRuleVersion = maybeScore !== undefined;
+    const ruleVersion = usesExplicitRuleVersion
+      ? ruleVersionOrGuestId
+      : GAME_2048_RULE_VERSION_BY_SIZE[4];
+    const guestId = usesExplicitRuleVersion
+      ? guestIdOrDisplayName
+      : ruleVersionOrGuestId;
+    const displayName = usesExplicitRuleVersion
+      ? displayNameOrScore
+      : guestIdOrDisplayName;
+    const score = usesExplicitRuleVersion ? maybeScore : displayNameOrScore;
+    assertRuleVersion(ruleVersion);
     assertGuestId(guestId);
     assertDisplayName(displayName);
     assertScore(score);
@@ -125,20 +156,18 @@ export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
       `INSERT INTO personal_bests
        (guest_id, display_name, score, achieved_at, rule_version)
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (guest_id) DO UPDATE SET
+       ON CONFLICT (guest_id, rule_version) DO UPDATE SET
          display_name = excluded.display_name,
          score = excluded.score,
-         achieved_at = excluded.achieved_at,
-         rule_version = excluded.rule_version
-       WHERE excluded.rule_version <> personal_bests.rule_version
-          OR excluded.score > personal_bests.score`,
+         achieved_at = excluded.achieved_at
+       WHERE excluded.score > personal_bests.score`,
       guestId,
       displayName,
       score,
       Date.now(),
-      GAME_2048_SOLO_RULE_VERSION,
+      ruleVersion,
     );
-    return this.snapshot(guestId);
+    return this.snapshot(ruleVersion, guestId);
   }
 
   async alarm(): Promise<void> {
@@ -152,6 +181,59 @@ export class Game2048Leaderboard extends DurableObject<EmptyEnv> {
       "DELETE FROM personal_bests WHERE achieved_at < ?",
       now - GAME_2048_LEADERBOARD_RETENTION_MS,
     );
+  }
+
+  private ensureSchema(): void {
+    const columns = this.ctx.storage.sql
+      .exec<TableInfoRow>("PRAGMA table_info(personal_bests)")
+      .toArray();
+    if (columns.length === 0) {
+      this.createPersonalBestsTable("personal_bests");
+      return;
+    }
+    const primaryKey = columns
+      .filter((column) => column.pk > 0)
+      .sort((left, right) => left.pk - right.pk)
+      .map((column) => column.name);
+    if (
+      primaryKey.length === 2 &&
+      primaryKey[0] === "guest_id" &&
+      primaryKey[1] === "rule_version"
+    ) {
+      return;
+    }
+    if (primaryKey.length !== 1 || primaryKey[0] !== "guest_id") {
+      throw new Error("Unsupported 2048 leaderboard schema");
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.createPersonalBestsTable("personal_bests_v2");
+      this.ctx.storage.sql.exec(`
+        INSERT INTO personal_bests_v2
+          (guest_id, display_name, score, achieved_at, rule_version)
+        SELECT guest_id, display_name, score, achieved_at, rule_version
+        FROM personal_bests
+      `);
+      this.ctx.storage.sql.exec("DROP TABLE personal_bests");
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE personal_bests_v2 RENAME TO personal_bests",
+      );
+    });
+  }
+
+  private createPersonalBestsTable(tableName: string): void {
+    if (tableName !== "personal_bests" && tableName !== "personal_bests_v2") {
+      throw new Error("Invalid 2048 leaderboard table name");
+    }
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE ${tableName} (
+        guest_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        achieved_at INTEGER NOT NULL,
+        rule_version TEXT NOT NULL,
+        PRIMARY KEY (guest_id, rule_version)
+      )
+    `);
   }
 
   private async ensureCleanupAlarm(now: number): Promise<void> {

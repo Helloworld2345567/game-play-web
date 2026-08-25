@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
   createGame2048,
-  GAME_2048_BOARD_SIZE,
   moveGame2048,
+  type Game2048BoardSize,
   type Game2048Direction,
   type Game2048State,
 } from "../../../games/2048/engine";
+import {
+  DEFAULT_GAME_2048_BOARD_SIZE,
+  GAME_2048_BOARD_SIZES,
+  GAME_2048_RULE_VERSION_BY_SIZE,
+  type Game2048RuleVersion,
+} from "../../../shared/game-2048-rules";
 import { ProfileMenu } from "../../ProfileMenu";
 import { ThemeToggle } from "../../theme";
 import { directionForKey, directionForSwipe } from "./interactions";
@@ -29,8 +35,13 @@ interface PointerStart {
 
 interface FailedGame2048Submission {
   readonly id: string;
+  readonly boardSize: Game2048BoardSize;
   readonly score: number;
 }
+
+type FailedGame2048Submissions = Partial<
+  Record<Game2048BoardSize, FailedGame2048Submission>
+>;
 
 export function higherGame2048PersonalBest(
   current: number | null,
@@ -45,6 +56,9 @@ export function preferHigherGame2048Snapshot(
   current: Game2048LeaderboardSnapshot | null,
   incoming: Game2048LeaderboardSnapshot,
 ): Game2048LeaderboardSnapshot {
+  if (current !== null && current.ruleVersion !== incoming.ruleVersion) {
+    return incoming;
+  }
   const incomingBest = incoming.personalBestScore;
   if (
     current !== null &&
@@ -54,6 +68,15 @@ export function preferHigherGame2048Snapshot(
     return current;
   }
   return incoming;
+}
+
+function withGame2048PersonalBest(
+  snapshot: Game2048LeaderboardSnapshot,
+  personalBestScore: number | null,
+): Game2048LeaderboardSnapshot {
+  return snapshot.personalBestScore === personalBestScore
+    ? snapshot
+    : { ...snapshot, personalBestScore };
 }
 
 const DIRECTION_BUTTONS: ReadonlyArray<{
@@ -73,11 +96,20 @@ function secureRandom(): number {
   return value / 0x1_0000_0000;
 }
 
-function newActiveGame2048(): ActiveGame2048 {
+function newActiveGame2048(boardSize: Game2048BoardSize): ActiveGame2048 {
   return {
     id: crypto.randomUUID(),
-    state: createGame2048(secureRandom),
+    state: createGame2048(boardSize, secureRandom),
   };
+}
+
+export function game2048BoardSizeFromSearch(
+  search: string,
+): Game2048BoardSize {
+  const rawSize = new URLSearchParams(search).get("size");
+  if (rawSize === "5") return 5;
+  if (rawSize === "6") return 6;
+  return DEFAULT_GAME_2048_BOARD_SIZE;
 }
 
 export function formatGame2048Score(score: number): string {
@@ -102,9 +134,13 @@ function statusMessage(game: Game2048State): string {
   return "继续合并相同数字，向 2048 前进";
 }
 
-function tileLabel(value: number, index: number): string {
-  const row = Math.floor(index / GAME_2048_BOARD_SIZE) + 1;
-  const column = index % GAME_2048_BOARD_SIZE + 1;
+function tileLabel(
+  value: number,
+  index: number,
+  boardSize: Game2048BoardSize,
+): string {
+  const row = Math.floor(index / boardSize) + 1;
+  const column = index % boardSize + 1;
   return value === 0
     ? `第 ${row} 行第 ${column} 列，空格`
     : `第 ${row} 行第 ${column} 列，数字 ${value}`;
@@ -119,23 +155,29 @@ export function SoloPage({
   initiallyOpenProfile?: boolean;
   onDisplayNameChange(displayName: string): void;
 }) {
-  const [activeGame, setActiveGame] = useState(newActiveGame2048);
+  const [activeGame, setActiveGame] = useState(() =>
+    newActiveGame2048(game2048BoardSizeFromSearch(location.search))
+  );
+  const boardSize = activeGame.state.boardSize;
   const [leaderboard, setLeaderboard] =
     useState<Game2048LeaderboardSnapshot | null>(null);
   const [leaderboardStatus, setLeaderboardStatus] =
     useState<"loading" | "ready" | "offline">("loading");
   const [recordNotice, setRecordNotice] = useState<string | null>(null);
-  const [failedSubmission, setFailedSubmission] =
-    useState<FailedGame2048Submission | null>(null);
+  const [failedSubmissions, setFailedSubmissions] =
+    useState<FailedGame2048Submissions>({});
   const leaderboardRequest = useRef(0);
   const submissionAttempt = useRef(0);
   const visibleSubmissionAttempt = useRef<number | null>(null);
-  const confirmedBestKnown = useRef(false);
-  const confirmedBestScore = useRef<number | null>(null);
+  const confirmedBestScores = useRef(
+    new Map<Game2048RuleVersion, number | null>(),
+  );
   const submittedGames = useRef(new Set<string>());
   const submittingGames = useRef(new Set<string>());
   const pointerStart = useRef<PointerStart | null>(null);
+  const selectedBoardSize = useRef(boardSize);
   const mounted = useRef(true);
+  selectedBoardSize.current = boardSize;
 
   useEffect(() => {
     mounted.current = true;
@@ -147,18 +189,23 @@ export function SoloPage({
   useEffect(() => {
     const controller = new AbortController();
     const requestId = ++leaderboardRequest.current;
+    const ruleVersion = GAME_2048_RULE_VERSION_BY_SIZE[boardSize];
+    setLeaderboard(null);
     setLeaderboardStatus("loading");
-    void loadGame2048Leaderboard(displayName, controller.signal).then(
+    void loadGame2048Leaderboard(displayName, boardSize, controller.signal).then(
       (snapshot) => {
         if (leaderboardRequest.current !== requestId) return;
         const effectiveBest = higherGame2048PersonalBest(
-          confirmedBestScore.current,
+          confirmedBestScores.current.get(ruleVersion) ?? null,
           snapshot.personalBestScore,
         );
-        confirmedBestKnown.current = true;
-        confirmedBestScore.current = effectiveBest;
+        confirmedBestScores.current.set(ruleVersion, effectiveBest);
+        const effectiveSnapshot = withGame2048PersonalBest(
+          snapshot,
+          effectiveBest,
+        );
         setLeaderboard((current) =>
-          preferHigherGame2048Snapshot(current, snapshot)
+          preferHigherGame2048Snapshot(current, effectiveSnapshot)
         );
         setLeaderboardStatus("ready");
       },
@@ -170,9 +217,13 @@ export function SoloPage({
       },
     );
     return () => controller.abort();
-  }, [displayName]);
+  }, [boardSize, displayName]);
 
-  const submitScore = useCallback((gameId: string, score: number) => {
+  const submitScore = useCallback((
+    gameId: string,
+    completedBoardSize: Game2048BoardSize,
+    score: number,
+  ) => {
     if (
       submittedGames.current.has(gameId) ||
       submittingGames.current.has(gameId)
@@ -183,34 +234,48 @@ export function SoloPage({
     submittingGames.current.add(gameId);
     const attemptId = ++submissionAttempt.current;
     visibleSubmissionAttempt.current = attemptId;
-    const previousBestKnown = confirmedBestKnown.current;
-    const previousBest = confirmedBestScore.current;
-    setFailedSubmission((current) => current?.id === gameId ? null : current);
+    const ruleVersion = GAME_2048_RULE_VERSION_BY_SIZE[completedBoardSize];
+    const previousBestKnown = confirmedBestScores.current.has(ruleVersion);
+    const previousBest = confirmedBestScores.current.get(ruleVersion) ?? null;
+    setFailedSubmissions((current) => {
+      if (current[completedBoardSize]?.id !== gameId) return current;
+      const next = { ...current };
+      delete next[completedBoardSize];
+      return next;
+    });
     setRecordNotice("正在保存分数…");
-    void recordGame2048Score(displayName, score).then(
+    void recordGame2048Score(displayName, completedBoardSize, score).then(
       (snapshot) => {
         submittingGames.current.delete(gameId);
         if (!mounted.current) return;
         // A completed write is authoritative for this score. Invalidate any
         // older read and never let an out-of-order lower snapshot roll the
         // confirmed personal best back.
-        leaderboardRequest.current += 1;
         const effectiveBest = higherGame2048PersonalBest(
-          confirmedBestScore.current,
+          confirmedBestScores.current.get(ruleVersion) ?? null,
           snapshot.personalBestScore,
         );
-        confirmedBestKnown.current = true;
-        confirmedBestScore.current = effectiveBest;
-        setFailedSubmission((current) =>
-          current !== null &&
-            current.score <= (effectiveBest ?? 0)
-            ? null
-            : current
-        );
-        setLeaderboard((current) =>
-          preferHigherGame2048Snapshot(current, snapshot)
-        );
-        setLeaderboardStatus("ready");
+        confirmedBestScores.current.set(ruleVersion, effectiveBest);
+        setFailedSubmissions((current) => {
+          const failed = current[completedBoardSize];
+          if (failed === undefined || failed.score > (effectiveBest ?? 0)) {
+            return current;
+          }
+          const next = { ...current };
+          delete next[completedBoardSize];
+          return next;
+        });
+        if (selectedBoardSize.current === completedBoardSize) {
+          leaderboardRequest.current += 1;
+          const effectiveSnapshot = withGame2048PersonalBest(
+            snapshot,
+            effectiveBest,
+          );
+          setLeaderboard((current) =>
+            preferHigherGame2048Snapshot(current, effectiveSnapshot)
+          );
+          setLeaderboardStatus("ready");
+        }
         if (visibleSubmissionAttempt.current === attemptId) {
           setRecordNotice(
             isNewGame2048PersonalBest(
@@ -227,17 +292,27 @@ export function SoloPage({
       () => {
         submittingGames.current.delete(gameId);
         if (!mounted.current) return;
-        setFailedSubmission((current) => {
+        setFailedSubmissions((current) => {
+          const confirmedBest = confirmedBestScores.current.get(ruleVersion);
           if (
-            confirmedBestScore.current !== null &&
-            confirmedBestScore.current >= score
+            confirmedBest !== undefined &&
+            confirmedBest !== null &&
+            confirmedBest >= score
           ) {
             return current;
           }
           // The server stores only max(score), so the highest unsynced valid
           // score subsumes every lower failed attempt.
-          return current === null || score > current.score
-            ? { id: gameId, score }
+          const failed = current[completedBoardSize];
+          return failed === undefined || score > failed.score
+            ? {
+              ...current,
+              [completedBoardSize]: {
+                id: gameId,
+                boardSize: completedBoardSize,
+                score,
+              },
+            }
             : current;
         });
         if (visibleSubmissionAttempt.current === attemptId) {
@@ -250,7 +325,7 @@ export function SoloPage({
   useEffect(() => {
     const game = activeGame.state;
     if (game.status === "over" && game.score > 0) {
-      submitScore(activeGame.id, game.score);
+      submitScore(activeGame.id, game.boardSize, game.score);
     }
   }, [activeGame, submitScore]);
 
@@ -290,12 +365,31 @@ export function SoloPage({
   const restart = () => {
     pointerStart.current = null;
     visibleSubmissionAttempt.current = null;
-    setActiveGame(newActiveGame2048());
+    setActiveGame(newActiveGame2048(boardSize));
     setRecordNotice(null);
+  };
+
+  const selectBoardSize = (nextBoardSize: Game2048BoardSize) => {
+    if (nextBoardSize === boardSize) return;
+    pointerStart.current = null;
+    visibleSubmissionAttempt.current = null;
+    selectedBoardSize.current = nextBoardSize;
+    setActiveGame(newActiveGame2048(nextBoardSize));
+    setLeaderboard(null);
+    setLeaderboardStatus("loading");
+    setRecordNotice(null);
+    const url = new URL(location.href);
+    if (nextBoardSize === DEFAULT_GAME_2048_BOARD_SIZE) {
+      url.searchParams.delete("size");
+    } else {
+      url.searchParams.set("size", String(nextBoardSize));
+    }
+    history.replaceState(null, "", url);
   };
 
   const game = activeGame.state;
   const highestTile = Math.max(...game.board);
+  const failedSubmission = failedSubmissions[boardSize] ?? null;
 
   return (
     <main class="game-2048-page">
@@ -315,7 +409,7 @@ export function SoloPage({
 
       <header class="game-2048-header">
         <div>
-          <p class="eyebrow">单人 · 本机游戏 · 固定 4×4</p>
+          <p class="eyebrow">单人 · 本机游戏 · 三种地图</p>
           <h1>2048</h1>
           <p class="game-2048-status" aria-live="polite">
             {statusMessage(game)}
@@ -341,14 +435,37 @@ export function SoloPage({
         </div>
       </header>
 
+      <fieldset class="game-2048-size-picker">
+        <legend>选择地图</legend>
+        <div>
+          {GAME_2048_BOARD_SIZES.map((size) => (
+            <label
+              key={size}
+              class={size === boardSize ? "is-selected" : ""}
+            >
+              <input
+                type="radio"
+                name="game-2048-board-size"
+                value={size}
+                checked={size === boardSize}
+                onChange={() => selectBoardSize(size)}
+              />
+              <span>{size}×{size}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
       <div class="game-2048-layout">
         <section class="game-2048-board-column" aria-label="2048 游戏区">
           <div
             class={`game-2048-board ${game.status === "over" ? "is-over" : ""}`}
+            style={`--game-2048-size: ${boardSize}`}
+            data-size={boardSize}
             role="grid"
-            aria-label="2048 棋盘，4 行 4 列"
-            aria-rowcount={GAME_2048_BOARD_SIZE}
-            aria-colcount={GAME_2048_BOARD_SIZE}
+            aria-label={`2048 棋盘，${boardSize} 行 ${boardSize} 列`}
+            aria-rowcount={boardSize}
+            aria-colcount={boardSize}
             aria-describedby="game-2048-instructions"
             tabIndex={0}
             onPointerDown={(event) => {
@@ -379,7 +496,7 @@ export function SoloPage({
               pointerStart.current = null;
             }}
           >
-            {Array.from({ length: GAME_2048_BOARD_SIZE }, (_, row) => (
+            {Array.from({ length: boardSize }, (_, row) => (
               <div
                 key={row}
                 class="game-2048-row"
@@ -387,17 +504,17 @@ export function SoloPage({
                 aria-rowindex={row + 1}
               >
                 {game.board.slice(
-                  row * GAME_2048_BOARD_SIZE,
-                  (row + 1) * GAME_2048_BOARD_SIZE,
+                  row * boardSize,
+                  (row + 1) * boardSize,
                 ).map((value, column) => {
-                  const index = row * GAME_2048_BOARD_SIZE + column;
+                  const index = row * boardSize + column;
                   return (
                     <div
                       key={index}
                       class="game-2048-cell"
                       role="gridcell"
                       aria-colindex={column + 1}
-                      aria-label={tileLabel(value, index)}
+                      aria-label={tileLabel(value, index, boardSize)}
                       data-value={value === 0 ? "empty" : value}
                       data-digits={String(value).length}
                     >
@@ -445,10 +562,15 @@ export function SoloPage({
               onClick={() => {
                 if (submittingGames.current.has(failedSubmission.id)) return;
                 submittedGames.current.delete(failedSubmission.id);
-                submitScore(failedSubmission.id, failedSubmission.score);
+                submitScore(
+                  failedSubmission.id,
+                  failedSubmission.boardSize,
+                  failedSubmission.score,
+                );
               }}
             >
-              重试保存 {formatGame2048Score(failedSubmission.score)} 分
+              重试保存 {failedSubmission.boardSize}×{failedSubmission.boardSize}
+              的 {formatGame2048Score(failedSubmission.score)} 分
             </button>
           )}
         </section>
@@ -456,7 +578,7 @@ export function SoloPage({
         <section class="game-2048-leaderboard" aria-label="2048 排行榜">
           <header>
             <div>
-              <p class="eyebrow">休闲榜 · 4×4</p>
+              <p class="eyebrow">休闲榜 · {boardSize}×{boardSize}</p>
               <h2>最高分 · 前 10</h2>
             </div>
             <span>
@@ -483,7 +605,7 @@ export function SoloPage({
             </p>
           )}
           <p class="game-2048-leaderboard-note">
-            棋盘无法继续移动时自动记录本局分数；每位玩家仅保留个人最高分。
+            棋盘无法继续移动时自动记录本局分数；每种地图分别保留个人最高分。
           </p>
         </section>
       </div>

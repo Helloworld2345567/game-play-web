@@ -1,5 +1,10 @@
 import {
-  GAME_2048_SOLO_RULE_VERSION,
+  GAME_2048_RULE_VERSION_BY_SIZE,
+  isGame2048BoardSize,
+  type Game2048BoardSize,
+  type Game2048RuleVersion,
+} from "../../../shared/game-2048-rules";
+import {
   type Game2048LeaderboardEntry,
   type Game2048LeaderboardSnapshot,
 } from "../../../shared/game-2048-leaderboard";
@@ -19,13 +24,16 @@ function validScore(value: unknown): value is number {
     (value as number) % 4 === 0;
 }
 
-function parseSnapshot(value: unknown): Game2048LeaderboardSnapshot {
+function parseSnapshot(
+  value: unknown,
+  expectedRuleVersion: Game2048RuleVersion,
+): Game2048LeaderboardSnapshot {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("leaderboard_invalid_response");
   }
   const record = value as Record<string, unknown>;
   if (
-    record.ruleVersion !== GAME_2048_SOLO_RULE_VERSION ||
+    record.ruleVersion !== expectedRuleVersion ||
     (record.personalBestScore !== null && !validScore(record.personalBestScore)) ||
     !Array.isArray(record.top) ||
     record.top.length > 10
@@ -63,7 +71,7 @@ function parseSnapshot(value: unknown): Game2048LeaderboardSnapshot {
     }
   }
   return {
-    ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+    ruleVersion: expectedRuleVersion,
     personalBestScore: record.personalBestScore as number | null,
     top,
   };
@@ -72,6 +80,7 @@ function parseSnapshot(value: unknown): Game2048LeaderboardSnapshot {
 async function requestLeaderboard(
   displayName: string,
   path: string,
+  ruleVersion: Game2048RuleVersion,
   body: Record<string, string | number>,
   signal?: AbortSignal,
 ): Promise<Game2048LeaderboardSnapshot> {
@@ -87,18 +96,45 @@ async function requestLeaderboard(
     signal,
   });
   if (!response.ok) throw new Error("leaderboard_request_failed");
-  return parseSnapshot(await response.json());
+  return parseSnapshot(await response.json(), ruleVersion);
+}
+
+function ruleVersionForBoardSize(
+  boardSize: Game2048BoardSize,
+): Game2048RuleVersion {
+  if (!isGame2048BoardSize(boardSize)) {
+    throw new RangeError("2048 board size must be 4, 5, or 6");
+  }
+  return GAME_2048_RULE_VERSION_BY_SIZE[boardSize];
 }
 
 export function loadGame2048Leaderboard(
   displayName: string,
   signal?: AbortSignal,
+): Promise<Game2048LeaderboardSnapshot>;
+export function loadGame2048Leaderboard(
+  displayName: string,
+  boardSize: Game2048BoardSize,
+  signal?: AbortSignal,
+): Promise<Game2048LeaderboardSnapshot>;
+export function loadGame2048Leaderboard(
+  displayName: string,
+  boardSizeOrSignal: Game2048BoardSize | AbortSignal = 4,
+  signal?: AbortSignal,
 ): Promise<Game2048LeaderboardSnapshot> {
+  const boardSize = typeof boardSizeOrSignal === "number"
+    ? boardSizeOrSignal
+    : 4;
+  const requestSignal = typeof boardSizeOrSignal === "number"
+    ? signal
+    : boardSizeOrSignal;
+  const ruleVersion = ruleVersionForBoardSize(boardSize);
   return requestLeaderboard(
     displayName,
     "/api/2048/leaderboard",
-    { ruleVersion: GAME_2048_SOLO_RULE_VERSION },
-    signal,
+    ruleVersion,
+    { ruleVersion },
+    requestSignal,
   );
 }
 
@@ -106,14 +142,44 @@ export function recordGame2048Score(
   displayName: string,
   score: number,
   signal?: AbortSignal,
+): Promise<Game2048LeaderboardSnapshot>;
+export function recordGame2048Score(
+  displayName: string,
+  boardSize: Game2048BoardSize,
+  score: number,
+  signal?: AbortSignal,
+): Promise<Game2048LeaderboardSnapshot>;
+export function recordGame2048Score(
+  displayName: string,
+  boardSizeOrScore: number,
+  scoreOrSignal?: number | AbortSignal,
+  signal?: AbortSignal,
 ): Promise<Game2048LeaderboardSnapshot> {
+  let boardSize: Game2048BoardSize = 4;
+  let score: number;
+  let requestSignal: AbortSignal | undefined;
+  if (typeof scoreOrSignal === "number") {
+    if (!isGame2048BoardSize(boardSizeOrScore)) {
+      return Promise.reject(
+        new RangeError("2048 board size must be 4, 5, or 6"),
+      );
+    }
+    boardSize = boardSizeOrScore;
+    score = scoreOrSignal;
+    requestSignal = signal;
+  } else {
+    score = boardSizeOrScore;
+    requestSignal = scoreOrSignal;
+  }
   if (!validScore(score)) {
     return Promise.reject(new RangeError("2048 score must be a valid positive score"));
   }
+  const ruleVersion = ruleVersionForBoardSize(boardSize);
   return requestLeaderboard(
     displayName,
     "/api/2048/leaderboard/record",
-    { ruleVersion: GAME_2048_SOLO_RULE_VERSION, score },
-    signal,
+    ruleVersion,
+    { ruleVersion, score },
+    requestSignal,
   );
 }

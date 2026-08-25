@@ -12,7 +12,10 @@ import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
 import { isCreatableRuleSet } from "./games/registry";
 import { normalizeDisplayName } from "./shared/display-name";
 import { MINESWEEPER_SOLO_RULE_VERSION } from "./shared/minesweeper-leaderboard";
-import { GAME_2048_SOLO_RULE_VERSION } from "./shared/game-2048-leaderboard";
+import {
+  isGame2048RuleVersion,
+  type Game2048RuleVersion,
+} from "./shared/game-2048-rules";
 import {
   ensureGuestSession,
   readGuestSession,
@@ -340,7 +343,7 @@ async function readGame2048LeaderboardCommand(
 ): Promise<
   | {
     ok: true;
-    ruleVersion: typeof GAME_2048_SOLO_RULE_VERSION;
+    ruleVersion: Game2048RuleVersion;
     score?: number;
   }
   | { ok: false; failure: JsonBodyFailure }
@@ -352,13 +355,13 @@ async function readGame2048LeaderboardCommand(
     return { ok: false, failure: { kind: "invalid_json" } };
   }
   const body = value as Record<string, unknown>;
-  if (body.ruleVersion !== GAME_2048_SOLO_RULE_VERSION) {
+  if (!isGame2048RuleVersion(body.ruleVersion)) {
     return { ok: false, failure: { kind: "invalid_json" } };
   }
   if (!includeScore) {
     return {
       ok: true,
-      ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+      ruleVersion: body.ruleVersion,
     };
   }
   const score = body.score;
@@ -372,7 +375,7 @@ async function readGame2048LeaderboardCommand(
   }
   return {
     ok: true,
-    ruleVersion: GAME_2048_SOLO_RULE_VERSION,
+    ruleVersion: body.ruleVersion,
     score: score as number,
   };
 }
@@ -703,7 +706,12 @@ export default {
           "leaderboard.invalid_request",
         );
       }
-      return json(await game2048Leaderboard(env).snapshot(guest.guestId));
+      return json(
+        await game2048Leaderboard(env).snapshot(
+          command.ruleVersion,
+          guest.guestId,
+        ),
+      );
     }
     if (
       url.pathname === "/api/2048/leaderboard/record" &&
@@ -729,6 +737,7 @@ export default {
       }
       return json(
         await game2048Leaderboard(env).recordScore(
+          command.ruleVersion,
           guest.guestId,
           guest.displayName,
           command.score,

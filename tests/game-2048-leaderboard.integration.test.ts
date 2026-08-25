@@ -1,11 +1,16 @@
 import { env } from "cloudflare:workers";
-import { abortAllDurableObjects, reset } from "cloudflare:test";
+import {
+  abortAllDurableObjects,
+  reset,
+  runInDurableObject,
+} from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GAME_2048_LEADERBOARD_NAME,
   GAME_2048_LEADERBOARD_RETENTION_MS,
   type Game2048Leaderboard,
 } from "../src/game-2048-leaderboard";
+import { GAME_2048_RULE_VERSION_BY_SIZE } from "../src/shared/game-2048-rules";
 import { GAME_2048_SOLO_RULE_VERSION } from "../src/shared/game-2048-leaderboard";
 
 interface TestEnv {
@@ -88,6 +93,50 @@ describe("Game2048Leaderboard Durable Object", () => {
     });
   });
 
+  it("keeps personal bests and Top 10 entries separate for every board size", async () => {
+    const stub = leaderboard();
+    await stub.recordScore(
+      GAME_2048_RULE_VERSION_BY_SIZE[4],
+      "guest-alice",
+      "四乘四",
+      4_000,
+    );
+    await stub.recordScore(
+      GAME_2048_RULE_VERSION_BY_SIZE[5],
+      "guest-alice",
+      "五乘五",
+      5_000,
+    );
+    await stub.recordScore(
+      GAME_2048_RULE_VERSION_BY_SIZE[6],
+      "guest-alice",
+      "六乘六",
+      6_000,
+    );
+
+    await expect(
+      stub.snapshot(GAME_2048_RULE_VERSION_BY_SIZE[4], "guest-alice"),
+    ).resolves.toMatchObject({
+      ruleVersion: "2048.solo.4x4.v1",
+      personalBestScore: 4_000,
+      top: [{ displayName: "四乘四", score: 4_000 }],
+    });
+    await expect(
+      stub.snapshot(GAME_2048_RULE_VERSION_BY_SIZE[5], "guest-alice"),
+    ).resolves.toMatchObject({
+      ruleVersion: "2048.solo.5x5.v1",
+      personalBestScore: 5_000,
+      top: [{ displayName: "五乘五", score: 5_000 }],
+    });
+    await expect(
+      stub.snapshot(GAME_2048_RULE_VERSION_BY_SIZE[6], "guest-alice"),
+    ).resolves.toMatchObject({
+      ruleVersion: "2048.solo.6x6.v1",
+      personalBestScore: 6_000,
+      top: [{ displayName: "六乘六", score: 6_000 }],
+    });
+  });
+
   it.each([
     0,
     -4,
@@ -129,6 +178,11 @@ describe("Game2048Leaderboard Durable Object", () => {
     await expect(
       rejectionMessage(stub.recordScore("guest-alice", "  棋友甲  ", 4)),
     ).resolves.toBe("Invalid Display Name");
+    await expect(
+      rejectionMessage(
+        stub.snapshot("2048.solo.7x7.v1", "guest-alice"),
+      ),
+    ).resolves.toBe("Invalid 2048 rule version");
   });
 
   it("sorts by score, achieved time, and hidden Guest id and returns only ten entries", async () => {
@@ -176,6 +230,56 @@ describe("Game2048Leaderboard Durable Object", () => {
       ruleVersion: GAME_2048_SOLO_RULE_VERSION,
       personalBestScore: 30_000,
       top: [{ rank: 1, displayName: "棋友甲", score: 30_000 }],
+    });
+  });
+
+  it("migrates the deployed 4×4 single-key schema without losing scores", async () => {
+    const firstStub = leaderboard();
+    await runInDurableObject(firstStub, async (_instance, state) => {
+      state.storage.sql.exec("DROP TABLE personal_bests");
+      state.storage.sql.exec(`
+        CREATE TABLE personal_bests (
+          guest_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          score INTEGER NOT NULL,
+          achieved_at INTEGER NOT NULL,
+          rule_version TEXT NOT NULL,
+          PRIMARY KEY (guest_id)
+        )
+      `);
+      state.storage.sql.exec(
+        `INSERT INTO personal_bests
+         (guest_id, display_name, score, achieved_at, rule_version)
+         VALUES (?, ?, ?, ?, ?)`,
+        "guest-alice",
+        "旧四乘四纪录",
+        32_000,
+        Date.now(),
+        GAME_2048_RULE_VERSION_BY_SIZE[4],
+      );
+    });
+    await abortAllDurableObjects();
+    const restartedStub = leaderboard();
+
+    await expect(
+      restartedStub.snapshot(
+        GAME_2048_RULE_VERSION_BY_SIZE[4],
+        "guest-alice",
+      ),
+    ).resolves.toMatchObject({
+      personalBestScore: 32_000,
+      top: [{ displayName: "旧四乘四纪录", score: 32_000 }],
+    });
+    await expect(
+      restartedStub.recordScore(
+        GAME_2048_RULE_VERSION_BY_SIZE[5],
+        "guest-alice",
+        "新五乘五纪录",
+        40_000,
+      ),
+    ).resolves.toMatchObject({
+      ruleVersion: "2048.solo.5x5.v1",
+      personalBestScore: 40_000,
     });
   });
 

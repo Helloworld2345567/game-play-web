@@ -11,6 +11,7 @@ import {
   type RoomDirectory,
 } from "../src/room-directory";
 import { MINESWEEPER_SOLO_RULE_VERSION } from "../src/shared/minesweeper-leaderboard";
+import { GAME_2048_RULE_VERSION_BY_SIZE } from "../src/shared/game-2048-rules";
 import { GAME_2048_SOLO_RULE_VERSION } from "../src/shared/game-2048-leaderboard";
 
 interface TestExports {
@@ -1062,6 +1063,45 @@ describe("Worker request boundary", () => {
       personalBestScore: 12_000,
       top: [{ rank: 1, displayName: "签名昵称", score: 12_000 }],
     });
+  });
+
+  it("keeps the 4×4, 5×5, and 6×6 score endpoints in separate rankings", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const variants = [
+      { ruleVersion: GAME_2048_RULE_VERSION_BY_SIZE[4], score: 4_000 },
+      { ruleVersion: GAME_2048_RULE_VERSION_BY_SIZE[5], score: 5_000 },
+      { ruleVersion: GAME_2048_RULE_VERSION_BY_SIZE[6], score: 6_000 },
+    ] as const;
+
+    for (const variant of variants) {
+      const recorded = await app.default.fetch(
+        apiRequest(origin, "/api/2048/leaderboard/record", {
+          method: "POST",
+          headers: { Cookie: cookie!, "Content-Type": "application/json" },
+          body: JSON.stringify(variant),
+        }),
+      );
+      expect(recorded.status).toBe(200);
+    }
+
+    for (const variant of variants) {
+      const response = await app.default.fetch(
+        apiRequest(origin, "/api/2048/leaderboard", {
+          method: "POST",
+          headers: { Cookie: cookie!, "Content-Type": "application/json" },
+          body: JSON.stringify({ ruleVersion: variant.ruleVersion }),
+        }),
+      );
+      await expect(response.json()).resolves.toMatchObject({
+        ruleVersion: variant.ruleVersion,
+        personalBestScore: variant.score,
+        top: [{ score: variant.score }],
+      });
+    }
   });
 
   it.each([
