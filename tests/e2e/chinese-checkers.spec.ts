@@ -30,9 +30,13 @@ test("opens Chinese Checkers and plays a local two-player turn", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "跳棋，开始本机游戏" }).click();
+  await page.getByRole("button", {
+    name: "跳棋，选择本机或联机玩法与人数",
+  }).click();
+  const picker = page.getByRole("dialog", { name: "跳棋" });
+  await picker.getByRole("button", { name: "开始 2 人本机游戏" }).click();
 
-  await expect(page).toHaveURL(/\/chinese-checkers\/?$/u);
+  await expect(page).toHaveURL(/\/chinese-checkers\?players=2$/u);
   await expect(page.getByRole("heading", { level: 1, name: "跳棋" }))
     .toBeVisible();
   await expect(board(page).getByRole("gridcell")).toHaveCount(121);
