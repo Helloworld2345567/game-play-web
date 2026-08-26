@@ -9,6 +9,7 @@ import {
   type Game2048LeaderboardSnapshot,
 } from "../../../shared/game-2048-leaderboard";
 import { ensureBrowserSession } from "../../room-client";
+import { fetchWithRetry } from "../../api-request";
 
 export type {
   Game2048LeaderboardEntry,
@@ -85,7 +86,7 @@ async function requestLeaderboard(
   signal?: AbortSignal,
 ): Promise<Game2048LeaderboardSnapshot> {
   await ensureBrowserSession(displayName, signal);
-  const response = await fetch(path, {
+  const response = await fetchWithRetry(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

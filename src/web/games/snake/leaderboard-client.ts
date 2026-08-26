@@ -8,6 +8,7 @@ import type {
   SnakeLeaderboardSnapshot,
 } from "../../../shared/game-snake-leaderboard";
 import { ensureBrowserSession } from "../../room-client";
+import { fetchWithRetry } from "../../api-request";
 
 export type {
   SnakeLeaderboardEntry,
@@ -81,7 +82,7 @@ async function requestLeaderboard(
   signal?: AbortSignal,
 ): Promise<SnakeLeaderboardSnapshot> {
   await ensureBrowserSession(displayName, signal);
-  const response = await fetch(path, {
+  const response = await fetchWithRetry(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

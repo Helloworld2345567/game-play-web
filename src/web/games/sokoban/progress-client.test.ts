@@ -194,4 +194,22 @@ describe("Sokoban progress client", () => {
     expect(error).toBeInstanceOf(SokobanProgressRequestError);
     expect((error as SokobanProgressRequestError).status).toBe(409);
   });
+
+  it("leaves transient HTTP failures visible to the page-level outbox", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      input === "/api/session"
+        ? Response.json({ ok: true })
+        : new Response(null, { status: 503 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await loadSokobanProgress("棋友0001").catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(SokobanProgressRequestError);
+    expect((error as SokobanProgressRequestError).status).toBe(503);
+    // The page intentionally owns the visible HTTP retry/backoff for progress
+    // so a pending completion is not hidden by an immediate second request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

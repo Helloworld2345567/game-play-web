@@ -356,7 +356,10 @@ describe("Worker request boundary", () => {
       );
 
     await expect((await readStats()).json()).resolves.toMatchObject({
-      activeRooms: 1,
+      // A successful create keeps a short provisional lease until the first
+      // browser connection. This prevents a lost navigation response from
+      // consuming a long-lived active Room slot.
+      activeRooms: 0,
     });
 
     const connectionId = "stats-room-client-0001";
@@ -367,6 +370,9 @@ describe("Worker request boundary", () => {
         body: JSON.stringify({ v: 1, connectionId }),
       }),
     );
+    await expect((await readStats()).json()).resolves.toMatchObject({
+      activeRooms: 1,
+    });
     await app.default.fetch(
       apiRequest(origin, `/api/rooms/${roomId}/leave`, {
         method: "POST",
@@ -763,6 +769,15 @@ describe("Worker request boundary", () => {
     expect(failed.status).toBe(500);
     expect(initializeCalls).toBe(2);
     const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+    const fixedRoom = testEnv.ROOMS.get(
+      testEnv.ROOMS.idFromName(fixedRoomId),
+    );
+    await expect(
+      runInDurableObject(fixedRoom, (_instance, state) =>
+        state.storage.get("capacityPhase"),
+      ),
+    ).resolves.toBe("provisioning");
+    await expect(directory.stats()).resolves.toMatchObject({ activeRooms: 0 });
     const remaining = await Promise.all(
       Array.from({ length: 9 }, (_, index) =>
         directory.reserve(`held-room-${String(index).padStart(6, "0")}`),

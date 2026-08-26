@@ -19,6 +19,7 @@ import { RoomRuntime } from "./room-runtime/room-runtime";
 import { projectRoomSnapshot } from "./room-runtime/snapshot-projector";
 import {
   ROOM_DIRECTORY_NAME,
+  ROOM_PROVISIONAL_LEASE_MS,
   type RoomDirectory,
 } from "./room-directory";
 import {
@@ -280,16 +281,6 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     if (url.pathname === "/initialize" && request.method === "POST") {
       return this.initialize(request, guestId, displayName);
     }
-    const capacityAdmission = await this.ensureRoomCapacity();
-    if (capacityAdmission !== "ready") {
-      const code =
-        capacityAdmission === "expired"
-          ? "room.expired"
-          : "room.capacity_unavailable";
-      return url.pathname === "/websocket"
-        ? this.rejectedSocket(code)
-        : this.httpError(code);
-    }
     if (url.pathname === "/websocket") {
       return this.handleWebSocket(request, guestId, displayName);
     }
@@ -323,6 +314,16 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     });
     if (!admission.ok) return this.httpError(admission.code);
     if (this.room === null) return this.httpError("room.expired");
+    // Only a request that passes both envelope validation and connection
+    // admission may promote a provisional capacity lease.
+    const capacityAdmission = await this.ensureRoomCapacity();
+    if (capacityAdmission !== "ready") {
+      return this.httpError(
+        capacityAdmission === "expired"
+          ? "room.expired"
+          : "room.capacity_unavailable",
+      );
+    }
     const prunedExpiredLeases = await this.pruneExpiredHttpLeases(now);
     const wasOnline = this.isGuestOnline(guestId, now);
     const existing = this.httpLeases[value.connectionId];
@@ -434,6 +435,16 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     if (!admission.ok) {
       return this.httpError(admission.code, guestId, actionId);
     }
+    const capacityAdmission = await this.ensureRoomCapacity();
+    if (capacityAdmission !== "ready") {
+      return this.httpError(
+        capacityAdmission === "expired"
+          ? "room.expired"
+          : "room.capacity_unavailable",
+        guestId,
+        actionId,
+      );
+    }
     // Admission guarantees a current Room and an unexpired, matching lease.
     if (this.room === null) return this.httpError("room.expired");
     const lease = this.httpLeases[value.connectionId];
@@ -500,30 +511,51 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     }
     const lease = this.httpLeases[value.connectionId];
     const ownsLease = lease !== undefined && lease.guestId === guestId;
-    if (ownsLease) {
-      const wasPlayer = lease.seat !== null;
-      const now = Date.now();
-      const wasOnline = this.isGuestOnline(guestId, now);
-      delete this.httpLeases[value.connectionId];
-      await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
-      if (this.room !== null) {
-        const displayNamesChanged =
-          await this.pruneOfflineSpectatorDisplayNames(now);
-        const hasPlayers = this.hasLivePlayers(now);
-        if (!hasPlayers && wasPlayer) {
-          await this.discardRoom();
-        } else if (hasPlayers) {
-          await this.markOccupied();
-        } else {
-          await this.markVacant(now);
-        }
-        if (
-          this.room !== null &&
-          (displayNamesChanged || wasOnline !== this.isGuestOnline(guestId, now))
-        ) {
-          await this.markSnapshotChanged();
-          this.broadcastSnapshots();
-        }
+    // A pagehide beacon for a connection that never successfully synced must
+    // be harmless. In particular, do not activate a provisional or legacy
+    // Room merely because a cleanup request arrived first.
+    if (!ownsLease) {
+      const acknowledgement: LeftMessage = {
+        v: PROTOCOL_VERSION,
+        type: "left",
+      };
+      return Response.json(acknowledgement);
+    }
+    if (
+      this.capacityPhase !== "provisioning" ||
+      this.pendingCapacityRelease !== null
+    ) {
+      const capacityAdmission = await this.ensureRoomCapacity();
+      if (capacityAdmission !== "ready") {
+        return this.httpError(
+          capacityAdmission === "expired"
+            ? "room.expired"
+            : "room.capacity_unavailable",
+        );
+      }
+    }
+    const wasPlayer = lease.seat !== null;
+    const now = Date.now();
+    const wasOnline = this.isGuestOnline(guestId, now);
+    delete this.httpLeases[value.connectionId];
+    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    if (this.room !== null) {
+      const displayNamesChanged =
+        await this.pruneOfflineSpectatorDisplayNames(now);
+      const hasPlayers = this.hasLivePlayers(now);
+      if (!hasPlayers && wasPlayer) {
+        await this.discardRoom();
+      } else if (hasPlayers) {
+        await this.markOccupied();
+      } else {
+        await this.markVacant(now);
+      }
+      if (
+        this.room !== null &&
+        (displayNamesChanged || wasOnline !== this.isGuestOnline(guestId, now))
+      ) {
+        await this.markSnapshotChanged();
+        this.broadcastSnapshots();
       }
     }
     const acknowledgement: LeftMessage = {
@@ -672,17 +704,32 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       if (!this.matchesInitialization(payload, guestId)) {
         return new Response("Room already exists", { status: 409 });
       }
+      if (
+        this.capacityPhase === "provisioning" &&
+        this.capacityProvisioningSince !== null &&
+        Date.now() >=
+          this.capacityProvisioningSince + ROOM_PROVISIONAL_LEASE_MS
+      ) {
+        await this.discardRoom();
+        return new Response("Room capacity lease expired", { status: 503 });
+      }
       this.displayNames[guestId] = displayName;
       await this.ctx.storage.put(DISPLAY_NAMES_KEY, this.displayNames);
       if (this.capacityPhase === "active") {
         return Response.json({ ok: true }, { status: 201 });
       }
-      const activated = await this.activateCapacityLease();
-      if (activated) {
-        return Response.json({ ok: true }, { status: 201 });
+      const confirmed = await this.confirmProvisionalCapacity();
+      if (!confirmed) {
+        await this.discardRoom();
+        return new Response("Room capacity lease unavailable", {
+          status: 503,
+        });
       }
-      await this.discardRoom();
-      return new Response("Room capacity lease unavailable", { status: 503 });
+      // Keep a retry idempotent without promoting an unconnected Room to a
+      // long-lived active lease. The first Room connection activates the
+      // provisional lease; if both the response and the retry are lost, the
+      // provisional directory alarm can reclaim the Room safely.
+      return Response.json({ ok: true }, { status: 201 });
     }
     const rules = getGameRules(payload.ruleSetId)!;
     const now = Date.now();
@@ -706,7 +753,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
         await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
         await transaction.setAlarm(
-          Math.min(room.expiresAt, now + VACANT_ROOM_GRACE_MS),
+          Math.min(room.expiresAt, now + ROOM_PROVISIONAL_LEASE_MS),
         );
       });
       this.room = room;
@@ -718,13 +765,17 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       this.capacityProvisioningSince = null;
       throw new Error("Room initialization outcome is unknown");
     }
-    const activated = await this.activateCapacityLease();
-    if (!activated) {
+    const confirmed = await this.confirmProvisionalCapacity();
+    if (!confirmed) {
       await this.discardRoom();
       return new Response("Room capacity lease unavailable", {
         status: 503,
       });
     }
+    // Initialization only creates a provisional lease. The first connection
+    // activates it after the browser has received the Room URL. This bounds
+    // the lifetime of a Room whose creation response is lost or whose page is
+    // closed before it can connect.
     return Response.json({ ok: true }, { status: 201 });
   }
 
@@ -775,6 +826,14 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     });
     if (!admission.ok) return this.rejectedSocket(admission.code);
     if (this.room === null) return this.rejectedSocket("room.expired");
+    const capacityAdmission = await this.ensureRoomCapacity();
+    if (capacityAdmission !== "ready") {
+      return this.rejectedSocket(
+        capacityAdmission === "expired"
+          ? "room.expired"
+          : "room.capacity_unavailable",
+      );
+    }
     const expiredLeasesPruned = await this.pruneExpiredHttpLeases(now);
     const rules = getGameRules(this.room.ruleSetId);
     if (rules === null) {
@@ -1017,6 +1076,31 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     }
     if (this.room === null || this.discarding) return;
     if (this.capacityPhase !== "active") {
+      const now = Date.now();
+      if (
+        this.capacityPhase === "provisioning" &&
+        this.capacityProvisioningSince !== null &&
+        !this.hasLivePlayers(now)
+      ) {
+        const provisionalExpiresAt =
+          this.capacityProvisioningSince + ROOM_PROVISIONAL_LEASE_MS;
+        const vacantSince = await this.ctx.storage.get<number>(
+          VACANT_SINCE_KEY,
+        );
+        if (
+          vacantSince !== undefined &&
+          now >= vacantSince + VACANT_ROOM_GRACE_MS
+        ) {
+          await this.discardRoom();
+          return;
+        }
+        if (now < provisionalExpiresAt) {
+          await this.ctx.storage.setAlarm(provisionalExpiresAt);
+          return;
+        }
+        await this.discardRoom();
+        return;
+      }
       const capacityAdmission = await this.ensureRoomCapacity();
       if (capacityAdmission !== "ready") return;
     }
@@ -1286,6 +1370,17 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       return "ready";
     }
 
+    if (
+      this.capacityPhase === "provisioning" &&
+      this.capacityProvisioningSince === null
+    ) {
+      // A provisioning marker without its timestamp cannot be safely
+      // reconciled: adopting here could resurrect an abandoned lease.
+      await this.discardRoom();
+      return "expired";
+    }
+
+    let adoptedLegacyLease = false;
     if (this.capacityLeaseId === null) {
       const desiredLeaseId = crypto.randomUUID();
       const now = Date.now();
@@ -1294,9 +1389,29 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       } catch {
         return "unavailable";
       }
+      adoptedLegacyLease = true;
     }
     const leaseId = this.capacityLeaseId;
     if (leaseId === null) return "unavailable";
+
+    // A lease supplied during initialization already exists in the directory.
+    // Activate it directly once the first connection arrives; adopting here
+    // could recreate an expired provisional lease and resurrect an abandoned
+    // Room after its response was lost.
+    if (this.capacityPhase === "provisioning" && !adoptedLegacyLease) {
+      let activated: boolean;
+      try {
+        activated = await this.activateCapacityLease();
+      } catch {
+        await this.scheduleCapacityReconciliation();
+        return "unavailable";
+      }
+      if (!activated) {
+        await this.discardRoom();
+        return "expired";
+      }
+      return "ready";
+    }
 
     let adopted;
     try {
@@ -1322,6 +1437,49 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       return "expired";
     }
     return "ready";
+  }
+
+  /**
+   * Confirm that the reservation which was persisted with this Room is still
+   * owned by it without promoting the reservation to a long-lived active
+   * lease. The original expiry is deliberately used as the touch target, so
+   * a late idempotent initialize retry cannot extend an abandoned Room's
+   * lifetime.
+   */
+  private async confirmProvisionalCapacity(): Promise<boolean> {
+    if (
+      this.room === null ||
+      this.capacityPhase !== "provisioning" ||
+      this.capacityLeaseId === null ||
+      this.capacityProvisioningSince === null
+    ) {
+      return false;
+    }
+    const expiresAt =
+      this.capacityProvisioningSince + ROOM_PROVISIONAL_LEASE_MS;
+    if (Date.now() >= expiresAt) return false;
+    try {
+      return await this.roomDirectory().touch(
+        this.room.roomId,
+        this.capacityLeaseId,
+        expiresAt,
+      );
+    } catch (error) {
+      // The directory validates the expiry again inside its transaction. A
+      // boundary race can therefore report a known-expired lease as a
+      // RangeError; transport/DO failures remain unknown and must propagate
+      // so the Worker keeps the reservation for an idempotent retry.
+      if (
+        error instanceof RangeError ||
+        (typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          (error as { name?: unknown }).name === "RangeError")
+      ) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   private async persistCapacityProvisioning(
@@ -1462,7 +1620,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       this.capacityProvisioningSince !== null
     ) {
       candidates.push(
-        this.capacityProvisioningSince + CAPACITY_RECONCILE_MS,
+        this.capacityProvisioningSince + ROOM_PROVISIONAL_LEASE_MS,
       );
     }
     await this.ctx.storage.setAlarm(Math.min(...candidates));

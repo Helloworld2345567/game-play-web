@@ -18,7 +18,7 @@ flowchart LR
     R <-->|激活 / 释放| D
 ```
 
-平台不设置在线游客人数闸门，但全站同时最多存在 10 个尚未废弃的 Room。单例 `RoomDirectory` 先原子创建 60 秒 provisional lease，GameRoom 持久化后再把它激活。明确的初始化失败会立即回滚；若只是返回途中断导致提交结果未知，Worker 会使用同一租约幂等重试，并保留临时占位而不误释放已提交房间。GameRoom 废弃前先持久化释放任务，失败由 alarm 重试；旧版本房间首次唤醒时也必须先登记容量才能继续服务。首页及其他页面每 10 秒续期一个按 Guest 去重的 45 秒 Presence，并从同一次 RPC 取得在线人数和已激活房间数；心跳与 leave 使用单调序号和 5 分钟近期 tombstone 抵抗乱序。首次无 Cookie 的并发标签页通过 IndexedDB 原子共享一个 60 秒随机 bootstrap，`RoomDirectory` 只在该短租约内将它兑换为同一 Guest，浏览器与服务端都会按期淘汰；Web Lock 只用于避免重复请求。
+平台不设置在线游客人数闸门，但全站同时最多存在 10 个尚未废弃的 Room。单例 `RoomDirectory` 先原子创建 60 秒 provisional lease；GameRoom 持久化后通过同一租约确认，但只有浏览器建立首个 WebSocket 或 HTTPS sync 连接时才把它激活。初始化响应丢失、页面关闭或从未连接的房间会在 provisional 到期时清理；迟到的同租约重试不会续期或复活已过期房间。明确的初始化失败会立即回滚；若只是返回途中断导致提交结果未知，Worker 会使用同一租约幂等重试，并保留临时占位而不误释放已提交房间。`activeRooms` 统计只包含已激活房间，而 provisional 房间仍占用 10 个容量名额。GameRoom 废弃前先持久化释放任务，失败由 alarm 重试；旧版本房间首次唤醒时也必须先登记容量才能继续服务。首页及其他页面每 10 秒续期一个按 Guest 去重的 45 秒 Presence，并从同一次 RPC 取得在线人数和已激活房间数；心跳与 leave 使用单调序号和 5 分钟近期 tombstone 抵抗乱序。首次无 Cookie 的并发标签页通过 IndexedDB 原子共享一个 60 秒随机 bootstrap，`RoomDirectory` 只在该短租约内将它兑换为同一 Guest，浏览器与服务端都会按期淘汰；Web Lock 只用于避免重复请求。
 
 ## 2. MVP 做什么
 

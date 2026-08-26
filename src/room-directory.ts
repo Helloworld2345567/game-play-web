@@ -56,7 +56,8 @@ const MAX_ACTIVE_ROOMS = 10;
 const MAX_ACTIVE_PRESENCES_PER_GUEST = 8;
 const MAX_PRESENCE_RECORDS_PER_GUEST = 64;
 const MAX_BROWSER_BOOTSTRAP_CLAIMS = 256;
-const PROVISIONAL_LEASE_MS = 60_000;
+/** How long a newly initialized Room may wait for its first connection. */
+export const ROOM_PROVISIONAL_LEASE_MS = 60_000;
 const PRESENCE_LEASE_MS = 45_000;
 const PRESENCE_TOMBSTONE_MS = 5 * 60_000;
 const BROWSER_BOOTSTRAP_LEASE_MS = 60_000;
@@ -325,7 +326,7 @@ export class RoomDirectory extends DurableObject {
 
     const leaseId = crypto.randomUUID();
     const now = Date.now();
-    const expiresAt = now + PROVISIONAL_LEASE_MS;
+    const expiresAt = now + ROOM_PROVISIONAL_LEASE_MS;
     return this.ctx.storage.transaction(async (transaction) => {
       const state = await readCurrentState(transaction, now);
       if (state.reservations[roomId] !== undefined) {
@@ -376,7 +377,7 @@ export class RoomDirectory extends DurableObject {
       state.reservations[roomId] = {
         leaseId: desiredLeaseId,
         phase: "provisional",
-        expiresAt: now + PROVISIONAL_LEASE_MS,
+        expiresAt: now + ROOM_PROVISIONAL_LEASE_MS,
       };
       await persistState(transaction, state);
       return { ok: true, leaseId: desiredLeaseId };
@@ -421,7 +422,16 @@ export class RoomDirectory extends DurableObject {
     }
 
     return this.ctx.storage.transaction(async (transaction) => {
-      const state = await readCurrentState(transaction, now);
+      // Durable Object transactions can wait behind another writer. Re-read
+      // the clock inside the transaction so a provisional lease that expires
+      // while it is queued cannot be touched back into existence.
+      const transactionNow = Date.now();
+      if (expiresAt <= transactionNow) {
+        const state = await readCurrentState(transaction, transactionNow);
+        await persistState(transaction, state);
+        return false;
+      }
+      const state = await readCurrentState(transaction, transactionNow);
       const reservation = state.reservations[roomId];
       if (reservation?.leaseId !== leaseId) {
         await persistState(transaction, state);

@@ -10,6 +10,7 @@ import {
   type SelectRematchRuleCommand,
   type ServerError,
 } from "../shared/protocol";
+import { fetchWithRetry } from "./api-request";
 import {
   createConcurrentActionTracker,
   sendOutstandingConcurrentActions as sendOutstandingTrackedActions,
@@ -352,7 +353,12 @@ async function postBrowserSession(
     const bootstrapId = browserSessionEstablished
       ? undefined
       : await browserBootstrapId();
-    const response = await fetch("/api/session", {
+    // Without IndexedDB there is no stable cross-request bootstrap marker.
+    // Do not replay an initial session request whose response may already
+    // have installed a cookie; a blind retry would mint a second Guest.
+    const initialBootstrapUnavailable =
+      !browserSessionEstablished && bootstrapId === undefined;
+    const response = await fetchWithRetry("/api/session", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -364,7 +370,7 @@ async function postBrowserSession(
       }),
       keepalive: true,
       signal: requestSignal,
-    });
+    }, initialBootstrapUnavailable ? { maxAttempts: 1 } : undefined);
     if (!response.ok) throw new Error("session_failed");
     browserSessionEstablished = true;
   };

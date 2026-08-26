@@ -15,6 +15,7 @@ import {
 import { getGameRules } from "../src/games/registry";
 import {
   ROOM_DIRECTORY_NAME,
+  ROOM_PROVISIONAL_LEASE_MS,
   type RoomDirectory,
 } from "../src/room-directory";
 
@@ -943,9 +944,209 @@ describe("GameRoom Durable Object", () => {
         room: await state.storage.get<StoredRoom>("room"),
       })),
     ).resolves.toMatchObject({
-      phase: "active",
+      phase: "provisioning",
       room: { roomId, seats: { "seat-a": { guestId: "guest-retry-creator" } } },
     });
+  });
+
+  it("keeps an unconnected initialized Room provisional until its first connection", async () => {
+    const roomId = "prov-room-000001";
+    const testEnv = env as unknown as TestEnv;
+    const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+    const reservation = await directory.reserve(roomId);
+    if (!reservation.ok) throw new Error("Expected a Room lease");
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+
+    await expect(
+      stub.fetch(
+        new Request("https://room.internal/initialize", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Internal-Guest-Id": "guest-provisional-creator",
+          },
+          body: JSON.stringify({
+            roomId,
+            gameType: "gomoku",
+            ruleSetId: "gomoku.freestyle15.v1",
+            capacityLeaseId: reservation.leaseId,
+          }),
+        }),
+      ),
+    ).resolves.toMatchObject({ status: 201 });
+
+    await expect(directory.stats()).resolves.toMatchObject({ activeRooms: 0 });
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        phase: await state.storage.get("capacityPhase"),
+        provisioningSince: await state.storage.get("capacityProvisioningSince"),
+      })),
+    ).resolves.toMatchObject({
+      phase: "provisioning",
+      provisioningSince: expect.any(Number),
+    });
+
+    const connection = await connect(stub, "guest-provisional-creator");
+    expect(connection.firstMessage).toMatchObject({
+      type: "snapshot",
+      roomId,
+      selfSeat: "seat-a",
+    });
+    await expect(directory.stats()).resolves.toMatchObject({ activeRooms: 1 });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("capacityPhase"),
+      ),
+    ).resolves.toBe("active");
+    await closeSocket(connection.socket);
+  });
+
+  it("retires an initialized Room whose provisional lease expires before first connection", async () => {
+    const roomId = "prov-room-000002";
+    const testEnv = env as unknown as TestEnv;
+    const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+    const reservation = await directory.reserve(roomId);
+    if (!reservation.ok) throw new Error("Expected a Room lease");
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+
+    await stub.fetch(
+      new Request("https://room.internal/initialize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Guest-Id": "guest-provisional-expired",
+        },
+        body: JSON.stringify({
+          roomId,
+          gameType: "gomoku",
+          ruleSetId: "gomoku.freestyle15.v1",
+          capacityLeaseId: reservation.leaseId,
+        }),
+      }),
+    );
+    await runInDurableObject(stub, async (instance, state) => {
+      const expiredAt = Date.now() - ROOM_PROVISIONAL_LEASE_MS - 1;
+      const target = instance as unknown as {
+        capacityPhase: "provisioning" | "active" | null;
+        capacityProvisioningSince: number | null;
+      };
+      target.capacityPhase = "provisioning";
+      target.capacityProvisioningSince = expiredAt;
+      await state.storage.put("capacityProvisioningSince", expiredAt);
+      await state.storage.put("vacantSince", expiredAt);
+      await (instance as unknown as GameRoom).alarm();
+    });
+
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get("room"),
+        pending: await state.storage.get("pendingCapacityRelease"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).resolves.toEqual({ room: undefined, pending: undefined, alarm: null });
+    await expect(directory.stats()).resolves.toMatchObject({ activeRooms: 0 });
+    await expect(directory.reserve("prov-room-000003")).resolves.toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("rejects a delayed initialize retry when the Directory lease expired", async () => {
+    const roomId = "prov-room-000004";
+    const testEnv = env as unknown as TestEnv;
+    const directory = testEnv.ROOM_DIRECTORY.getByName(ROOM_DIRECTORY_NAME);
+    const reservation = await directory.reserve(roomId);
+    if (!reservation.ok) throw new Error("Expected a Room lease");
+    const stub = testEnv.ROOMS.get(testEnv.ROOMS.idFromName(roomId));
+    const payload = {
+      roomId,
+      gameType: "gomoku",
+      ruleSetId: "gomoku.freestyle15.v1",
+      capacityLeaseId: reservation.leaseId,
+    };
+    const initialize = () =>
+      stub.fetch(
+        new Request("https://room.internal/initialize", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Internal-Guest-Id": "guest-provisional-delayed",
+          },
+          body: JSON.stringify(payload),
+        }),
+      );
+
+    await expect(initialize()).resolves.toMatchObject({ status: 201 });
+    await runInDurableObject(directory, async (_instance, state) => {
+      const reservations = await state.storage.get<
+        Record<string, { leaseId: string; expiresAt: number }>
+      >("reservations");
+      if (reservations?.[roomId] === undefined) {
+        throw new Error("Missing provisional reservation");
+      }
+      reservations[roomId]!.expiresAt = Date.now() - 1;
+      await state.storage.put("reservations", reservations);
+    });
+
+    await expect(initialize()).resolves.toMatchObject({ status: 503 });
+    await expect(
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("room"),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(directory.reserve("prov-room-000005")).resolves.toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("does not activate a provisional Room for an early HTTP leave", async () => {
+    const initialized = await initializeManagedRoom("prov-room-leave");
+    const directory = (env as unknown as TestEnv).ROOM_DIRECTORY.getByName(
+      ROOM_DIRECTORY_NAME,
+    );
+
+    const response = await postRoomHttp(
+      initialized.stub,
+      "leave",
+      "guest-creator",
+      { v: 1, connectionId: "provisional-leave-client" },
+    );
+
+    expect(response).toEqual({
+      status: 200,
+      message: { v: 1, type: "left" },
+    });
+    await expect(directory.stats()).resolves.toMatchObject({ activeRooms: 0 });
+    await expect(
+      runInDurableObject(initialized.stub, (_instance, state) =>
+        state.storage.get("capacityPhase"),
+      ),
+    ).resolves.toBe("provisioning");
+  });
+
+  it("does not activate a provisional Room for an invalid HTTP envelope", async () => {
+    const initialized = await initializeManagedRoom("prov-room-invalid-envelope");
+    const directory = (env as unknown as TestEnv).ROOM_DIRECTORY.getByName(
+      ROOM_DIRECTORY_NAME,
+    );
+
+    const response = await postRoomHttp(
+      initialized.stub,
+      "sync",
+      "guest-creator",
+      { v: 1 },
+    );
+
+    expect(response.message).toMatchObject({
+      v: 1,
+      type: "error",
+      code: "protocol.invalid_message",
+    });
+    await expect(directory.stats()).resolves.toMatchObject({ activeRooms: 0 });
+    await expect(
+      runInDurableObject(initialized.stub, (_instance, state) =>
+        state.storage.get("capacityPhase"),
+      ),
+    ).resolves.toBe("provisioning");
   });
 
   it("registers a legacy production Room before allowing its first reconnect", async () => {
@@ -2087,6 +2288,8 @@ describe("GameRoom Durable Object", () => {
       vi.spyOn(target, "roomDirectory").mockImplementation(
         () =>
           ({
+            activate: async (activateRoomId: string, leaseId: string) =>
+              actualDirectory.activate(activateRoomId, leaseId),
             release: async (releaseRoomId: string, leaseId: string) => {
               if (remainingFailures > 0) {
                 remainingFailures -= 1;
