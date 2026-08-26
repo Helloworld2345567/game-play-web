@@ -1150,7 +1150,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     await this.discardRoom();
   }
 
-  private async discardRoom(): Promise<void> {
+  private async discardRoom(preserveSocket?: WebSocket): Promise<void> {
     if (this.discarding) return;
     this.discarding = true;
     const roomId = this.room?.roomId ?? null;
@@ -1161,6 +1161,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         : null;
     try {
       for (const socket of this.ctx.getWebSockets()) {
+        if (socket === preserveSocket) continue;
         if (socket.readyState < WebSocket.CLOSING) {
           socket.close(1001, "Room expired");
         }
@@ -1250,14 +1251,23 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       v: PROTOCOL_VERSION,
       type: "left",
     };
-    socket.send(JSON.stringify(acknowledgement));
     const now = Date.now();
     const hasOtherPlayers = this.hasLivePlayers(now, socket);
-    socket.close(1000, "left");
     if (!hasOtherPlayers && attachment.seat !== null) {
-      await this.discardRoom();
+      // The client treats `left` as the point at which it may immediately
+      // create or join another Room. Keep this socket alive while retirement
+      // releases the directory lease, otherwise the next request can race a
+      // still-counted capacity reservation on a slow Durable Object runner.
+      try {
+        await this.discardRoom(socket);
+      } finally {
+        socket.send(JSON.stringify(acknowledgement));
+        socket.close(1000, "left");
+      }
       return;
     }
+    socket.send(JSON.stringify(acknowledgement));
+    socket.close(1000, "left");
     const displayNamesChanged =
       await this.pruneOfflineSpectatorDisplayNames(now);
     if (hasOtherPlayers) await this.markOccupied();

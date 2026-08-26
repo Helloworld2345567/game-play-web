@@ -2255,6 +2255,60 @@ describe("GameRoom Durable Object", () => {
     });
   });
 
+  it("acknowledges the last WebSocket leave only after releasing Room capacity", async () => {
+    const { stub, creator, invitee } = await startRoom("room-leave-release-order");
+    const events: string[] = [];
+
+    await runInDurableObject(stub, (instance, state) => {
+      const target = instance as unknown as {
+        roomDirectory(): DurableObjectStub<RoomDirectory>;
+      };
+      const actualDirectory = target.roomDirectory();
+      vi.spyOn(target, "roomDirectory").mockImplementation(
+        () =>
+          ({
+            activate: (roomId: string, leaseId: string) =>
+              actualDirectory.activate(roomId, leaseId),
+            release: async (roomId: string, leaseId: string) => {
+              events.push("release");
+              await actualDirectory.release(roomId, leaseId);
+            },
+          }) as unknown as DurableObjectStub<RoomDirectory>,
+      );
+      const creatorSocket = state.getWebSockets().find(
+        (socket) =>
+          (socket.deserializeAttachment() as { guestId?: unknown } | null)
+            ?.guestId === "guest-creator",
+      );
+      if (creatorSocket === undefined) throw new Error("Missing creator socket");
+      const originalSend = creatorSocket.send.bind(creatorSocket);
+      vi.spyOn(creatorSocket, "send").mockImplementation((data) => {
+        try {
+          if ((JSON.parse(String(data)) as { type?: unknown }).type === "left") {
+            events.push("left");
+          }
+        } catch {
+          // Ignore protocol pings and other non-JSON frames.
+        }
+        return originalSend(data);
+      });
+    });
+
+    const inviteeLeft = invitee.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+    invitee.socket.send(JSON.stringify(leaveCommand()));
+    await inviteeLeft;
+
+    const creatorLeft = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+    creator.socket.send(JSON.stringify(leaveCommand()));
+
+    await creatorLeft;
+    expect(events).toEqual(["release", "left"]);
+  });
+
   it("retries a managed capacity release from a durable retirement tombstone", async () => {
     const roomId = "retire-room-0001";
     const creatorGuestId = "guest-retire-creator";
