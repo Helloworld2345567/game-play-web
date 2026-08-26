@@ -282,7 +282,10 @@ test("automatically retries a failed reload after the Guest session changes", as
       (response) =>
         response.url().endsWith("/api/sokoban/progress/record") &&
         response.ok(),
-      { timeout: 15_000 },
+      // The first progress request can wait behind a cold Durable Object on
+      // the shared CI runner. Keep this in line with the CI expect window so
+      // a slow but healthy response does not consume a retry.
+      { timeout: 30_000 },
     );
     await solveLevelOne(page);
     await expect(page.getByText(/暂时无法确认游客记录/u)).toBeVisible();
