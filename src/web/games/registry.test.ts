@@ -102,13 +102,12 @@ function tiaojiaqiPosition(
 }
 
 describe("game outcome presentation", () => {
-  it("allowlists both the local Chinese Checkers page and every room renderer", async () => {
+  it("allowlists only Chinese Checkers room renderers", async () => {
     const loader = getClientGamePageLoader("chinese-checkers");
-    expect(loader).toBeTypeOf("function");
-    expect(getClientGameCatalogEntry("chinese-checkers")?.loadPage).toBe(
-      loader,
-    );
-    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(loader).toBeNull();
+    expect(
+      getClientGameCatalogEntry("chinese-checkers")?.loadPage,
+    ).toBeUndefined();
     expect(
       getClientGameRendererLoader(
         "chinese-checkers",

@@ -41,7 +41,7 @@ describe("landing game catalog", () => {
   it.each([2, 3, 4] as const)(
     "maps %s-player Chinese Checkers to a fixed-capacity room rule",
     (playerCount) => {
-      expect(resolveChineseCheckersLaunch("room", playerCount)).toEqual({
+      expect(resolveChineseCheckersLaunch(playerCount)).toEqual({
         kind: "room",
         gameType: "chinese-checkers",
         ruleSetId: `chinese-checkers.room.${playerCount}p.v1`,
@@ -49,11 +49,18 @@ describe("landing game catalog", () => {
     },
   );
 
-  it("keeps same-device Chinese Checkers available from the shared picker", () => {
-    expect(resolveChineseCheckersLaunch("local", 3)).toEqual({
-      kind: "navigate",
-      href: "/chinese-checkers?players=3",
+  it("offers Chinese Checkers only as online rooms", () => {
+    const entry = LANDING_GAME_CATALOG.find(
+      (candidate) => candidate.id === "chinese-checkers",
+    );
+
+    expect(entry).toMatchObject({
+      ariaLabel: "跳棋，选择联机人数",
+      description: "标准 121 孔 · 2 / 3 / 4 人联机对战",
+      launch: { kind: "picker", gameType: "chinese-checkers" },
     });
+    expect(localGameIdFromPath("/chinese-checkers")).toBeNull();
+    expect(localGameIdFromPath("/chinese-checkers/")).toBeNull();
   });
 
   it("projects direct room entries from the registered game adapters", () => {
@@ -113,12 +120,8 @@ describe("landing game catalog", () => {
     expect(localGameIdFromPath("/sokoban")).toBe("sokoban");
     expect(localGameIdFromPath("/sokoban/")).toBe("sokoban");
     expect(localGameIdFromPath("/minesweeper")).toBe("minesweeper");
-    expect(localGameIdFromPath("/chinese-checkers")).toBe(
-      "chinese-checkers",
-    );
-    expect(localGameIdFromPath("/chinese-checkers/")).toBe(
-      "chinese-checkers",
-    );
+    expect(localGameIdFromPath("/chinese-checkers")).toBeNull();
+    expect(localGameIdFromPath("/chinese-checkers/")).toBeNull();
     expect(localGameIdFromPath("/unknown")).toBeNull();
     expect(localGameIdFromPath("/2048/extra")).toBeNull();
   });

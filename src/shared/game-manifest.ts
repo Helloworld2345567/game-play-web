@@ -72,11 +72,10 @@ export const GAME_MANIFESTS = [
   {
     gameId: "chinese-checkers",
     title: "跳棋",
-    description: "标准 121 孔 · 2 / 3 / 4 人同屏对战",
+    description: "标准 121 孔 · 2 / 3 / 4 人联机对战",
     creationPolicy: "enabled",
     launchKind: "turn-room",
     ruleSetIds: [
-      "chinese-checkers.local.v1",
       "chinese-checkers.room.2p.v1",
       "chinese-checkers.room.3p.v1",
       "chinese-checkers.room.4p.v1",

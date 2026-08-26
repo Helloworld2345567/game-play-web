@@ -86,7 +86,6 @@ const LANDING_LOCAL_ENTRIES = clientGameCatalog.flatMap((manifest) => {
   if (
     manifest.launchKind !== "local-game" ||
     manifest.creationPolicy !== "enabled" ||
-    manifest.gameId === "chinese-checkers" ||
     manifest.loadPage === undefined
   ) {
     return [];
@@ -122,8 +121,8 @@ export const LANDING_GAME_CATALOG = [
   {
     id: "chinese-checkers",
     label: "跳棋",
-    ariaLabel: "跳棋，选择本机或联机玩法与人数",
-    description: "标准 121 孔 · 2 / 3 / 4 人本机或联机对战",
+    ariaLabel: "跳棋，选择联机人数",
+    description: "标准 121 孔 · 2 / 3 / 4 人联机对战",
     launch: {
       kind: "picker" as const,
       gameType: "chinese-checkers" as const,
@@ -136,7 +135,6 @@ export type MinesweeperLaunchMode = "solo" | "race";
 export type MinesweeperPreset = MinefieldPresetId;
 
 export type ChaseDifficulty = "easy" | "medium" | "hard";
-export type ChineseCheckersLaunchMode = "local" | "room";
 export type ChineseCheckersPlayerCount = 2 | 3 | 4;
 
 export function localGameIdFromPath(path: string): string | null {
@@ -161,15 +159,8 @@ export function resolveChaseLaunch(difficulty: ChaseDifficulty) {
 }
 
 export function resolveChineseCheckersLaunch(
-  mode: ChineseCheckersLaunchMode,
   playerCount: ChineseCheckersPlayerCount,
 ) {
-  if (mode === "local") {
-    return {
-      kind: "navigate" as const,
-      href: `/chinese-checkers?players=${playerCount}`,
-    };
-  }
   return {
     kind: "room" as const,
     gameType: "chinese-checkers",
@@ -675,20 +666,16 @@ function ChasePicker({
 const CHINESE_CHECKERS_PLAYER_OPTIONS = [2, 3, 4] as const;
 
 function ChineseCheckersPicker({
-  mode,
   playerCount,
   creating,
   error,
-  onModeChange,
   onPlayerCountChange,
   onStart,
   onClose,
 }: {
-  mode: ChineseCheckersLaunchMode;
   playerCount: ChineseCheckersPlayerCount;
   creating: boolean;
   error: string | null;
-  onModeChange(mode: ChineseCheckersLaunchMode): void;
   onPlayerCountChange(playerCount: ChineseCheckersPlayerCount): void;
   onStart(): void;
   onClose(): void;
@@ -723,13 +710,13 @@ function ChineseCheckersPicker({
     >
       <header class="dialog-heading">
         <div>
-          <p class="eyebrow">选择玩法</p>
+          <p class="eyebrow">选择人数</p>
           <h2 id="checkers-picker-title">跳棋</h2>
         </div>
         <button
           class="dialog-close"
           type="button"
-          aria-label="关闭跳棋玩法选择"
+          aria-label="关闭跳棋人数选择"
           disabled={creating}
           onClick={close}
         >
@@ -744,40 +731,6 @@ function ChineseCheckersPicker({
           onStart();
         }}
       >
-        <fieldset disabled={creating}>
-          <legend>玩法</legend>
-          <div class="choice-segments mode-segments">
-            <label class="choice-segment">
-              <input
-                type="radio"
-                name="checkers-mode"
-                value="local"
-                checked={mode === "local"}
-                autofocus={mode === "local"}
-                onChange={() => onModeChange("local")}
-              />
-              <span>
-                <strong>本机同屏</strong>
-                <small>一台设备轮流走棋</small>
-              </span>
-            </label>
-            <label class="choice-segment">
-              <input
-                type="radio"
-                name="checkers-mode"
-                value="room"
-                checked={mode === "room"}
-                autofocus={mode === "room"}
-                onChange={() => onModeChange("room")}
-              />
-              <span>
-                <strong>邀请联机</strong>
-                <small>每人使用自己的设备</small>
-              </span>
-            </label>
-          </div>
-        </fieldset>
-
         <fieldset disabled={creating}>
           <legend>人数</legend>
           <div class="choice-segments preset-segments">
@@ -799,11 +752,9 @@ function ChineseCheckersPicker({
         </fieldset>
 
         <p id="checkers-picker-summary" class="picker-summary">
-          <strong>{playerCount} 人 · {mode === "local" ? "本机同屏" : "邀请联机"}</strong>
+          <strong>{playerCount} 人 · 邀请联机</strong>
           <span>
-            {mode === "local"
-              ? "在这台设备上轮流操作，随时可以重新选择人数。"
-              : `创建固定 ${playerCount} 个玩家席位的房间，坐满后自动开始。`}
+            创建固定 {playerCount} 个玩家席位的房间，坐满后自动开始。
           </span>
         </p>
 
@@ -812,9 +763,7 @@ function ChineseCheckersPicker({
         <button class="primary-button picker-submit" type="submit" disabled={creating}>
           {creating
             ? "正在创建…"
-            : mode === "local"
-              ? `开始 ${playerCount} 人本机游戏`
-              : `创建 ${playerCount} 人联机房间`}
+            : `创建 ${playerCount} 人联机房间`}
         </button>
       </form>
     </dialog>
@@ -841,8 +790,6 @@ function LandingPage({
   const [chaseDifficulty, setChaseDifficulty] =
     useState<ChaseDifficulty>("easy");
   const [checkersPickerOpen, setCheckersPickerOpen] = useState(false);
-  const [checkersMode, setCheckersMode] =
-    useState<ChineseCheckersLaunchMode>("local");
   const [checkersPlayerCount, setCheckersPlayerCount] =
     useState<ChineseCheckersPlayerCount>(2);
   const minesweeperTriggerRef = useRef<HTMLButtonElement>(null);
@@ -907,14 +854,7 @@ function LandingPage({
   };
 
   const startChineseCheckers = () => {
-    const launch = resolveChineseCheckersLaunch(
-      checkersMode,
-      checkersPlayerCount,
-    );
-    if (launch.kind === "navigate") {
-      location.assign(launch.href);
-      return;
-    }
+    const launch = resolveChineseCheckersLaunch(checkersPlayerCount);
     void createRoom(launch.gameType, launch.ruleSetId);
   };
 
@@ -1054,14 +994,9 @@ function LandingPage({
       )}
       {checkersPickerOpen && (
         <ChineseCheckersPicker
-          mode={checkersMode}
           playerCount={checkersPlayerCount}
           creating={creating !== null}
           error={error}
-          onModeChange={(mode) => {
-            setCheckersMode(mode);
-            setError(null);
-          }}
           onPlayerCountChange={(playerCount) => {
             setCheckersPlayerCount(playerCount);
             setError(null);

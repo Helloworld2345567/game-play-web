@@ -2,6 +2,7 @@ import {
   expect,
   test,
   type BrowserContext,
+  type Locator,
   type Page,
 } from "@playwright/test";
 
@@ -23,6 +24,59 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
           document.documentElement.clientWidth,
     ),
   ).toBe(false);
+}
+
+async function locatorCenter(locator: Locator) {
+  const bounds = await locator.boundingBox();
+  if (bounds === null) throw new Error("Chinese Checkers hole is not visible");
+  return {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  };
+}
+
+function distance(
+  left: { readonly x: number; readonly y: number },
+  right: { readonly x: number; readonly y: number },
+): number {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
+async function expectRegularStarBoard(page: Page): Promise<void> {
+  const board = page.getByRole("grid", { name: "跳棋棋盘，121 个棋位" });
+  const boardBounds = await board.boundingBox();
+  if (boardBounds === null) throw new Error("Chinese Checkers board is hidden");
+  expect(boardBounds.width / boardBounds.height).toBeCloseTo(
+    Math.sqrt(3) / 2,
+    2,
+  );
+
+  const starClipPath = await page.locator(".checkers-board-star").evaluate(
+    (element) => getComputedStyle(element).clipPath,
+  );
+  expect(starClipPath).toMatch(/^polygon\(/u);
+  expect(starClipPath.slice(8, -1).split(",")).toHaveLength(12);
+  await expect(page.locator(".checkers-board-edges line")).toHaveCount(312);
+
+  const hole = (coordinates: string) =>
+    page.locator(`[data-hole="${coordinates}"]`);
+  const center = await locatorCenter(hole("0,0"));
+  const tips = await Promise.all(
+    ["0,-8", "12,-4", "12,4", "0,8", "-12,4", "-12,-4"].map(
+      (coordinates) => locatorCenter(hole(coordinates)),
+    ),
+  );
+  const radii = tips.map((tip) => distance(center, tip));
+  expect(Math.max(...radii) - Math.min(...radii)).toBeLessThan(1);
+
+  const horizontalNeighbor = await locatorCenter(hole("2,0"));
+  const diagonalNeighbor = await locatorCenter(hole("1,1"));
+  expect(
+    Math.abs(
+      distance(center, horizontalNeighbor) -
+        distance(center, diagonalNeighbor),
+    ),
+  ).toBeLessThan(1);
 }
 
 test.describe("Chinese Checkers multiplayer rooms", () => {
@@ -47,10 +101,9 @@ test.describe("Chinese Checkers multiplayer rooms", () => {
         await creator.goto("/");
         await setDisplayName(creator, `跳棋${playerCount}甲`);
         await creator.getByRole("button", {
-          name: "跳棋，选择本机或联机玩法与人数",
+          name: "跳棋，选择联机人数",
         }).click();
         const picker = creator.getByRole("dialog", { name: "跳棋" });
-        await picker.getByText("邀请联机", { exact: true }).click();
         await picker.getByText(`${playerCount} 人`, { exact: true }).click();
         await picker.getByRole("button", {
           name: `创建 ${playerCount} 人联机房间`,
@@ -80,6 +133,7 @@ test.describe("Chinese Checkers multiplayer rooms", () => {
         await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
           "轮到你 · 第 1 回合",
         );
+        if (playerCount === 2) await expectRegularStarBoard(creator);
         for (let index = 1; index < playerCount; index += 1) {
           await expect(pages[index]!.locator("[data-hole]")).toHaveCount(121);
           await expect(pages[index]!.getByRole("heading", { level: 1 })).toHaveText(
