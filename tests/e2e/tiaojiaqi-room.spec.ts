@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
   const input = page.getByLabel("你的昵称");
@@ -80,6 +81,9 @@ test("two players open a five-piece Tiaojiaqi room while a spectator follows", a
       expectNoHorizontalOverflow(spectator),
     ]);
   } finally {
+    await leaveRoomIfPresent(spectator);
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await spectatorContext.close();
     await inviteeContext.close();
     await creatorContext.close();

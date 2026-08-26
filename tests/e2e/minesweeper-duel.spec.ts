@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { leaveRoom, leaveRoomIfPresent } from "./room-cleanup";
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
   const input = page.getByLabel("你的昵称");
@@ -39,25 +40,6 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
         document.documentElement.clientWidth,
     ),
   ).toBe(false);
-}
-
-async function explicitExit(page: Page): Promise<void> {
-  if (page.isClosed() || !/\/r\//u.test(page.url())) return;
-  const exit = page.getByRole("button", { name: "退出房间" });
-  if (
-    (await exit.count()) === 0 ||
-    !(await exit.isVisible({ timeout: 2_000 }).catch(() => false))
-  ) {
-    return;
-  }
-
-  const dialogPromise = page.waitForEvent("dialog", { timeout: 2_000 });
-  const clickPromise = exit.click({ timeout: 2_000 });
-  const dialog = await dialogPromise;
-  expect(dialog.type()).toBe("confirm");
-  await dialog.accept();
-  await clickPromise;
-  await expect(page).toHaveURL("/", { timeout: 5_000 });
 }
 
 test("two players race on identical independent minefields, then rematch", async ({
@@ -325,13 +307,13 @@ test("two players race on identical independent minefields, then rematch", async
       invitee.locator('.minesweeper-cell[data-state="hidden"]'),
     ).toHaveCount(81);
 
-    await explicitExit(creator);
-    await explicitExit(invitee);
+    await leaveRoom(creator);
+    await leaveRoom(invitee);
   } finally {
     if (deliverCreatorSnapshot !== null) releaseCreatorSnapshots();
     else holdCreatorSnapshots = false;
-    await explicitExit(creator).catch(() => undefined);
-    await explicitExit(invitee).catch(() => undefined);
+    await leaveRoomIfPresent(creator);
+    await leaveRoomIfPresent(invitee);
     await inviteeContext.close();
     await creatorContext.close();
   }

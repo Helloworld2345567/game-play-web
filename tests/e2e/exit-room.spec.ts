@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
   const input = page.getByLabel("你的昵称");
@@ -93,6 +94,9 @@ test("canceling Exit keeps the room, while both explicit exits retire it", async
     await expect(verifier.getByText("房间不存在或已经过期。", { exact: true }))
       .toBeVisible();
   } finally {
+    await leaveRoomIfPresent(verifier);
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await verifierContext.close();
     await inviteeContext.close();
     await creatorContext.close();
@@ -125,6 +129,7 @@ test("Exit returns home locally even while the browser is offline", async ({
     );
   } finally {
     await context.setOffline(false);
+    await leaveRoomIfPresent(page);
     await context.close();
   }
 });

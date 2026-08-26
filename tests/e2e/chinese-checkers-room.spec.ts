@@ -5,6 +5,7 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
   const input = page.getByLabel("你的昵称");
@@ -174,6 +175,9 @@ test.describe("Chinese Checkers multiplayer rooms", () => {
 
         await Promise.all(pages.map(expectNoHorizontalOverflow));
       } finally {
+        for (const page of [...pages].reverse()) {
+          await leaveRoomIfPresent(page);
+        }
         await Promise.all(contexts.reverse().map((context) => context.close()));
       }
     });

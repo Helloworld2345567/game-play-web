@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 async function placeStone(page: Page, x: number, y: number): Promise<void> {
   const board = page.locator("canvas");
@@ -152,6 +153,9 @@ test("two Guests recover, finish a Game, and swap first move in a rematch", asyn
       "正在观战",
     );
   } finally {
+    await leaveRoomIfPresent(third);
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     if (thirdContext.pages().length > 0) await thirdContext.close();
     await inviteeContext.close();
     await creatorContext.close();

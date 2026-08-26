@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
   const input = page.getByLabel("你的昵称");
@@ -126,6 +127,9 @@ test("two Guests play tic-tac-toe while a spectator watches, then swap X", async
     await expect(cell(creator, 0, 0)).toHaveAttribute("data-state", "x");
     await expect(spectator.getByText(/第 2 局/u)).toBeVisible();
   } finally {
+    await leaveRoomIfPresent(spectator);
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await spectatorContext.close();
     await inviteeContext.close();
     await creatorContext.close();

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 async function setDisplayName(page: Page, displayName: string): Promise<void> {
   const input = page.getByLabel("你的昵称");
@@ -186,6 +187,8 @@ test("two players capture, switch chase difficulty, then swap roles in a rematch
     await expect(node(invitee, "V1")).toBeEnabled();
     await expect(node(creator, "V1")).toBeDisabled();
   } finally {
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await inviteeContext.close();
     await creatorContext.close();
   }

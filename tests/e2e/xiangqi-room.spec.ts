@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { leaveRoomIfPresent } from "./room-cleanup";
 
 type Point = { x: number; y: number };
 
@@ -149,6 +150,9 @@ test("two Guests recover, finish, and rematch a Chinese chess room", async ({ br
     await expect(invitee.getByText(/第 2 局/u)).toBeVisible();
     await expect(third.getByText(/第 2 局/u)).toBeVisible();
   } finally {
+    await leaveRoomIfPresent(third);
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await thirdContext.close();
     await inviteeContext.close();
     await creatorContext.close();

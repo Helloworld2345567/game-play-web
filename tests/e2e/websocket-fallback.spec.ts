@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { leaveRoom, leaveRoomIfPresent } from "./room-cleanup";
 
 async function blockWebSockets(page: Page): Promise<() => number> {
   let attempts = 0;
@@ -25,15 +26,6 @@ async function placeStone(page: Page, x: number, y: number): Promise<void> {
       y: padding + y * step,
     },
   });
-}
-
-async function exitRoom(page: Page): Promise<void> {
-  const dialogPromise = page.waitForEvent("dialog");
-  const clickPromise = page.getByRole("button", { name: "退出房间" }).click();
-  const dialog = await dialogPromise;
-  await dialog.accept();
-  await clickPromise;
-  await expect(page).toHaveURL("/");
 }
 
 test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
@@ -125,6 +117,9 @@ test("falls back to HTTP when the network blocks WebSocket upgrades", async ({
     expect(inviteeWebSocketAttempts()).toBe(1);
     expect(spectatorWebSocketAttempts()).toBe(1);
   } finally {
+    await leaveRoomIfPresent(spectator);
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await spectatorContext.close();
     await inviteeContext.close();
     await creatorContext.close();
@@ -158,8 +153,8 @@ test("retires a fallback Room after both HTTP clients explicitly leave", async (
       "兼容连接",
     );
 
-    await exitRoom(creator);
-    await exitRoom(invitee);
+    await leaveRoom(creator);
+    await leaveRoom(invitee);
 
     await creator.goto(inviteUrl);
     await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
@@ -169,6 +164,8 @@ test("retires a fallback Room after both HTTP clients explicitly leave", async (
       creator.getByText("房间不存在或已经过期。", { exact: true }),
     ).toBeVisible();
   } finally {
+    await leaveRoomIfPresent(invitee);
+    await leaveRoomIfPresent(creator);
     await inviteeContext.close();
     await creatorContext.close();
   }
@@ -196,13 +193,14 @@ test("reuses one HTTP presence across reload before an explicit leave", async ({
     await expect(page.locator(".connection-pill")).toContainText(
       "兼容连接",
     );
-    await exitRoom(page);
+    await leaveRoom(page);
 
     await page.goto(inviteUrl);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
       "没能进入这个房间",
     );
   } finally {
+    await leaveRoomIfPresent(page);
     await context.close();
   }
 });
@@ -233,6 +231,7 @@ test("retries when an HTTPS compatibility request is accepted but stalls", async
     });
     expect(syncAttempts).toBeGreaterThanOrEqual(2);
   } finally {
+    await leaveRoomIfPresent(page);
     await context.close();
   }
 });
