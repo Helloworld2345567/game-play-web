@@ -131,6 +131,16 @@ export const LANDING_GAME_CATALOG = [
   ...LANDING_LOCAL_ENTRIES,
 ] as const;
 
+/** External destinations that are presented separately from the game catalog. */
+export const OTHER_SERVICE_LINKS = [
+  {
+    id: "image",
+    label: "图片服务",
+    href: "https://image.ym0v0.com/",
+    description: "image.ym0v0.com",
+  },
+] as const;
+
 export type MinesweeperLaunchMode = "solo" | "race";
 export type MinesweeperPreset = MinefieldPresetId;
 
@@ -954,6 +964,27 @@ function LandingPage({
             </button>
           ))}
         </div>
+        <section class="other-services" aria-labelledby="other-services-title">
+          <h2 class="eyebrow" id="other-services-title">其他服务</h2>
+          <div class="other-service-grid">
+            {OTHER_SERVICE_LINKS.map((service) => (
+              <a
+                class="secondary-button game-choice service-link"
+                key={service.id}
+                href={service.href}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`${service.label}（${service.description}），在新标签页打开`}
+              >
+                <span class="game-choice-heading">
+                  <strong>{service.label}</strong>
+                  <span class="game-choice-chevron" aria-hidden="true">↗</span>
+                </span>
+                <small>{service.description}</small>
+              </a>
+            ))}
+          </div>
+        </section>
         {error &&
           !minesweeperPickerOpen &&
           !chasePickerOpen &&

@@ -344,6 +344,24 @@ button:disabled {
   opacity: 0.72;
 }
 
+.other-services {
+  max-width: 680px;
+  margin-top: 42px;
+}
+
+.other-services .eyebrow {
+  margin-bottom: 12px;
+}
+
+.other-service-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.service-link {
+  text-decoration: none;
+}
+
 .inline-error {
   color: #f0a39c;
 }

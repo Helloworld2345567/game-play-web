@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LANDING_GAME_CATALOG,
+  OTHER_SERVICE_LINKS,
   localGameIdFromPath,
   resolveChaseLaunch,
   resolveChineseCheckersLaunch,
@@ -167,6 +168,19 @@ describe("landing game catalog", () => {
         ruleSetId: "chase.medium.v1",
         label: "中等",
         description: "中型闭环 · 上限25轮",
+      },
+    ]);
+  });
+});
+
+describe("other service links", () => {
+  it("keeps external services separate from game launches", () => {
+    expect(OTHER_SERVICE_LINKS).toEqual([
+      {
+        id: "image",
+        label: "图片服务",
+        href: "https://image.ym0v0.com/",
+        description: "image.ym0v0.com",
       },
     ]);
   });
