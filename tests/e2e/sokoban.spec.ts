@@ -44,6 +44,7 @@ test("opens Sokoban, switches levels, undoes a move, and stays within mobile wid
   await expect(firstBoard).toHaveAttribute("aria-colcount", "6");
   await expect(firstBoard.getByRole("row")).toHaveCount(7);
   await expect(firstBoard.getByRole("gridcell")).toHaveCount(42);
+  await expect(firstBoard).toHaveAttribute("data-progress-ready", "true");
 
   await firstBoard.focus();
   await page.keyboard.press("ArrowRight");

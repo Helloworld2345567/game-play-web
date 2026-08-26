@@ -245,6 +245,7 @@ export function SoloPage({
   const progressSyncing = useRef(false);
   const progressSyncRequested = useRef(false);
   const progressRetryTimer = useRef<number | null>(null);
+  const progressLoadEpoch = useRef(0);
   const reloadProgressRef = useRef<(() => void) | null>(null);
   const scheduleProgressRetryRef = useRef<(() => void) | null>(null);
   const mounted = useRef(true);
@@ -337,6 +338,8 @@ export function SoloPage({
                 window.clearTimeout(progressRetryTimer.current);
                 progressRetryTimer.current = null;
               }
+              progressSyncId.current = null;
+              progressLoadEpoch.current += 1;
               progressIdentityReadyRef.current = false;
               if (mounted.current) {
                 setProgressIdentityReady(false);
@@ -389,6 +392,7 @@ export function SoloPage({
     let reloadRequested = false;
     progressSyncId.current = null;
     progressIdentityReadyRef.current = false;
+    progressLoadEpoch.current += 1;
     setProgressIdentityReady(false);
     setCompletedLevelIds(new Set());
     setBestMovesByLevel(new Map());
@@ -413,6 +417,9 @@ export function SoloPage({
     }
 
     function loadProgress(): void {
+      if (controller.signal.aborted) return;
+      const requestEpoch = progressLoadEpoch.current + 1;
+      progressLoadEpoch.current = requestEpoch;
       if (loadInFlight) {
         reloadRequested = true;
         if (mounted.current) setProgressStatus("loading");
@@ -422,11 +429,17 @@ export function SoloPage({
       if (mounted.current) setProgressStatus("loading");
       void loadSokobanProgress(displayName, controller.signal).then(
         (snapshot) => {
-          if (controller.signal.aborted) return;
+          if (
+            controller.signal.aborted ||
+            requestEpoch !== progressLoadEpoch.current
+          ) return;
           if (progressRetryTimer.current !== null) {
             window.clearTimeout(progressRetryTimer.current);
             progressRetryTimer.current = null;
           }
+          const previousSyncId = progressSyncId.current;
+          const identityChanged =
+            previousSyncId !== null && previousSyncId !== snapshot.syncId;
           progressSyncId.current = snapshot.syncId;
           const allCurrentPagePending = [
             ...volatilePendingCompletions.current.values(),
@@ -451,22 +464,20 @@ export function SoloPage({
             ...pendingIds,
             ...currentPagePending.map((completion) => completion.levelId),
           ]);
-          setCompletedLevelIds(
-            new Set(
-              SOKOBAN_LEVELS
-                .map((level) => level.id)
-                .filter((levelId) => completed.has(levelId)),
-            ),
+          const incomingBestMoves = [
+            ...snapshot.records,
+            ...pendingRecords(storedPending),
+            ...pendingRecords(currentPagePending),
+          ];
+          setCompletedLevelIds((current) =>
+            identityChanged
+              ? mergeSokobanCompletedLevels(new Set(), [...completed])
+              : mergeSokobanCompletedLevels(current, [...completed])
           );
-          setBestMovesByLevel(
-            mergeSokobanBestMoves(
-              new Map(),
-              [
-                ...snapshot.records,
-                ...pendingRecords(storedPending),
-                ...pendingRecords(currentPagePending),
-              ],
-            ),
+          setBestMovesByLevel((current) =>
+            identityChanged
+              ? mergeSokobanBestMoves(new Map(), incomingBestMoves)
+              : mergeSokobanBestMoves(current, incomingBestMoves)
           );
           progressIdentityReadyRef.current = true;
           if (mounted.current) {
@@ -476,7 +487,11 @@ export function SoloPage({
           void flushPendingCompletions();
         },
         () => {
-          if (!controller.signal.aborted && mounted.current) {
+          if (
+            !controller.signal.aborted &&
+            requestEpoch === progressLoadEpoch.current &&
+            mounted.current
+          ) {
             setProgressStatus("offline");
             scheduleRetry();
           }
