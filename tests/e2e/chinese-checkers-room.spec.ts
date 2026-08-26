@@ -118,6 +118,17 @@ test.describe("Chinese Checkers multiplayer rooms", () => {
             pages[index]!,
             `跳棋${playerCount}${String.fromCharCode(0x7532 + index)}`,
           );
+          // Do not admit the next Guest until this page has received the
+          // authoritative snapshot for its ordered seat. Merely saving the
+          // nickname can finish before the room transport's first sync; on a
+          // slow runner that lets later Guests race ahead and swaps pages[1]
+          // away from seat-b.
+          const expectedSeat = `seat-${String.fromCharCode(96 + index + 1)}`;
+          await expect(
+            pages[index]!.locator(
+              `[data-seat="${expectedSeat}"].is-self`,
+            ),
+          ).toHaveCount(1);
           if (index + 1 < playerCount) {
             await expect(creator.locator("[data-hole]")).toHaveCount(0);
             await expect(creator.getByRole("heading", { level: 1 })).toHaveText(
