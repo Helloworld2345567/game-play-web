@@ -29,6 +29,10 @@
       {
         "name": "SNAKE_LEADERBOARD",
         "class_name": "SnakeLeaderboard"
+      },
+      {
+        "name": "SOKOBAN_PROGRESS",
+        "class_name": "SokobanProgress"
       }
     ]
   },
@@ -50,6 +54,10 @@
       "storage": "sqlite"
     },
     "SnakeLeaderboard": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "SokobanProgress": {
       "type": "durable-object",
       "storage": "sqlite"
     }

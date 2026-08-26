@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createSignedGuestSessionValue,
   createSignedSessionValue,
+  createSokobanProgressSyncId,
   ensureGuestSession,
   readGuestSession,
   verifySignedGuestSessionValue,
@@ -67,5 +68,33 @@ describe("anonymous session", () => {
         secret,
       ),
     ).resolves.toEqual({ guestId: "guest-123", displayName: "新昵称" });
+  });
+
+  it("renews a secure Guest identity for the browser's maximum long-lived window", async () => {
+    const session = await ensureGuestSession(
+      new Request("https://play.example/api/session"),
+      "test-secret-with-enough-entropy",
+      "棋友甲",
+      "guest-123",
+    );
+
+    expect(session.setCookie).toContain("Max-Age=34560000");
+    expect(session.setCookie).toContain("Path=/");
+    expect(session.setCookie).toContain("Secure");
+    expect(session.setCookie).toContain("HttpOnly");
+    expect(session.setCookie).toContain("SameSite=Lax");
+    expect(session.setCookie).not.toContain("Domain=");
+  });
+
+  it("derives a stable purpose-bound pseudonym without exposing the Guest ID", async () => {
+    const secret = "test-secret-with-enough-entropy";
+    const first = await createSokobanProgressSyncId("guest-123", secret);
+    const repeat = await createSokobanProgressSyncId("guest-123", secret);
+    const other = await createSokobanProgressSyncId("guest-124", secret);
+
+    expect(first).toBe(repeat);
+    expect(first).not.toBe(other);
+    expect(first).toMatch(/^v1\.[A-Za-z0-9_-]{43}$/u);
+    expect(first).not.toContain("guest-123");
   });
 });

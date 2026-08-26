@@ -12,10 +12,20 @@ import {
   SNAKE_LEADERBOARD_NAME,
   SnakeLeaderboard,
 } from "./game-snake-leaderboard";
+import {
+  getSokobanProgressShardName,
+  SokobanProgress,
+} from "./sokoban-progress";
+import { SOKOBAN_LEVELS } from "./games/sokoban/levels";
 import { ROOM_DIRECTORY_NAME, RoomDirectory } from "./room-directory";
 import { isCreatableRuleSet } from "./games/registry";
 import { normalizeDisplayName } from "./shared/display-name";
 import { MINESWEEPER_SOLO_RULE_VERSION } from "./shared/minesweeper-leaderboard";
+import {
+  SOKOBAN_MAX_MOVES,
+  SOKOBAN_PROGRESS_RULE_VERSION,
+  isSokobanProgressSyncId,
+} from "./shared/sokoban-progress";
 import {
   isGame2048RuleVersion,
   type Game2048RuleVersion,
@@ -26,6 +36,7 @@ import {
   type SnakeRuleVersion,
 } from "./shared/game-snake-rules";
 import {
+  createSokobanProgressSyncId,
   ensureGuestSession,
   readGuestSession,
   type GuestSession,
@@ -47,6 +58,7 @@ export {
   MinesweeperLeaderboard,
   RoomDirectory,
   SnakeLeaderboard,
+  SokobanProgress,
 };
 
 export interface WorkerEnv extends GameRoomEnv {
@@ -54,6 +66,7 @@ export interface WorkerEnv extends GameRoomEnv {
   MINESWEEPER_LEADERBOARD: DurableObjectNamespace<MinesweeperLeaderboard>;
   GAME_2048_LEADERBOARD: DurableObjectNamespace<Game2048Leaderboard>;
   SNAKE_LEADERBOARD: DurableObjectNamespace<SnakeLeaderboard>;
+  SOKOBAN_PROGRESS: DurableObjectNamespace<SokobanProgress>;
   SESSION_SECRET: string;
 }
 
@@ -155,6 +168,18 @@ function unauthenticatedRateLimitFor(
   if (pathname === "/api/snake/leaderboard/record") {
     return {
       scope: "leaderboard:snake:record",
+      config: LEADERBOARD_RECORD_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/sokoban/progress") {
+    return {
+      scope: "sokoban:progress:query",
+      config: LEADERBOARD_QUERY_RATE_LIMIT,
+    };
+  }
+  if (pathname === "/api/sokoban/progress/record") {
+    return {
+      scope: "sokoban:progress:record",
       config: LEADERBOARD_RECORD_RATE_LIMIT,
     };
   }
@@ -442,6 +467,63 @@ async function readSnakeLeaderboardCommand(
   };
 }
 
+function isSokobanLevelId(value: unknown): value is string {
+  return typeof value === "string" && SOKOBAN_LEVELS.some((level) => level.id === value);
+}
+
+async function readSokobanProgressCommand(
+  request: Request,
+  includeRecord: boolean,
+): Promise<
+  | {
+    ok: true;
+    ruleVersion: typeof SOKOBAN_PROGRESS_RULE_VERSION;
+    levelId?: string;
+    moves?: number;
+    pushes?: number;
+    syncId?: string;
+  }
+  | { ok: false; failure: JsonBodyFailure }
+> {
+  const result = await readSmallJson(request);
+  if (isJsonResultFailure(result)) return result;
+  const value = result.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  const body = value as Record<string, unknown>;
+  if (body.ruleVersion !== SOKOBAN_PROGRESS_RULE_VERSION) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  if (!includeRecord) {
+    return { ok: true, ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION };
+  }
+  const levelId = body.levelId;
+  const moves = body.moves;
+  const pushes = body.pushes;
+  const syncId = body.syncId;
+  if (
+    !isSokobanLevelId(levelId) ||
+    !Number.isSafeInteger(moves) ||
+    (moves as number) < 1 ||
+    (moves as number) > SOKOBAN_MAX_MOVES ||
+    !Number.isSafeInteger(pushes) ||
+    (pushes as number) < 0 ||
+    (pushes as number) > (moves as number) ||
+    !isSokobanProgressSyncId(syncId)
+  ) {
+    return { ok: false, failure: { kind: "invalid_json" } };
+  }
+  return {
+    ok: true,
+    ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+    levelId,
+    moves: moves as number,
+    pushes: pushes as number,
+    syncId,
+  };
+}
+
 function minesweeperLeaderboard(
   env: WorkerEnv,
 ): DurableObjectStub<MinesweeperLeaderboard> {
@@ -465,6 +547,16 @@ function snakeLeaderboard(
 ): DurableObjectStub<SnakeLeaderboard> {
   return env.SNAKE_LEADERBOARD.getByName(
     SNAKE_LEADERBOARD_NAME,
+    { locationHint: "apac" },
+  );
+}
+
+function sokobanProgress(
+  env: WorkerEnv,
+  guestId: string,
+): DurableObjectStub<SokobanProgress> {
+  return env.SOKOBAN_PROGRESS.getByName(
+    getSokobanProgressShardName(guestId),
     { locationHint: "apac" },
   );
 }
@@ -756,6 +848,82 @@ export default {
         }
       }
       return json({ error: "session.required" }, { status: 401 });
+    }
+    if (
+      url.pathname === "/api/sokoban/progress" &&
+      request.method === "POST"
+    ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "sokoban:progress:query",
+        guest.guestId,
+        LEADERBOARD_QUERY_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("sokoban.progress.rate_limited", rateLimit);
+      }
+      const command = await readSokobanProgressCommand(request, false);
+      if (!command.ok) {
+        return jsonBodyFailureResponse(
+          command.failure,
+          "sokoban.progress.invalid_request",
+        );
+      }
+      const snapshot = await sokobanProgress(env, guest.guestId).snapshot(
+        command.ruleVersion,
+        guest.guestId,
+      );
+      return json({
+        ...snapshot,
+        syncId: await createSokobanProgressSyncId(
+          guest.guestId,
+          env.SESSION_SECRET,
+        ),
+      });
+    }
+    if (
+      url.pathname === "/api/sokoban/progress/record" &&
+      request.method === "POST"
+    ) {
+      const rateLimit = checkSoftRateLimit(
+        request,
+        "sokoban:progress:record",
+        guest.guestId,
+        LEADERBOARD_RECORD_RATE_LIMIT,
+      );
+      if (!rateLimit.allowed) {
+        return rateLimitResponse("sokoban.progress.rate_limited", rateLimit);
+      }
+      const command = await readSokobanProgressCommand(request, true);
+      if (
+        !command.ok ||
+        command.levelId === undefined ||
+        command.moves === undefined ||
+        command.pushes === undefined ||
+        command.syncId === undefined
+      ) {
+        return !command.ok
+          ? jsonBodyFailureResponse(
+            command.failure,
+            "sokoban.progress.invalid_request",
+          )
+          : json({ error: "sokoban.progress.invalid_request" }, { status: 400 });
+      }
+      const expectedSyncId = await createSokobanProgressSyncId(
+        guest.guestId,
+        env.SESSION_SECRET,
+      );
+      if (command.syncId !== expectedSyncId) {
+        return json({ error: "sokoban.progress.session_changed" }, { status: 409 });
+      }
+      const snapshot = await sokobanProgress(env, guest.guestId).recordLevel(
+        command.ruleVersion,
+        guest.guestId,
+        command.levelId,
+        command.moves,
+        command.pushes,
+      );
+      return json({ ...snapshot, syncId: expectedSyncId });
     }
     if (
       url.pathname === "/api/snake/leaderboard" &&

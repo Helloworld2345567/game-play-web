@@ -18,7 +18,7 @@ describe("Sokoban engine", () => {
   it("creates the first credited Microban level", () => {
     const state = createSokoban(0);
 
-    expect(SOKOBAN_LEVELS).toHaveLength(10);
+    expect(SOKOBAN_LEVELS).toHaveLength(20);
     expect(state.levelId).toBe("microban-001");
     expect(state.level.source).toBe(SOKOBAN_LEVEL_SOURCE);
     expect(state.moves).toBe(0);
@@ -45,7 +45,7 @@ describe("Sokoban engine", () => {
     expect(SOKOBAN_LEVELS[9]?.layout.split("\n")[0]).toBe("      #####");
   });
 
-  it("preserves the dimensions and crate counts of Microban 1–10", () => {
+  it("preserves the dimensions and crate counts of Microban 1–20", () => {
     expect(
       SOKOBAN_LEVELS.map((definition) => {
         const level = parseSokobanLevel(definition);
@@ -62,6 +62,16 @@ describe("Sokoban engine", () => {
       [8, 12, 2],
       [6, 7, 2],
       [11, 8, 3],
+      [9, 8, 2],
+      [9, 8, 2],
+      [7, 9, 3],
+      [7, 6, 2],
+      [9, 7, 2],
+      [10, 8, 3],
+      [6, 7, 3],
+      [7, 9, 2],
+      [8, 8, 2],
+      [9, 8, 2],
     ]);
   });
 
@@ -172,7 +182,7 @@ describe("Sokoban engine", () => {
 
   it("rejects invalid level selections and hydrated states", () => {
     expect(() => createSokoban(-1)).toThrowError(RangeError);
-    expect(() => createSokoban(10)).toThrowError(RangeError);
+    expect(() => createSokoban(20)).toThrowError(RangeError);
     const valid = createSokoban(0);
     const invalid = {
       ...valid,

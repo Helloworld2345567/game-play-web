@@ -38,6 +38,7 @@ describe("browser Guest session", () => {
     const roomSession = ensureBrowserSession("棋友0001");
 
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0]?.[1]?.keepalive).toBe(true);
     finishRequest?.(Response.json({ ok: true }));
     await Promise.all([presenceSession, roomSession]);
   });

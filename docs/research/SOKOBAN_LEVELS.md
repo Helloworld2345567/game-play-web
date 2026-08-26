@@ -1,10 +1,10 @@
-# Sokoban level survey: Microban 1–10
+# Sokoban level survey: Microban 1–20
 
 Research date: 2026-08-25
 
 ## Selected source
 
-The first release uses levels 1–10 from **Microban**, a 155-puzzle set by
+The release uses levels 1–20 from **Microban**, a 155-puzzle set by
 David W. Skinner (revised April 2000). The layouts were copied from the
 following GitHub snapshot rather than fetched at runtime:
 
@@ -21,16 +21,17 @@ source URL. The layouts are not relicensed as part of this project's code.
 
 ## Verification
 
-The ten XSB strings were independently compared with
+The twenty XSB strings were independently compared with
 [`rkirov/sokoban-ai/levels/microban1.txt`](https://github.com/rkirov/sokoban-ai/blob/main/levels/microban1.txt).
-After normalizing only line endings, levels 1–10 matched byte for byte.
+After normalizing only line endings, levels 1–20 matched byte for byte.
 
 Each selected board contains exactly one player and the same number of boxes
-and targets. Box/target counts by level are `2, 3, 2, 3, 4, 3, 6, 2, 2, 3`.
+and targets. Box/target counts by level are
+`2, 3, 2, 3, 4, 3, 6, 2, 2, 3, 2, 2, 3, 2, 2, 3, 3, 2, 2, 2`.
 Leading spaces and ragged rows are meaningful XSB void cells and must not be
 trimmed into walkable floor.
 
-## Why these ten
+## Why these twenty
 
 Microban's opening puzzles are compact, recognizable beginner Sokoban boards
 and increase gradually in size. Keeping the catalog in a standalone level-data

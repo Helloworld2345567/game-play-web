@@ -362,6 +362,7 @@ async function postBrowserSession(
         displayName,
         ...(bootstrapId === undefined ? {} : { bootstrapId }),
       }),
+      keepalive: true,
       signal: requestSignal,
     });
     if (!response.ok) throw new Error("session_failed");

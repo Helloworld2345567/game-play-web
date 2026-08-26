@@ -1,5 +1,5 @@
 /**
- * The first ten puzzles from the Microban level set.
+ * The first twenty puzzles from the Microban level set.
  *
  * The layouts are XSB notation.  The parser and game engine are original
  * code; only the puzzle layouts are reproduced here.  Microban was created
@@ -159,6 +159,134 @@ export const SOKOBAN_LEVELS: readonly SokobanLevelDefinition[] = Object.freeze([
 # # # # ###
 #       #
 #########`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-011",
+    name: "Microban 11",
+    layout: `  ######
+  #    #
+  # ##@##
+### # $ #
+# ..# $ #
+#       #
+#  ######
+####`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-012",
+    name: "Microban 12",
+    layout: `#####
+#   ##
+# $  #
+## $ ####
+ ###@.  #
+  #  .# #
+  #     #
+  #######`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-013",
+    name: "Microban 13",
+    layout: `####
+#. ##
+#.@ #
+#. $#
+##$ ###
+ # $  #
+ #    #
+ #  ###
+ ####`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-014",
+    name: "Microban 14",
+    layout: `#######
+#     #
+# # # #
+#. $*@#
+#   ###
+#####`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-015",
+    name: "Microban 15",
+    layout: `     ###
+######@##
+#    .* #
+#   #   #
+#####$# #
+    #   #
+    #####`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-016",
+    name: "Microban 16",
+    layout: ` ####
+ #  ####
+ #     ##
+## ##   #
+#. .# @$##
+#   # $$ #
+#  .#    #
+##########`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-017",
+    name: "Microban 17",
+    layout: `#####
+# @ #
+#...#
+#$$$##
+#    #
+#    #
+######`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-018",
+    name: "Microban 18",
+    layout: `#######
+#     #
+#. .  #
+# ## ##
+#  $ #
+###$ #
+  #@ #
+  #  #
+  ####`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-019",
+    name: "Microban 19",
+    layout: `########
+#   .. #
+#  @$$ #
+##### ##
+   #  #
+   #  #
+   #  #
+   ####`,
+    source: SOKOBAN_LEVEL_SOURCE,
+  },
+  {
+    id: "microban-020",
+    name: "Microban 20",
+    layout: `#######
+#     ###
+#  @$$..#
+#### ## #
+  #     #
+  #  ####
+  #  #
+  ####`,
     source: SOKOBAN_LEVEL_SOURCE,
   },
 ] as const);

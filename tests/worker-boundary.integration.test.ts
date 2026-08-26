@@ -13,6 +13,7 @@ import {
 import { MINESWEEPER_SOLO_RULE_VERSION } from "../src/shared/minesweeper-leaderboard";
 import { GAME_2048_RULE_VERSION_BY_SIZE } from "../src/shared/game-2048-rules";
 import { GAME_2048_SOLO_RULE_VERSION } from "../src/shared/game-2048-leaderboard";
+import { SOKOBAN_PROGRESS_RULE_VERSION } from "../src/shared/sokoban-progress";
 
 const SNAKE_SOLO_RULE_VERSION = "snake.solo.20x20.v1";
 
@@ -880,12 +881,32 @@ describe("Worker request boundary", () => {
       ruleVersion: SNAKE_SOLO_RULE_VERSION,
       score: 12,
     })],
+    ["/api/sokoban/progress", 30, () => ({
+      ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+    })],
+    ["/api/sokoban/progress/record", 10, () => ({
+      ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+      levelId: "microban-001",
+      moves: 2,
+      pushes: 1,
+    })],
   ] as const)("soft-limits %s and returns Retry-After", async (path, capacity, makeBody) => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
       apiRequest(origin, "/api/session", { method: "POST" }),
     );
     const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    let sokobanSyncId: string | undefined;
+    if (path === "/api/sokoban/progress/record") {
+      const progressResponse = await app.default.fetch(
+        apiRequest(origin, "/api/sokoban/progress", {
+          method: "POST",
+          headers: { Cookie: cookie!, "Content-Type": "application/json" },
+          body: JSON.stringify({ ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION }),
+        }),
+      );
+      sokobanSyncId = (await progressResponse.json() as { syncId: string }).syncId;
+    }
     // Use an isolated edge identity so this test is independent of the
     // process-wide best-effort bucket state retained by the Worker isolate.
     const clientIp = `test-${crypto.randomUUID()}`;
@@ -903,7 +924,10 @@ describe("Worker request boundary", () => {
                 "Content-Type": "application/json",
                 "CF-Connecting-IP": clientIp,
               },
-              body: JSON.stringify(makeBody(index)),
+              body: JSON.stringify({
+                ...makeBody(index),
+                ...(sokobanSyncId === undefined ? {} : { syncId: sokobanSyncId }),
+              }),
             }),
           ),
         );
@@ -1121,6 +1145,148 @@ describe("Worker request boundary", () => {
     });
   });
 
+  it("records and reads Sokoban progress using only the signed Guest session", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "推箱子昵称" }),
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const initialSnapshot = await app.default.fetch(
+      apiRequest(origin, "/api/sokoban/progress", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION }),
+      }),
+    );
+    const syncId = (await initialSnapshot.json() as { syncId: string }).syncId;
+
+    const recorded = await app.default.fetch(
+      apiRequest(origin, "/api/sokoban/progress/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+          levelId: "microban-003",
+          moves: 14,
+          pushes: 4,
+          guestId: "guest-forged",
+          syncId,
+        }),
+      }),
+    );
+    expect(recorded.status).toBe(200);
+    expect(recorded.headers.get("Cache-Control")).toBe("no-store");
+    await expect(recorded.json()).resolves.toEqual({
+      ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+      completedLevelIds: ["microban-003"],
+      records: [{ levelId: "microban-003", bestMoves: 14 }],
+      syncId,
+    });
+
+    const staleQueue = await app.default.fetch(
+      apiRequest(origin, "/api/sokoban/progress/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+          levelId: "microban-004",
+          moves: 2,
+          pushes: 1,
+          syncId: `v1.${"b".repeat(43)}`,
+        }),
+      }),
+    );
+    expect(staleQueue.status).toBe(409);
+    await expect(staleQueue.json()).resolves.toEqual({
+      error: "sokoban.progress.session_changed",
+    });
+
+    const earlier = await app.default.fetch(
+      apiRequest(origin, "/api/sokoban/progress/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+          levelId: "microban-001",
+          moves: 2,
+          pushes: 1,
+          syncId,
+        }),
+      }),
+    );
+    await expect(earlier.json()).resolves.toEqual({
+      ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+      completedLevelIds: ["microban-001", "microban-003"],
+      records: [
+        { levelId: "microban-001", bestMoves: 2 },
+        { levelId: "microban-003", bestMoves: 14 },
+      ],
+      syncId,
+    });
+
+    await abortAllDurableObjects();
+    const returnVisit = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { Cookie: cookie! },
+      }),
+    );
+    expect(returnVisit.status).toBe(200);
+    await expect(returnVisit.json()).resolves.toEqual({
+      ok: true,
+      displayName: "推箱子昵称",
+    });
+    const renewedCookie = returnVisit.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const snapshot = await app.default.fetch(
+      apiRequest(origin, "/api/sokoban/progress", {
+        method: "POST",
+        headers: {
+          Cookie: renewedCookie!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION }),
+      }),
+    );
+    expect(snapshot.status).toBe(200);
+    const snapshotBody = await snapshot.json();
+    expect(snapshotBody).toEqual({
+      ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+      completedLevelIds: ["microban-001", "microban-003"],
+      records: [
+        { levelId: "microban-001", bestMoves: 2 },
+        { levelId: "microban-003", bestMoves: 14 },
+      ],
+      syncId,
+    });
+    expect(JSON.stringify(snapshotBody)).not.toContain("guest-forged");
+
+    const otherSession = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const otherCookie = otherSession.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const otherSnapshot = await app.default.fetch(
+      apiRequest(origin, "/api/sokoban/progress", {
+        method: "POST",
+        headers: {
+          Cookie: otherCookie!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION }),
+      }),
+    );
+    await expect(otherSnapshot.json()).resolves.toEqual({
+      ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+      completedLevelIds: [],
+      records: [],
+      syncId: expect.any(String),
+    });
+  });
+
   it("keeps the 4×4, 5×5, and 6×6 score endpoints in separate rankings", async () => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1183,6 +1349,16 @@ describe("Worker request boundary", () => {
       "/api/snake/leaderboard/record",
       { ruleVersion: SNAKE_SOLO_RULE_VERSION, score: 12 },
     ],
+    ["/api/sokoban/progress", { ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION }],
+    [
+      "/api/sokoban/progress/record",
+      {
+        ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+        levelId: "microban-001",
+        moves: 2,
+        pushes: 1,
+      },
+    ],
   ])("requires a signed session for %s", async (path, body) => {
     const origin = "http://localhost:5173";
     const response = await app.default.fetch(
@@ -1196,6 +1372,69 @@ describe("Worker request boundary", () => {
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
       error: "session.required",
+    });
+  });
+
+  it.each([
+    ["/api/sokoban/progress", {}],
+    [
+      "/api/sokoban/progress",
+      { ruleVersion: "sokoban.microban-1-20.v0" },
+    ],
+    [
+      "/api/sokoban/progress/record",
+      {
+        ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+        levelId: "forged-level",
+        moves: 1,
+        pushes: 0,
+      },
+    ],
+    [
+      "/api/sokoban/progress/record",
+      {
+        ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+        levelId: "microban-001",
+        moves: 0,
+        pushes: 0,
+      },
+    ],
+    [
+      "/api/sokoban/progress/record",
+      {
+        ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+        levelId: "microban-001",
+        moves: 1_000_001,
+        pushes: 1,
+      },
+    ],
+    [
+      "/api/sokoban/progress/record",
+      {
+        ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
+        levelId: "microban-001",
+        moves: 2,
+        pushes: 3,
+      },
+    ],
+  ])("rejects an invalid Sokoban progress body for %s", async (path, body) => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", { method: "POST" }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+    const response = await app.default.fetch(
+      apiRequest(origin, path, {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({
+      error: "sokoban.progress.invalid_request",
     });
   });
 
@@ -1290,6 +1529,8 @@ describe("Worker request boundary", () => {
     "/api/2048/leaderboard/record",
     "/api/snake/leaderboard",
     "/api/snake/leaderboard/record",
+    "/api/sokoban/progress",
+    "/api/sokoban/progress/record",
     "/api/rooms/AAAAAAAAAAAAAAAA/sync",
   ])("requires application/json for %s", async (path) => {
     const session = await app.default.fetch(

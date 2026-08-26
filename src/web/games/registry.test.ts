@@ -175,7 +175,7 @@ describe("game outcome presentation", () => {
     expect(
       getClientGameRendererLoader(
         "sokoban",
-        "sokoban.microban-1-10.v1",
+        "sokoban.microban-1-20.v1",
       ),
     ).toBeNull();
   });

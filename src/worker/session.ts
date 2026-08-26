@@ -7,7 +7,11 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export const SESSION_COOKIE_NAME = "ym_session";
-export const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+// Keep the anonymous identity stable across ordinary return visits. 400 days
+// is the current browser cookie lifetime ceiling; every successful session
+// request renews this rolling window without putting the Guest ID in storage
+// accessible to JavaScript.
+export const SESSION_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -73,6 +77,25 @@ export async function createSignedGuestSessionValue(
     encoder.encode(signedValue),
   );
   return `${signedValue}.${bytesToBase64Url(new Uint8Array(signature))}`;
+}
+
+/**
+ * Derive a purpose-specific, non-authenticating pseudonym for client-side
+ * outboxes. It is deliberately not the Guest ID and is never accepted in
+ * place of the signed HttpOnly session.
+ */
+export async function createSokobanProgressSyncId(
+  guestId: string,
+  secret: string,
+): Promise<string> {
+  if (!validGuestId(guestId)) throw new TypeError("Invalid Guest identifier");
+  const key = await importHmacKey(secret);
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(`sokoban-progress-sync:v1:${guestId}`),
+  );
+  return `v1.${bytesToBase64Url(new Uint8Array(signature))}`;
 }
 
 export async function verifySignedGuestSessionValue(

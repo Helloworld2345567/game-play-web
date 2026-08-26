@@ -16,6 +16,20 @@ import {
   directionForSokobanKey,
   directionForSokobanSwipe,
 } from "./interactions";
+import {
+  loadSokobanProgress,
+  recordSokobanCompletion,
+  SokobanProgressRequestError,
+} from "./progress-client";
+import {
+  bestSokobanPendingCompletions,
+  createSokobanOutboxId,
+  queueSokobanPendingCompletion,
+  readSokobanPendingCompletions,
+  removeSokobanPendingCompletion,
+  type SokobanPendingCompletion,
+} from "./progress-storage";
+import type { SokobanProgressRecord } from "../../../shared/sokoban-progress";
 import "./game.css";
 
 interface PointerStart {
@@ -35,6 +49,108 @@ const DIRECTION_BUTTONS: ReadonlyArray<{
   { direction: "down", label: "向下移动", symbol: "↓", className: "down" },
   { direction: "right", label: "向右移动", symbol: "→", className: "right" },
 ];
+
+const SOKOBAN_LEVEL_IDS = new Set(SOKOBAN_LEVELS.map((level) => level.id));
+const EMPTY_COMPLETED_LEVEL_IDS: ReadonlySet<string> = new Set();
+
+type SokobanBestMovesRecord = Pick<SokobanProgressRecord, "levelId" | "bestMoves">;
+
+/**
+ * Merges progress records without allowing a slower attempt to replace a
+ * faster one.  The returned map follows the shipped level order so rendering
+ * stays deterministic while callers can keep their previous immutable map on
+ * a no-op.
+ */
+export function mergeSokobanBestMoves(
+  current: ReadonlyMap<string, number>,
+  incoming: readonly SokobanBestMovesRecord[],
+): ReadonlyMap<string, number> {
+  const merged = new Map(current);
+  let changed = false;
+  for (const record of incoming) {
+    if (
+      !SOKOBAN_LEVEL_IDS.has(record.levelId) ||
+      !Number.isSafeInteger(record.bestMoves) ||
+      record.bestMoves < 1
+    ) {
+      continue;
+    }
+    const previous = merged.get(record.levelId);
+    if (previous === undefined || record.bestMoves < previous) {
+      merged.set(record.levelId, record.bestMoves);
+      changed = true;
+    }
+  }
+  if (!changed) return current;
+  return new Map(
+    SOKOBAN_LEVELS.flatMap((level) => {
+      const bestMoves = merged.get(level.id);
+      return bestMoves === undefined ? [] : [[level.id, bestMoves] as const];
+    }),
+  );
+}
+
+function pendingRecords(
+  pending: readonly SokobanPendingCompletion[],
+): readonly SokobanBestMovesRecord[] {
+  return bestSokobanPendingCompletions(pending).map(({ levelId, moves }) => ({
+    levelId,
+    bestMoves: moves,
+  }));
+}
+
+export function mergeSokobanCompletedLevels(
+  current: ReadonlySet<string>,
+  incoming: readonly string[],
+): ReadonlySet<string> {
+  const merged = new Set(current);
+  for (const levelId of incoming) {
+    if (SOKOBAN_LEVEL_IDS.has(levelId)) merged.add(levelId);
+  }
+  if (merged.size === current.size) return current;
+  return new Set(
+    SOKOBAN_LEVELS
+      .map((level) => level.id)
+      .filter((levelId) => merged.has(levelId)),
+  );
+}
+
+/**
+ * A page-local completion may only survive a session refresh when its
+ * purpose-bound sync id is exactly the one returned by the current session.
+ * In particular, an old id (or an entry created before the first id was
+ * observed) must never be rebound to a new anonymous Guest.
+ */
+export function retainSokobanPendingForSync(
+  pending: readonly SokobanPendingCompletion[],
+  syncId: string,
+): readonly SokobanPendingCompletion[] {
+  return pending.filter((completion) => completion.syncId === syncId);
+}
+
+/**
+ * A completed request may only clear the page-local entry it was created
+ * from.  Another tab (or a newer completion in this tab) can replace the
+ * same level while the request is in flight.
+ */
+export function matchesSokobanPendingCompletion(
+  current: SokobanPendingCompletion | undefined,
+  expected: SokobanPendingCompletion,
+): boolean {
+  return current !== undefined &&
+    current.outboxId === expected.outboxId &&
+    current.levelId === expected.levelId &&
+    current.moves === expected.moves &&
+    current.pushes === expected.pushes &&
+    current.syncId === expected.syncId;
+}
+
+export function visibleSokobanCompletedLevels(
+  completed: ReadonlySet<string>,
+  progressIdentityReady: boolean,
+): ReadonlySet<string> {
+  return progressIdentityReady ? completed : EMPTY_COMPLETED_LEVEL_IDS;
+}
 
 export function sokobanLevelIndexFromSearch(
   search: string,
@@ -115,8 +231,298 @@ export function SoloPage({
   const [completedLevelIds, setCompletedLevelIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [bestMovesByLevel, setBestMovesByLevel] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const [progressStatus, setProgressStatus] =
+    useState<"loading" | "ready" | "saving" | "offline">("loading");
+  const [progressIdentityReady, setProgressIdentityReady] = useState(false);
+  const progressSyncId = useRef<string | null>(null);
+  const progressIdentityReadyRef = useRef(false);
+  const volatilePendingCompletions = useRef(
+    new Map<string, SokobanPendingCompletion>(),
+  );
+  const progressSyncing = useRef(false);
+  const progressSyncRequested = useRef(false);
+  const progressRetryTimer = useRef<number | null>(null);
+  const reloadProgressRef = useRef<(() => void) | null>(null);
+  const scheduleProgressRetryRef = useRef<(() => void) | null>(null);
+  const mounted = useRef(true);
   const boardRef = useRef<HTMLDivElement>(null);
   const pointerStart = useRef<PointerStart | null>(null);
+
+  const flushPendingCompletions = useCallback(async () => {
+    if (progressSyncing.current) {
+      progressSyncRequested.current = true;
+      return;
+    }
+    progressSyncing.current = true;
+    let failed = false;
+    let waitingForSyncId = false;
+    const processedOutboxIds = new Set<string>();
+    try {
+      while (true) {
+        const syncId = progressSyncId.current;
+        if (!progressIdentityReadyRef.current || syncId === null) {
+          waitingForSyncId = true;
+          break;
+        }
+        const pendingByLevel = new Map(
+          bestSokobanPendingCompletions([
+            ...retainSokobanPendingForSync(
+              readSokobanPendingCompletions(),
+              syncId,
+            ),
+            ...[...volatilePendingCompletions.current.values()].filter(
+              (completion) => completion.syncId === syncId,
+            ),
+          ]
+            .filter((completion) => !processedOutboxIds.has(completion.outboxId)))
+            .map((completion) => [completion.levelId, completion] as const),
+        );
+        const pending = SOKOBAN_LEVELS.flatMap((level) => {
+          const completion = pendingByLevel.get(level.id);
+          return completion === undefined ? [] : [completion];
+        });
+        if (pending.length === 0) break;
+
+        const sendable = pending.filter(
+          (completion) => completion.syncId === syncId,
+        );
+        if (sendable.length === 0) break;
+        let savedAny = false;
+        for (const completion of sendable) {
+          if (mounted.current) setProgressStatus("saving");
+          try {
+            const snapshot = await recordSokobanCompletion(
+              displayName,
+              completion.levelId,
+              completion.moves,
+              completion.pushes,
+              completion.syncId,
+            );
+            processedOutboxIds.add(completion.outboxId);
+            const currentVolatile =
+              volatilePendingCompletions.current.get(completion.levelId);
+            if (matchesSokobanPendingCompletion(currentVolatile, completion)) {
+              volatilePendingCompletions.current.delete(completion.levelId);
+            }
+            removeSokobanPendingCompletion(completion.outboxId);
+            savedAny = true;
+            if (mounted.current) {
+              setCompletedLevelIds((completed) =>
+                mergeSokobanCompletedLevels(
+                  completed,
+                  snapshot.completedLevelIds,
+                )
+              );
+              setBestMovesByLevel((bestMoves) =>
+                mergeSokobanBestMoves(bestMoves, [
+                  ...snapshot.records,
+                  { levelId: completion.levelId, bestMoves: completion.moves },
+                ])
+              );
+            }
+          } catch (error) {
+            failed = true;
+            progressSyncRequested.current = false;
+            if (
+              error instanceof SokobanProgressRequestError &&
+              error.status === 409
+            ) {
+              // The signed Guest cookie changed between the snapshot and the
+              // write.  Re-read the current sync id immediately; retrying the
+              // old outbox entry would only produce another 409 forever.
+              if (progressRetryTimer.current !== null) {
+                window.clearTimeout(progressRetryTimer.current);
+                progressRetryTimer.current = null;
+              }
+              progressIdentityReadyRef.current = false;
+              if (mounted.current) {
+                setProgressIdentityReady(false);
+                setCompletedLevelIds(new Set());
+                setBestMovesByLevel(new Map());
+              }
+              const reload = reloadProgressRef.current;
+              if (reload !== null) {
+                reload();
+              } else if (mounted.current) {
+                setProgressStatus("offline");
+                scheduleProgressRetryRef.current?.();
+              }
+            } else {
+              if (mounted.current) setProgressStatus("offline");
+              scheduleProgressRetryRef.current?.();
+            }
+            break;
+          }
+        }
+        if (failed || !savedAny) break;
+      }
+      if (!failed && !waitingForSyncId && mounted.current) {
+        setProgressStatus("ready");
+      }
+    } finally {
+      progressSyncing.current = false;
+      const rerunRequested = progressSyncRequested.current;
+      progressSyncRequested.current = false;
+      if (!failed && rerunRequested && mounted.current) {
+        void flushPendingCompletions();
+      }
+    }
+  }, [displayName]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (progressRetryTimer.current !== null) {
+        window.clearTimeout(progressRetryTimer.current);
+        progressRetryTimer.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let loadInFlight = false;
+    let reloadRequested = false;
+    progressSyncId.current = null;
+    progressIdentityReadyRef.current = false;
+    setProgressIdentityReady(false);
+    setCompletedLevelIds(new Set());
+    setBestMovesByLevel(new Map());
+
+    function retryProgress(): void {
+      loadProgress();
+      void flushPendingCompletions();
+    }
+
+    function scheduleRetry(): void {
+      if (
+        controller.signal.aborted ||
+        !mounted.current ||
+        progressRetryTimer.current !== null
+      ) {
+        return;
+      }
+      progressRetryTimer.current = window.setTimeout(() => {
+        progressRetryTimer.current = null;
+        retryProgress();
+      }, 5_000);
+    }
+
+    function loadProgress(): void {
+      if (loadInFlight) {
+        reloadRequested = true;
+        if (mounted.current) setProgressStatus("loading");
+        return;
+      }
+      loadInFlight = true;
+      if (mounted.current) setProgressStatus("loading");
+      void loadSokobanProgress(displayName, controller.signal).then(
+        (snapshot) => {
+          if (controller.signal.aborted) return;
+          if (progressRetryTimer.current !== null) {
+            window.clearTimeout(progressRetryTimer.current);
+            progressRetryTimer.current = null;
+          }
+          progressSyncId.current = snapshot.syncId;
+          const allCurrentPagePending = [
+            ...volatilePendingCompletions.current.values(),
+          ];
+          const currentPagePending = retainSokobanPendingForSync(
+            allCurrentPagePending,
+            snapshot.syncId,
+          );
+          volatilePendingCompletions.current.clear();
+          for (const completion of currentPagePending) {
+            volatilePendingCompletions.current.set(completion.levelId, completion);
+          }
+          const storedPending = retainSokobanPendingForSync(
+            readSokobanPendingCompletions(),
+            snapshot.syncId,
+          );
+          const pendingIds = bestSokobanPendingCompletions(storedPending).map(
+            (completion) => completion.levelId,
+          );
+          const completed = new Set([
+            ...snapshot.completedLevelIds,
+            ...pendingIds,
+            ...currentPagePending.map((completion) => completion.levelId),
+          ]);
+          setCompletedLevelIds(
+            new Set(
+              SOKOBAN_LEVELS
+                .map((level) => level.id)
+                .filter((levelId) => completed.has(levelId)),
+            ),
+          );
+          setBestMovesByLevel(
+            mergeSokobanBestMoves(
+              new Map(),
+              [
+                ...snapshot.records,
+                ...pendingRecords(storedPending),
+                ...pendingRecords(currentPagePending),
+              ],
+            ),
+          );
+          progressIdentityReadyRef.current = true;
+          if (mounted.current) {
+            setProgressIdentityReady(true);
+            setProgressStatus("ready");
+          }
+          void flushPendingCompletions();
+        },
+        () => {
+          if (!controller.signal.aborted && mounted.current) {
+            setProgressStatus("offline");
+            scheduleRetry();
+          }
+        },
+      ).finally(() => {
+        loadInFlight = false;
+        if (reloadRequested && !controller.signal.aborted) {
+          reloadRequested = false;
+          loadProgress();
+        }
+      });
+    }
+    reloadProgressRef.current = loadProgress;
+    scheduleProgressRetryRef.current = scheduleRetry;
+    const flushOnPageHide = () => void flushPendingCompletions();
+    const retryWhenVisible = () => {
+      if (document.visibilityState === "visible") retryProgress();
+    };
+    loadProgress();
+    void flushPendingCompletions();
+    window.addEventListener("online", retryProgress);
+    window.addEventListener("pageshow", retryProgress);
+    window.addEventListener("pagehide", flushOnPageHide);
+    document.addEventListener("visibilitychange", retryWhenVisible);
+    return () => {
+      controller.abort();
+      if (progressRetryTimer.current !== null) {
+        window.clearTimeout(progressRetryTimer.current);
+        progressRetryTimer.current = null;
+      }
+      if (reloadProgressRef.current === loadProgress) {
+        reloadProgressRef.current = null;
+      }
+      if (scheduleProgressRetryRef.current === scheduleRetry) {
+        scheduleProgressRetryRef.current = null;
+      }
+      window.removeEventListener("online", retryProgress);
+      window.removeEventListener("pageshow", retryProgress);
+      window.removeEventListener("pagehide", flushOnPageHide);
+      document.removeEventListener("visibilitychange", retryWhenVisible);
+    };
+  }, [displayName, flushPendingCompletions]);
+
+  useEffect(() => {
+    if (game.won) void flushPendingCompletions();
+  }, [flushPendingCompletions, game.won]);
 
   const focusBoard = useCallback(() => {
     window.setTimeout(() => boardRef.current?.focus(), 0);
@@ -137,15 +543,43 @@ export function SoloPage({
   }, [focusBoard]);
 
   const move = useCallback((direction: SokobanDirection) => {
+    const syncId = progressSyncId.current;
+    if (!progressIdentityReadyRef.current || syncId === null) {
+      focusBoard();
+      return;
+    }
     setGame((current) => {
       const result = moveSokoban(current, direction);
       if (!result.moved) return current;
       setUndoStack((stack) => [...stack, current]);
       if (result.won) {
-        setCompletedLevelIds((completed) => {
-          if (completed.has(result.state.levelId)) return completed;
-          return new Set([...completed, result.state.levelId]);
-        });
+        const completion = {
+          outboxId: createSokobanOutboxId(),
+          levelId: result.state.levelId,
+          moves: result.state.moves,
+          pushes: result.state.pushes,
+          syncId,
+        };
+        const previousPending = volatilePendingCompletions.current.get(
+          completion.levelId,
+        );
+        if (
+          previousPending === undefined ||
+          completion.moves < previousPending.moves ||
+          (completion.moves === previousPending.moves &&
+            completion.pushes < previousPending.pushes)
+        ) {
+          volatilePendingCompletions.current.set(completion.levelId, completion);
+        }
+        queueSokobanPendingCompletion(completion);
+        setCompletedLevelIds((completed) =>
+          mergeSokobanCompletedLevels(completed, [completion.levelId])
+        );
+        setBestMovesByLevel((bestMoves) =>
+          mergeSokobanBestMoves(bestMoves, [
+            { levelId: completion.levelId, bestMoves: completion.moves },
+          ])
+        );
       }
       return result.state;
     });
@@ -203,6 +637,11 @@ export function SoloPage({
     targetKeys.has(pointKey(x, y))
   ).length;
   const levelNumber = levelIndex + 1;
+  const currentBestMoves = bestMovesByLevel.get(game.levelId);
+  const visibleCompletedLevelIds = visibleSokobanCompletedLevels(
+    completedLevelIds,
+    progressIdentityReady,
+  );
 
   return (
     <main class="game-sokoban-page">
@@ -225,9 +664,13 @@ export function SoloPage({
           <p class="eyebrow">单人 · 本机解谜 · Microban 经典关卡</p>
           <h1>推箱子</h1>
           <p class="game-sokoban-status" aria-live="polite">
-            {game.won
-              ? "全部箱子已归位！可以进入下一关。"
-              : "把所有箱子推到目标点；箱子只能推，不能拉。"}
+            {!progressIdentityReady
+              ? progressStatus === "offline"
+                ? "暂时无法确认游客记录，正在自动重试；确认后即可开始。"
+                : "正在恢复游客通关记录，确认后即可开始。"
+              : game.won
+                ? "全部箱子已归位！可以进入下一关。"
+                : "把所有箱子推到目标点；箱子只能推，不能拉。"}
           </p>
         </div>
         <div class="game-sokoban-stat-cards" aria-label="本关统计">
@@ -242,6 +685,12 @@ export function SoloPage({
           <div class="game-sokoban-stat-card">
             <small>已归位</small>
             <strong>{placedCrates}/{game.targets.length}</strong>
+          </div>
+          <div class="game-sokoban-stat-card">
+            <small>个人最佳</small>
+            <strong aria-label="本关最佳步数">
+              {currentBestMoves === undefined ? "—" : currentBestMoves}
+            </strong>
           </div>
         </div>
       </header>
@@ -267,11 +716,14 @@ export function SoloPage({
               aria-rowcount={game.height}
               aria-colcount={game.width}
               aria-describedby="game-sokoban-instructions"
+              aria-busy={!progressIdentityReady}
+              aria-disabled={!progressIdentityReady}
               data-level={levelNumber}
+              data-progress-ready={progressIdentityReady ? "true" : "false"}
               tabIndex={0}
               style={`--sokoban-columns: ${game.width}; --sokoban-rows: ${game.height};`}
               onPointerDown={(event) => {
-                if (game.won) return;
+                if (game.won || !progressIdentityReady) return;
                 pointerStart.current = {
                   pointerId: event.pointerId,
                   x: event.clientX,
@@ -340,7 +792,7 @@ export function SoloPage({
                   class={`game-sokoban-direction game-sokoban-direction-${button.className}`}
                   type="button"
                   aria-label={button.label}
-                  disabled={game.won}
+                  disabled={game.won || !progressIdentityReady}
                   onClick={() => move(button.direction)}
                 >
                   <span aria-hidden="true">{button.symbol}</span>
@@ -375,12 +827,22 @@ export function SoloPage({
                 <p class="eyebrow">首批关卡</p>
                 <h2>选择关卡</h2>
               </div>
-              <span>{completedLevelIds.size} / {SOKOBAN_LEVELS.length} 已完成</span>
+              <span aria-live="polite">
+                {visibleCompletedLevelIds.size} / {SOKOBAN_LEVELS.length} 已完成
+                {progressStatus === "loading"
+                  ? " · 正在恢复记录"
+                  : progressStatus === "saving"
+                    ? " · 正在保存"
+                    : progressStatus === "offline"
+                      ? " · 暂未同步"
+                      : ""}
+              </span>
             </header>
             <div class="game-sokoban-level-grid">
               {SOKOBAN_LEVELS.map((level, index) => {
                 const isCurrent = index === levelIndex;
-                const isCompleted = completedLevelIds.has(level.id);
+                const isCompleted = visibleCompletedLevelIds.has(level.id);
+                const bestMoves = bestMovesByLevel.get(level.id);
                 return (
                   <button
                     key={level.id}
@@ -391,7 +853,12 @@ export function SoloPage({
                     onClick={() => selectLevel(index)}
                   >
                     <strong>{String(index + 1).padStart(2, "0")}</strong>
-                    <span>{isCompleted ? "已完成" : isCurrent ? "当前" : "未完成"}</span>
+                    <span>
+                      {isCompleted ? "已完成" : isCurrent ? "当前" : "未完成"}
+                    </span>
+                    {bestMoves !== undefined && (
+                      <span>最佳 {bestMoves} 步</span>
+                    )}
                   </button>
                 );
               })}
@@ -435,7 +902,7 @@ export function SoloPage({
           <p class="game-sokoban-attribution">
             关卡设计：<strong>{SOKOBAN_LEVEL_SOURCE.author}</strong> · {" "}
             <a href={SOKOBAN_LEVEL_SOURCE.url} target="_blank" rel="noreferrer">
-              Microban 1–10（2000）
+              Microban 1–20（2000）
             </a>
             ，依原作者许可署名转载。
           </p>

@@ -113,14 +113,14 @@ describe("game manifest", () => {
       title: "推箱子",
       creationPolicy: "enabled",
       launchKind: "local-game",
-      ruleSetIds: ["sokoban.microban-1-10.v1"],
+      ruleSetIds: ["sokoban.microban-1-20.v1"],
       creatableRuleSetIds: [],
     });
     expect(
-      isManifestRuleSet("sokoban", "sokoban.microban-1-10.v1"),
+      isManifestRuleSet("sokoban", "sokoban.microban-1-20.v1"),
     ).toBe(true);
     expect(
-      isCreatableManifestRuleSet("sokoban", "sokoban.microban-1-10.v1"),
+      isCreatableManifestRuleSet("sokoban", "sokoban.microban-1-20.v1"),
     ).toBe(false);
     expect(isManifestRuleSet("sokoban", "sokoban.unknown.v1")).toBe(false);
   });

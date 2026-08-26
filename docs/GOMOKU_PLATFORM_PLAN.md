@@ -121,7 +121,7 @@ interface RulePosition {
 
 ## 6. 房间、身份与协议
 
-1. 页面启动先调用 `POST /api/session` 并提交规范化显示昵称。Worker 验证并复用已有匿名身份，把昵称与游客 ID 一起写入 HMAC 签名 Cookie；仅在缺失或签名无效时生成高熵匿名 ID。Cookie 设置 `Secure; HttpOnly; SameSite=Lax; Max-Age=2592000`，30 天有效期覆盖房间保留期。
+1. 页面启动先调用 `POST /api/session` 并提交规范化显示昵称。Worker 验证并复用已有匿名身份，把昵称与游客 ID 一起写入 HMAC 签名 Cookie；仅在缺失或签名无效时生成高熵匿名 ID。Cookie 设置 `Secure; HttpOnly; SameSite=Lax; Max-Age=34560000`，每次成功会话请求按浏览器允许的最长 400 天窗口滚动续期，以便恢复游客个人记录。
 2. `POST /api/rooms` 生成至少 96 bit 随机 `roomId`，并在 `GameRoom` 初始化时原子地把创建者身份绑定到 Seat A，再返回 `/r/:roomId` 邀请链接。身份或席位令牌不放进 URL。
 3. `GET /api/rooms/:roomId/websocket` 检查同源 `Origin` 和 Cookie，再把升级请求转发到对应 DO。
 4. 创建者固定为 Seat A；邀请链接只允许第一个不同的匿名身份占 Seat B，之后的不同身份以 Spectator 身份进入。相同身份刷新或多标签页仍回到原席位或观众身份。

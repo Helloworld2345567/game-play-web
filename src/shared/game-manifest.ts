@@ -152,10 +152,10 @@ export const GAME_MANIFESTS = [
   {
     gameId: "sokoban",
     title: "推箱子",
-    description: "Microban 经典前 10 关 · 单人解谜 · 可撤销",
+    description: "Microban 经典前 20 关 · 单人解谜 · 游客最佳步数",
     creationPolicy: "enabled",
     launchKind: "local-game",
-    ruleSetIds: ["sokoban.microban-1-10.v1"],
+    ruleSetIds: ["sokoban.microban-1-20.v1"],
     creatableRuleSetIds: [],
   },
 ] as const satisfies readonly GameManifest[];
