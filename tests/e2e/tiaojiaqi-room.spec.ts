@@ -28,6 +28,12 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 test("two players open a five-piece Tiaojiaqi room while a spectator follows", async ({
   browser,
 }) => {
+  // Room creation initializes a Durable Object and acquires the shared room
+  // lease. On the slowest CI workers that first request can outlive the
+  // default 30-second assertion window; timing out while it is still in flight
+  // strands the provisional room and makes later room tests fail with a
+  // misleading capacity error.
+  test.setTimeout(120_000);
   const creatorContext = await browser.newContext({
     viewport: { width: 360, height: 800 },
   });
@@ -45,7 +51,9 @@ test("two players open a five-piece Tiaojiaqi room while a spectator follows", a
     await creator.goto("/");
     await setDisplayName(creator, "挑夹甲");
     await creator.getByRole("button", { name: "创建挑夹棋房" }).click();
-    await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u);
+    await expect(creator).toHaveURL(/\/r\/[A-Za-z0-9_-]{16}$/u, {
+      timeout: 60_000,
+    });
     const inviteUrl = creator.url();
 
     await invitee.goto(inviteUrl);

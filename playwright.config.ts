@@ -6,7 +6,7 @@ export default defineConfig({
   // A failed create request can leave a sixty-second provisional capacity
   // lease while the Worker finishes its Durable Object initialization. Give
   // CI's shared runners enough time for that request to settle; otherwise a
-  // fifteen-second assertion timeout cascades into capacity_reached failures
+  // thirty-second assertion timeout cascades into capacity_reached failures
   // in the following serial room tests.
   timeout: process.env.CI ? 60_000 : 30_000,
   // A shared CI runner can transiently lose a local Worker/DO connection;
