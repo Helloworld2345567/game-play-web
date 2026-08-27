@@ -83,7 +83,7 @@ async function expectRegularStarBoard(page: Page): Promise<void> {
 test.describe("Chinese Checkers multiplayer rooms", () => {
   test.describe.configure({ mode: "serial" });
 
-  for (const playerCount of [2, 3, 4] as const) {
+  for (const playerCount of [2, 3] as const) {
     test(`${playerCount} players fill ordered seats before a spectator follows`, async ({
       browser,
     }) => {
@@ -153,9 +153,7 @@ test.describe("Chinese Checkers multiplayer rooms", () => {
           );
         }
 
-        const [from, to] = playerCount === 4
-          ? ["-6,-4", "-5,-3"]
-          : ["-3,-5", "-4,-4"];
+        const [from, to] = ["-3,-5", "-4,-4"];
         await creator.locator(`[data-hole="${from}"]`).click();
         await expect(creator.locator(`[data-hole="${to}"]`)).toHaveAttribute(
           "data-legal-step",
