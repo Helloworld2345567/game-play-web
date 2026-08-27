@@ -1,0 +1,58 @@
+.tank-battle-page {
+  width: min(100%, 1080px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin-inline: auto;
+  padding: max(18px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+}
+
+.tank-battle-topbar, .tank-battle-header, .tank-battle-controls, .tank-battle-score-cards, .tank-battle-action-buttons {
+  display: flex;
+  align-items: center;
+}
+
+.tank-battle-topbar { justify-content: space-between; gap: 12px; margin-bottom: clamp(30px, 7vw, 58px); }
+.tank-battle-home-link { text-decoration: none; }
+.tank-battle-header { align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 20px 28px; margin-bottom: 24px; }
+.tank-battle-header h1 { margin: 0; font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(3rem, 11vw, 5.8rem); font-weight: 500; letter-spacing: -0.055em; line-height: .9; }
+.tank-battle-status { margin: 14px 0 0; color: var(--theme-muted); }
+.tank-battle-score-cards { flex-wrap: wrap; gap: 8px; }
+.tank-battle-score-card { display: grid; min-width: 92px; min-height: 62px; align-content: center; padding: 9px 13px; border: 1px solid var(--theme-border); border-radius: 14px; background: var(--theme-surface-soft); }
+.tank-battle-score-card small { color: var(--theme-subtle); font-size: .68rem; font-weight: 700; }
+.tank-battle-score-card strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 1.05rem; }
+
+.tank-battle-play-area { width: min(100%, 680px); margin-inline: auto; }
+.tank-battle-board { display: grid; gap: 2px; padding: clamp(9px, 2vw, 15px); border: 1px solid color-mix(in srgb, #77b776 36%, var(--theme-border)); border-radius: 22px; background: #14251c; box-shadow: 0 24px 60px rgba(0, 0, 0, .28), inset 0 0 28px rgba(62, 148, 74, .18); outline: none; user-select: none; }
+.tank-battle-board:focus-visible { outline: 3px solid var(--theme-accent); outline-offset: 3px; }
+.tank-battle-status-over { filter: saturate(.45); }
+.tank-battle-row { display: grid; gap: 2px; grid-template-columns: repeat(13, minmax(0, 1fr)); }
+.tank-battle-cell { display: grid; aspect-ratio: 1; place-items: center; background: #1e3b27; }
+.tank-battle-cell-wall { background: linear-gradient(135deg, #9c573b 0 42%, #bd7250 43% 48%, #7a3f2d 49% 100%); box-shadow: inset 0 0 0 1px rgba(45, 20, 14, .46); }
+.tank-battle-cell span { width: 68%; height: 68%; }
+.tank-battle-cell-player span, .tank-battle-cell-enemy span { position: relative; border-radius: 25% 25% 34% 34%; }
+.tank-battle-cell-player span { background: #5db3e7; box-shadow: 0 0 0 2px #173c63; }
+.tank-battle-cell-enemy span { background: #df7359; box-shadow: 0 0 0 2px #6d231d; }
+.tank-battle-cell-player span::after, .tank-battle-cell-enemy span::after { position: absolute; width: 20%; height: 62%; left: 40%; content: ""; background: currentColor; transform-origin: 50% 100%; }
+.tank-battle-cell-player span { color: #b8e9ff; }
+.tank-battle-cell-enemy span { color: #ffd0b7; }
+.tank-battle-cell[data-direction="down"] span::after { transform: rotate(180deg); }
+.tank-battle-cell[data-direction="left"] span::after { transform: rotate(-90deg); }
+.tank-battle-cell[data-direction="right"] span::after { transform: rotate(90deg); }
+.tank-battle-cell-player-shell span, .tank-battle-cell-enemy-shell span { width: 27%; height: 27%; border-radius: 50%; }
+.tank-battle-cell-player-shell span { background: #fbec99; box-shadow: 0 0 10px #fbec99; }
+.tank-battle-cell-enemy-shell span { background: #ff9b63; box-shadow: 0 0 10px #ff9b63; }
+
+.tank-battle-controls { justify-content: center; flex-wrap: wrap; gap: 18px 28px; margin-top: 20px; }
+.tank-battle-direction-pad { display: grid; width: 150px; gap: 5px; grid-template-areas: ". up ." "left down right"; grid-template-columns: repeat(3, 1fr); }
+.tank-battle-direction { display: grid; width: 46px; height: 42px; padding: 0; place-items: center; border: 1px solid var(--theme-border); border-radius: 12px; color: var(--theme-text); background: var(--theme-surface); cursor: pointer; font-size: 1.15rem; font-weight: 800; }
+.tank-battle-direction:hover:not(:disabled) { border-color: var(--theme-accent); color: var(--theme-accent); }
+.tank-battle-direction-up { grid-area: up; }.tank-battle-direction-left { grid-area: left; }.tank-battle-direction-down { grid-area: down; }.tank-battle-direction-right { grid-area: right; }
+.tank-battle-action-buttons { align-items: stretch; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.tank-battle-instructions { margin: 18px auto 0; color: var(--theme-muted); font-size: .82rem; line-height: 1.6; text-align: center; }
+
+@media (max-width: 520px) {
+  .tank-battle-page { padding-inline: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right)); }
+  .tank-battle-topbar { margin-bottom: 32px; }
+  .tank-battle-score-cards { display: grid; width: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .tank-battle-score-card { min-width: 0; padding-inline: 9px; }
+}

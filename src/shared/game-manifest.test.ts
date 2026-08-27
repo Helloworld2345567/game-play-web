@@ -121,6 +121,20 @@ describe("game manifest", () => {
     expect(isManifestRuleSet("sokoban", "sokoban.unknown.v1")).toBe(false);
   });
 
+  it("exposes Tank Battle as a self-contained local game", () => {
+    expect(getGameManifest("tank-battle")).toMatchObject({
+      gameId: "tank-battle",
+      title: "坦克大战",
+      creationPolicy: "enabled",
+      launchKind: "local-game",
+      ruleSetIds: ["tank-battle.solo.13x13.v1"],
+      creatableRuleSetIds: [],
+    });
+    expect(isManifestRuleSet("tank-battle", "tank-battle.solo.13x13.v1")).toBe(true);
+    expect(isCreatableManifestRuleSet("tank-battle", "tank-battle.solo.13x13.v1")).toBe(false);
+    expect(isManifestRuleSet("tank-battle", "tank-battle.solo.13x13.v2")).toBe(false);
+  });
+
   it("exposes one police-chase family with all three map rule sets", () => {
     const manifest = getGameManifest("chase");
     expect(manifest).toMatchObject({
