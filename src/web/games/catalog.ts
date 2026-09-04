@@ -143,6 +143,8 @@ const PAGE_LOADERS = {
     import("./sokoban/SoloPage").then(({ SoloPage }) => SoloPage),
   "tank-battle": () =>
     import("./tank-battle/SoloPage").then(({ SoloPage }) => SoloPage),
+  "stack-game": () =>
+    import("./stack-game/SoloPage").then(({ SoloPage }) => SoloPage),
 } as const satisfies Readonly<Record<string, ClientGamePageLoader>>;
 
 export function getClientGameRendererLoader(

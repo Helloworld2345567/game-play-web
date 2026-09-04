@@ -135,6 +135,21 @@ describe("game manifest", () => {
     expect(isManifestRuleSet("tank-battle", "tank-battle.solo.13x13.v2")).toBe(false);
   });
 
+  it("exposes Stack Game as a local precision-stacking game", () => {
+    expect(getGameManifest("stack-game")).toMatchObject({
+      gameId: "stack-game",
+      title: "叠叠高",
+      description: "3D 精准堆叠 · 本地最高分",
+      creationPolicy: "enabled",
+      launchKind: "local-game",
+      ruleSetIds: ["stack-game.solo.v1"],
+      creatableRuleSetIds: [],
+    });
+    expect(isManifestRuleSet("stack-game", "stack-game.solo.v1")).toBe(true);
+    expect(isCreatableManifestRuleSet("stack-game", "stack-game.solo.v1")).toBe(false);
+    expect(isManifestRuleSet("stack-game", "stack-game.solo.v2")).toBe(false);
+  });
+
   it("exposes one police-chase family with all three map rule sets", () => {
     const manifest = getGameManifest("chase");
     expect(manifest).toMatchObject({

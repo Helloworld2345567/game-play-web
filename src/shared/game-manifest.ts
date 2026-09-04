@@ -166,6 +166,15 @@ export const GAME_MANIFESTS = [
     ruleSetIds: ["tank-battle.solo.13x13.v1"],
     creatableRuleSetIds: [],
   },
+  {
+    gameId: "stack-game",
+    title: "叠叠高",
+    description: "3D 精准堆叠 · 本地最高分",
+    creationPolicy: "enabled",
+    launchKind: "local-game",
+    ruleSetIds: ["stack-game.solo.v1"],
+    creatableRuleSetIds: [],
+  },
 ] as const satisfies readonly GameManifest[];
 
 export type GameId = (typeof GAME_MANIFESTS)[number]["gameId"];

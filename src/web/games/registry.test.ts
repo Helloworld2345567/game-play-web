@@ -179,6 +179,16 @@ describe("game outcome presentation", () => {
     ).toBeNull();
   });
 
+  it("allowlists the local Stack Game page without a room renderer", async () => {
+    const loader = getClientGamePageLoader("stack-game");
+    expect(loader).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("stack-game")?.loadPage).toBe(loader);
+    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader("stack-game", "stack-game.solo.v1"),
+    ).toBeNull();
+  });
+
   it("exposes allowlisted renderer loading through every catalog entry", () => {
     expect(
       clientGameCatalog.every(
