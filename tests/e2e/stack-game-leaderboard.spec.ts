@@ -69,6 +69,7 @@ test("requests and renders the Stack Game top-10 leaderboard", async ({
 test("submits one completed score asynchronously and refreshes the ranking", async ({
   page,
 }) => {
+  await page.clock.install();
   const queryBodies: unknown[] = [];
   const recordBodies: unknown[] = [];
   await page.route("**/api/stack-game/leaderboard**", async (route) => {
@@ -98,18 +99,24 @@ test("submits one completed score asynchronously and refreshes the ranking", asy
 
   const stage = page.locator(".stack-game-stage");
   await expect(stage).toHaveAttribute("data-render-ready", "true");
-  await page.getByRole("button", { name: "开始堆叠" }).click();
+  await expect.poll(() => queryBodies.length).toBe(1);
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await page.getByRole("button", { name: "开始堆叠" }).evaluate((element) => {
+    (element as HTMLButtonElement).click();
+  });
 
-  // The first block reaches a valid overlap after roughly two seconds. Run
-  // both placements in one browser task so no animation frame can move the
-  // newly spawned block in between: it starts outside the tower, therefore
-  // the second placement deterministically ends at exactly one layer.
-  await page.waitForTimeout(1_500);
+  // Drive every animation callback rather than waiting for wall time: slow
+  // software-rendered CI frames otherwise hit the game's per-frame delta cap
+  // and the first block is still outside the tower when the test clicks.
+  await page.clock.runFor(1_500);
+  // Both placements share one task, so the next block cannot move before the
+  // second click. The real input handler finishes this game at exactly 1.
   await stage.evaluate((element) => {
     const stageButton = element as HTMLButtonElement;
     stageButton.click();
     stageButton.click();
   });
+  await page.clock.resume();
   await expect(stage).toHaveAttribute("data-score", "1");
   await expect(stage).toHaveAttribute("data-game-status", "over");
 

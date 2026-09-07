@@ -80,6 +80,7 @@ async function restoreCanvasContext(canvas: Locator): Promise<boolean> {
 test("opens the 3D stack game, places a block, pauses, and restarts", async ({
   page,
 }) => {
+  await page.clock.install();
   await disableGameAudio(page);
   await page.goto("/");
   await page.getByRole("button", { name: "叠叠高，开始本机游戏" }).click();
@@ -104,10 +105,13 @@ test("opens the 3D stack game, places a block, pauses, and restarts", async ({
   const restoredPixels = await canvasPixelStats(canvas);
   expect(restoredPixels.brightnessRange).toBeGreaterThan(20);
 
-  await page.getByRole("button", { name: "开始堆叠" }).click();
-  await expect(stage).toHaveAttribute("data-game-status", "playing");
-  await page.waitForTimeout(1_500);
-  await stage.click({ position: { x: 20, y: 300 } });
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await page.getByRole("button", { name: "开始堆叠" }).evaluate((element) => {
+    (element as HTMLButtonElement).click();
+  });
+  await page.clock.runFor(1_500);
+  await stage.evaluate((element) => (element as HTMLButtonElement).click());
+  await page.clock.resume();
   await expect(stage).toHaveAttribute("data-score", "1");
 
   await page.getByRole("button", { name: "暂停游戏" }).click();
