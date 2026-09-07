@@ -72,6 +72,23 @@
   pointer-events: auto;
 }
 
+.stack-game-controls .profile-menu {
+  z-index: 5;
+}
+
+.stack-game-controls .profile-trigger {
+  min-height: 44px;
+  max-width: min(150px, 28vw);
+  border-color: var(--stack-line);
+  color: var(--stack-ink);
+  background: var(--stack-panel);
+}
+
+.stack-game-controls .profile-trigger:hover {
+  border-color: rgba(244, 207, 104, 0.72);
+  color: var(--stack-ink);
+}
+
 .stack-game-brand-copy {
   display: grid;
   min-width: 0;
@@ -145,6 +162,160 @@
 .stack-game-icon-button:focus-visible::after {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+.stack-game-leaderboard {
+  position: absolute;
+  z-index: 4;
+  top: max(76px, calc(env(safe-area-inset-top) + 68px));
+  right: max(18px, env(safe-area-inset-right));
+  display: grid;
+  width: min(286px, calc(100vw - 36px));
+  max-height: min(70vh, 520px);
+  padding: 18px;
+  overflow: auto;
+  border: 1px solid var(--stack-line);
+  border-radius: 18px;
+  background: rgba(13, 16, 15, 0.95);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+  contain: layout paint;
+  gap: 0;
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+
+.stack-game-leaderboard[data-open="false"] {
+  display: none;
+}
+
+.stack-game-leaderboard > header {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.stack-game-leaderboard-eyebrow {
+  margin: 0 0 5px;
+  color: #f4cf68;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.stack-game-leaderboard h2 {
+  margin: 0;
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: 1.45rem;
+  font-weight: 500;
+  line-height: 1.05;
+}
+
+.stack-game-leaderboard > header > span,
+.stack-game-leaderboard-empty,
+.stack-game-leaderboard-note,
+.stack-game-record-notice {
+  color: var(--stack-muted);
+  font-size: 0.72rem;
+}
+
+.stack-game-personal-best {
+  display: flex;
+  margin: 14px 0 0;
+  align-items: baseline;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--stack-line) 78%, transparent);
+  border-radius: 12px;
+  color: var(--stack-muted);
+  background: rgba(255, 255, 255, 0.035);
+  gap: 6px;
+  font-size: 0.72rem;
+}
+
+.stack-game-personal-best strong {
+  margin-left: auto;
+  color: #f4cf68;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.92rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.stack-game-personal-best small {
+  color: var(--stack-muted);
+  font-size: 0.68rem;
+}
+
+.stack-game-leaderboard ol {
+  display: grid;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stack-game-leaderboard li {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  padding: 10px 2px;
+  border-top: 1px solid color-mix(in srgb, var(--stack-line) 78%, transparent);
+  gap: 9px;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+}
+
+.stack-game-leaderboard li strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stack-game-leaderboard-rank {
+  color: #f4cf68;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.stack-game-leaderboard data {
+  color: var(--stack-ink);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.stack-game-leaderboard-empty {
+  margin: 16px 0 0;
+  padding: 18px 0;
+  border-top: 1px solid color-mix(in srgb, var(--stack-line) 78%, transparent);
+  text-align: center;
+}
+
+.stack-game-leaderboard-note,
+.stack-game-record-notice {
+  margin: 15px 0 0;
+  line-height: 1.5;
+}
+
+.stack-game-record-notice {
+  color: #f4cf68;
+  font-weight: 700;
+}
+
+.stack-game-record-retry {
+  min-height: 38px;
+  margin-top: 12px;
+  padding: 0 14px;
+  border: 1px solid var(--stack-line);
+  border-radius: 999px;
+  color: var(--stack-ink);
+  background: rgba(36, 42, 38, 0.9);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.stack-game-record-retry:hover {
+  border-color: rgba(244, 207, 104, 0.72);
+  background: rgba(48, 54, 48, 0.95);
 }
 
 .stack-game-scoreboard {
@@ -315,6 +486,7 @@
     top: max(12px, env(safe-area-inset-top));
     right: max(12px, env(safe-area-inset-right));
     left: max(12px, env(safe-area-inset-left));
+    gap: 0;
   }
 
   .stack-game-brand-copy span {
@@ -329,6 +501,24 @@
 
   .stack-game-controls {
     gap: 7px;
+  }
+
+  /* Keep the full-screen play controls inside a narrow phone viewport. The
+     nickname editor remains available from the home page. */
+  .stack-game-controls .profile-menu {
+    display: none;
+  }
+
+  .stack-game-controls .profile-trigger {
+    max-width: min(132px, 29vw);
+  }
+
+  .stack-game-leaderboard {
+    top: max(68px, calc(env(safe-area-inset-top) + 62px));
+    right: max(12px, env(safe-area-inset-right));
+    width: min(286px, calc(100vw - 24px));
+    max-height: min(67vh, 480px);
+    padding: 16px;
   }
 
   .stack-game-scoreboard {

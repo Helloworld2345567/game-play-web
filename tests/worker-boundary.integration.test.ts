@@ -13,6 +13,10 @@ import {
 import { MINESWEEPER_SOLO_RULE_VERSION } from "../src/shared/minesweeper-leaderboard";
 import { GAME_2048_RULE_VERSION_BY_SIZE } from "../src/shared/game-2048-rules";
 import { GAME_2048_SOLO_RULE_VERSION } from "../src/shared/game-2048-leaderboard";
+import {
+  STACK_GAME_MAX_SCORE,
+  STACK_GAME_SOLO_RULE_VERSION,
+} from "../src/shared/game-stack-leaderboard";
 import { SOKOBAN_PROGRESS_RULE_VERSION } from "../src/shared/sokoban-progress";
 
 const SNAKE_SOLO_RULE_VERSION = "snake.solo.20x20.v1";
@@ -896,6 +900,13 @@ describe("Worker request boundary", () => {
       ruleVersion: SNAKE_SOLO_RULE_VERSION,
       score: 12,
     })],
+    ["/api/stack-game/leaderboard", 30, () => ({
+      ruleVersion: STACK_GAME_SOLO_RULE_VERSION,
+    })],
+    ["/api/stack-game/leaderboard/record", 10, () => ({
+      ruleVersion: STACK_GAME_SOLO_RULE_VERSION,
+      score: 12,
+    })],
     ["/api/sokoban/progress", 30, () => ({
       ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION,
     })],
@@ -1160,6 +1171,52 @@ describe("Worker request boundary", () => {
     });
   });
 
+  it("records and reads a Stack Game score using only the signed session nickname", async () => {
+    const origin = "http://localhost:5173";
+    const session = await app.default.fetch(
+      apiRequest(origin, "/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "签名昵称" }),
+      }),
+    );
+    const cookie = session.headers.get("Set-Cookie")?.split(";", 1)[0];
+
+    const recorded = await app.default.fetch(
+      apiRequest(origin, "/api/stack-game/leaderboard/record", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ruleVersion: STACK_GAME_SOLO_RULE_VERSION,
+          score: 12,
+          displayName: "伪造昵称",
+        }),
+      }),
+    );
+    expect(recorded.status).toBe(200);
+    expect(recorded.headers.get("Cache-Control")).toBe("no-store");
+    await expect(recorded.json()).resolves.toEqual({
+      ruleVersion: STACK_GAME_SOLO_RULE_VERSION,
+      personalBestScore: 12,
+      top: [{ rank: 1, displayName: "签名昵称", score: 12 }],
+    });
+
+    const snapshot = await app.default.fetch(
+      apiRequest(origin, "/api/stack-game/leaderboard", {
+        method: "POST",
+        headers: { Cookie: cookie!, "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleVersion: STACK_GAME_SOLO_RULE_VERSION }),
+      }),
+    );
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.headers.get("Cache-Control")).toBe("no-store");
+    await expect(snapshot.json()).resolves.toEqual({
+      ruleVersion: STACK_GAME_SOLO_RULE_VERSION,
+      personalBestScore: 12,
+      top: [{ rank: 1, displayName: "签名昵称", score: 12 }],
+    });
+  });
+
   it("records and reads Sokoban progress using only the signed Guest session", async () => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1364,6 +1421,11 @@ describe("Worker request boundary", () => {
       "/api/snake/leaderboard/record",
       { ruleVersion: SNAKE_SOLO_RULE_VERSION, score: 12 },
     ],
+    ["/api/stack-game/leaderboard", { ruleVersion: STACK_GAME_SOLO_RULE_VERSION }],
+    [
+      "/api/stack-game/leaderboard/record",
+      { ruleVersion: STACK_GAME_SOLO_RULE_VERSION, score: 12 },
+    ],
     ["/api/sokoban/progress", { ruleVersion: SOKOBAN_PROGRESS_RULE_VERSION }],
     [
       "/api/sokoban/progress/record",
@@ -1498,6 +1560,19 @@ describe("Worker request boundary", () => {
       "/api/snake/leaderboard/record",
       { ruleVersion: SNAKE_SOLO_RULE_VERSION, score: 398 },
     ],
+    ["/api/stack-game/leaderboard", {}],
+    [
+      "/api/stack-game/leaderboard",
+      { ruleVersion: "stack-game.solo.v0" },
+    ],
+    [
+      "/api/stack-game/leaderboard/record",
+      { ruleVersion: STACK_GAME_SOLO_RULE_VERSION, score: 0 },
+    ],
+    [
+      "/api/stack-game/leaderboard/record",
+      { ruleVersion: STACK_GAME_SOLO_RULE_VERSION, score: STACK_GAME_MAX_SCORE + 1 },
+    ],
   ])("rejects an invalid leaderboard body for %s", async (path, body) => {
     const origin = "http://localhost:5173";
     const session = await app.default.fetch(
@@ -1544,6 +1619,8 @@ describe("Worker request boundary", () => {
     "/api/2048/leaderboard/record",
     "/api/snake/leaderboard",
     "/api/snake/leaderboard/record",
+    "/api/stack-game/leaderboard",
+    "/api/stack-game/leaderboard/record",
     "/api/sokoban/progress",
     "/api/sokoban/progress/record",
     "/api/rooms/AAAAAAAAAAAAAAAA/sync",

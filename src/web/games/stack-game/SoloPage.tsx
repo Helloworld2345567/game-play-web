@@ -3,6 +3,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Trophy,
   Volume2,
   VolumeX,
 } from "lucide-preact";
@@ -17,6 +18,13 @@ import {
   type StackGameSlice,
   type StackGameState,
 } from "../../../games/stack-game/engine";
+import { STACK_GAME_MAX_SCORE } from "../../../shared/game-stack-leaderboard";
+import { ProfileMenu } from "../../ProfileMenu";
+import {
+  loadGameStackLeaderboard,
+  recordGameStackScore,
+  type StackGameLeaderboardSnapshot,
+} from "./leaderboard-client";
 import {
   StackScene,
   type StackBlockVisual,
@@ -27,10 +35,26 @@ import "./game.css";
 
 const BEST_SCORE_KEY = "stack-game-best-v1";
 const SOUND_ENABLED_KEY = "stack-game-sound-enabled-v1";
+const SCORE_SUBMISSION_TIMEOUT_MS = 10_000;
 const BLOCK_VISUAL_CACHE = new WeakMap<
   readonly StackGameBlock[],
   readonly StackBlockVisual[]
 >();
+
+interface ActiveStackGame {
+  readonly id: string;
+  readonly state: StackGameState;
+}
+
+interface FailedStackGameSubmission {
+  readonly id: string;
+  readonly score: number;
+}
+
+interface StackGameSubmissionRequest {
+  readonly controller: AbortController;
+  readonly timeoutId: number;
+}
 
 function readStoredBest(): number {
   try {
@@ -46,6 +70,94 @@ function readStoredSoundPreference(): boolean {
     return localStorage.getItem(SOUND_ENABLED_KEY) !== "0";
   } catch {
     return true;
+  }
+}
+
+function withStackPersonalBest(
+  snapshot: StackGameLeaderboardSnapshot,
+  personalBestScore: number | null,
+): StackGameLeaderboardSnapshot {
+  return snapshot.personalBestScore === personalBestScore
+    ? snapshot
+    : { ...snapshot, personalBestScore };
+}
+
+export function formatGameStackScore(score: number): string {
+  return new Intl.NumberFormat("zh-CN").format(Math.max(0, score));
+}
+
+export function higherGameStackPersonalBest(
+  current: number | null,
+  incoming: number | null,
+): number | null {
+  if (current === null) return incoming;
+  if (incoming === null) return current;
+  return Math.max(current, incoming);
+}
+
+export function preferHigherGameStackSnapshot(
+  current: StackGameLeaderboardSnapshot | null,
+  incoming: StackGameLeaderboardSnapshot,
+): StackGameLeaderboardSnapshot {
+  if (current !== null && current.ruleVersion !== incoming.ruleVersion) {
+    return incoming;
+  }
+  const incomingBest = incoming.personalBestScore;
+  if (
+    current !== null &&
+    current.personalBestScore !== null &&
+    (incomingBest === null || incomingBest < current.personalBestScore)
+  ) {
+    return current;
+  }
+  return incoming;
+}
+
+/**
+ * A record response confirms this Guest's best score, but its Top 10 can have
+ * been projected before another in-flight write. Preserve the visible list
+ * until the follow-up read supplies an authoritative projection.
+ */
+export function applyGameStackRecordSnapshot(
+  current: StackGameLeaderboardSnapshot | null,
+  incoming: StackGameLeaderboardSnapshot,
+): StackGameLeaderboardSnapshot {
+  if (current === null || current.ruleVersion !== incoming.ruleVersion) {
+    return incoming;
+  }
+  return withStackPersonalBest(
+    current,
+    higherGameStackPersonalBest(
+      current.personalBestScore,
+      incoming.personalBestScore,
+    ),
+  );
+}
+
+export function isNewGameStackPersonalBest(
+  previousBestScore: number | null,
+  completedScore: number,
+  confirmedBestScore: number | null,
+  previousBestKnown: boolean,
+): boolean {
+  return previousBestKnown &&
+    confirmedBestScore === completedScore &&
+    (previousBestScore === null || completedScore > previousBestScore);
+}
+
+function newActiveStackGame(): ActiveStackGame {
+  return {
+    id: crypto.randomUUID(),
+    state: createStackGame(),
+  };
+}
+
+function initialLeaderboardOpen(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.matchMedia("(min-width: 641px)").matches;
+  } catch {
+    return false;
   }
 }
 
@@ -102,28 +214,62 @@ function vibrate(pattern: number | number[]): void {
   }
 }
 
-export function SoloPage() {
-  const [game, setGame] = useState<StackGameState>(createStackGame);
+export function SoloPage({
+  displayName,
+  initiallyOpenProfile = false,
+  onDisplayNameChange,
+}: {
+  displayName: string;
+  initiallyOpenProfile?: boolean;
+  onDisplayNameChange(displayName: string): void;
+}) {
+  const [activeGame, setActiveGame] = useState<ActiveStackGame>(newActiveStackGame);
+  const game = activeGame.state;
   const [bestScore, setBestScore] = useState(readStoredBest);
   const [soundEnabled, setSoundEnabled] = useState(readStoredSoundPreference);
   const [paused, setPaused] = useState(false);
   const [feedback, setFeedback] = useState<{ readonly id: number; readonly text: string } | null>(null);
+  const [leaderboard, setLeaderboard] = useState<StackGameLeaderboardSnapshot | null>(null);
+  const [leaderboardStatus, setLeaderboardStatus] =
+    useState<"loading" | "ready" | "offline">("loading");
+  const [leaderboardOpen, setLeaderboardOpen] = useState(initialLeaderboardOpen);
+  const [recordNotice, setRecordNotice] = useState<string | null>(null);
+  const [failedSubmission, setFailedSubmission] =
+    useState<FailedStackGameSubmission | null>(null);
   const [renderReady, setRenderReady] = useState(false);
   const [renderError, setRenderError] = useState(false);
   const [contextLost, setContextLost] = useState(false);
+  const gameIdRef = useRef(activeGame.id);
   const gameRef = useRef(game);
   const pausedRef = useRef(paused);
+  const currentDisplayName = useRef(displayName);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLButtonElement>(null);
   const sceneRef = useRef<StackScene | null>(null);
   const soundRef = useRef<StackSound | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
+  const leaderboardRequest = useRef(0);
+  const submissionAttempt = useRef(0);
+  const visibleSubmissionAttempt = useRef<number | null>(null);
+  const confirmedBestScore = useRef<number | null>(null);
+  const confirmedBestKnown = useRef(false);
+  const submittedGames = useRef(new Set<string>());
+  const submittingGames = useRef(new Set<string>());
+  const submissionRequests = useRef(
+    new Map<string, StackGameSubmissionRequest>(),
+  );
+  const mounted = useRef(true);
+  currentDisplayName.current = displayName;
 
   if (soundRef.current === null) soundRef.current = new StackSound(soundEnabled);
 
   const commitGame = useCallback((nextGame: StackGameState) => {
+    const nextActiveGame: ActiveStackGame = {
+      id: gameIdRef.current,
+      state: nextGame,
+    };
     gameRef.current = nextGame;
-    setGame(nextGame);
+    setActiveGame(nextActiveGame);
     syncScene(sceneRef.current, nextGame);
   }, []);
 
@@ -148,11 +294,134 @@ export function SoloPage() {
     });
   }, []);
 
+  const acceptLeaderboardSnapshot = useCallback((
+    snapshot: StackGameLeaderboardSnapshot,
+  ) => {
+    const effectiveBest = higherGameStackPersonalBest(
+      confirmedBestScore.current,
+      snapshot.personalBestScore,
+    );
+    confirmedBestScore.current = effectiveBest;
+    confirmedBestKnown.current = true;
+    const effectiveSnapshot = withStackPersonalBest(snapshot, effectiveBest);
+    setLeaderboard((current) =>
+      preferHigherGameStackSnapshot(current, effectiveSnapshot)
+    );
+    setLeaderboardStatus("ready");
+  }, []);
+
+  const refreshLeaderboardAfterRecord = useCallback(() => {
+    const requestId = ++leaderboardRequest.current;
+    void loadGameStackLeaderboard(currentDisplayName.current).then(
+      (snapshot) => {
+        if (!mounted.current || leaderboardRequest.current !== requestId) return;
+        acceptLeaderboardSnapshot(snapshot);
+      },
+      () => {
+        // The write response already confirms the personal best. Keep it
+        // visible and let the next page load or score write refresh Top 10.
+      },
+    );
+  }, [acceptLeaderboardSnapshot]);
+
+  const submitScore = useCallback((gameId: string, score: number) => {
+    if (
+      !Number.isSafeInteger(score) ||
+      score < 1 ||
+      score > STACK_GAME_MAX_SCORE ||
+      submittedGames.current.has(gameId) ||
+      submittingGames.current.has(gameId)
+    ) {
+      return;
+    }
+    submittedGames.current.add(gameId);
+    submittingGames.current.add(gameId);
+    const attemptId = ++submissionAttempt.current;
+    visibleSubmissionAttempt.current = attemptId;
+    const previousBest = confirmedBestScore.current;
+    const previousBestKnown = confirmedBestKnown.current;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      SCORE_SUBMISSION_TIMEOUT_MS,
+    );
+    submissionRequests.current.set(gameId, { controller, timeoutId });
+    const finishRequest = () => {
+      const request = submissionRequests.current.get(gameId);
+      if (request?.controller !== controller) return;
+      window.clearTimeout(request.timeoutId);
+      submissionRequests.current.delete(gameId);
+    };
+    setFailedSubmission((current) => current?.id === gameId ? null : current);
+    setRecordNotice("正在保存分数…");
+    void recordGameStackScore(
+      currentDisplayName.current,
+      score,
+      controller.signal,
+    ).then(
+      (snapshot) => {
+        finishRequest();
+        submittingGames.current.delete(gameId);
+        if (!mounted.current) return;
+        const effectiveBest = higherGameStackPersonalBest(
+          confirmedBestScore.current,
+          snapshot.personalBestScore,
+        );
+        confirmedBestScore.current = effectiveBest;
+        confirmedBestKnown.current = true;
+        setFailedSubmission((current) =>
+          current !== null && current.score <= (effectiveBest ?? 0)
+            ? null
+            : current
+        );
+        const effectiveSnapshot = withStackPersonalBest(snapshot, effectiveBest);
+        setLeaderboard((current) =>
+          applyGameStackRecordSnapshot(current, effectiveSnapshot)
+        );
+        setLeaderboardStatus("ready");
+        refreshLeaderboardAfterRecord();
+        if (visibleSubmissionAttempt.current === attemptId) {
+          setRecordNotice(
+            isNewGameStackPersonalBest(
+              previousBest,
+              score,
+              effectiveBest,
+              previousBestKnown,
+            )
+              ? "新的个人最高！"
+              : "分数已记录",
+          );
+        }
+      },
+      () => {
+        finishRequest();
+        submittingGames.current.delete(gameId);
+        submittedGames.current.delete(gameId);
+        if (!mounted.current) return;
+        if (
+          confirmedBestScore.current === null ||
+          confirmedBestScore.current < score
+        ) {
+          setFailedSubmission((current) =>
+            current === null || score > current.score
+              ? { id: gameId, score }
+              : current
+          );
+        }
+        if (visibleSubmissionAttempt.current === attemptId) {
+          setRecordNotice("分数暂未同步，可重试");
+        }
+      },
+    );
+  }, [refreshLeaderboardAfterRecord]);
+
   const startOrPlace = useCallback(() => {
     if (pausedRef.current || renderError || contextLost) return;
     const current = gameRef.current;
     if (current.status === "ready") {
       const started = startStackGame(current);
+      visibleSubmissionAttempt.current = null;
+      setRecordNotice(null);
       commitGame(started);
       soundRef.current?.play("start");
       stageRef.current?.focus({ preventScroll: true });
@@ -163,6 +432,7 @@ export function SoloPage() {
     const placement = placeStackGame(current);
     commitGame(placement.state);
     if (placement.result === "miss") {
+      rememberBest(current.score);
       const support = current.blocks[current.blocks.length - 1];
       if (current.active !== null && support !== undefined) {
         sceneRef.current?.dropMiss({
@@ -199,13 +469,18 @@ export function SoloPage() {
   }, [commitGame, contextLost, rememberBest, renderError, showFeedback]);
 
   const restart = useCallback(() => {
-    const restarted = createStackGame();
+    const restarted = newActiveStackGame();
+    gameIdRef.current = restarted.id;
+    gameRef.current = restarted.state;
+    setActiveGame(restarted);
     pausedRef.current = false;
     setPaused(false);
     setFeedback(null);
-    commitGame(restarted);
+    visibleSubmissionAttempt.current = null;
+    setRecordNotice(null);
+    syncScene(sceneRef.current, restarted.state);
     stageRef.current?.focus({ preventScroll: true });
-  }, [commitGame]);
+  }, []);
 
   const togglePause = useCallback(() => {
     if (gameRef.current.status !== "playing") return;
@@ -226,6 +501,76 @@ export function SoloPage() {
     }
     if (nextEnabled) soundRef.current?.play("place");
   }, [soundEnabled]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const request of submissionRequests.current.values()) {
+        window.clearTimeout(request.timeoutId);
+        request.controller.abort();
+      }
+      submissionRequests.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const requestId = ++leaderboardRequest.current;
+    let animationFrame = 0;
+    let idleRequest = 0;
+    let fallbackTimer = 0;
+    setLeaderboard(null);
+    setLeaderboardStatus("loading");
+    const loadLeaderboard = () => {
+      if (controller.signal.aborted) return;
+      void loadGameStackLeaderboard(displayName, controller.signal).then(
+        (snapshot) => {
+          if (
+            !mounted.current ||
+            controller.signal.aborted ||
+            leaderboardRequest.current !== requestId
+          ) return;
+          acceptLeaderboardSnapshot(snapshot);
+        },
+        () => {
+          if (
+            controller.signal.aborted ||
+            leaderboardRequest.current !== requestId
+          ) return;
+          setLeaderboardStatus("offline");
+        },
+      );
+    };
+    // Let Three.js construct and paint the scene before session/bootstrap and
+    // leaderboard work begins. The timeout keeps the ranking responsive on a
+    // browser that reports no idle time while the RAF loop is active.
+    animationFrame = window.requestAnimationFrame(() => {
+      if (controller.signal.aborted) return;
+      if (typeof window.requestIdleCallback === "function") {
+        idleRequest = window.requestIdleCallback(loadLeaderboard, {
+          timeout: 1_000,
+        });
+      } else {
+        fallbackTimer = window.setTimeout(loadLeaderboard, 0);
+      }
+    });
+    return () => {
+      controller.abort();
+      window.cancelAnimationFrame(animationFrame);
+      if (idleRequest !== 0) window.cancelIdleCallback(idleRequest);
+      if (fallbackTimer !== 0) window.clearTimeout(fallbackTimer);
+    };
+  }, [acceptLeaderboardSnapshot, displayName]);
+
+  // React observes the completed state after the input task has finished, so
+  // session/bootstrap and score requests never start inside the placement
+  // handler or the animation loop.
+  useEffect(() => {
+    if (game.status === "over" && game.score > 0) {
+      submitScore(activeGame.id, game.score);
+    }
+  }, [activeGame.id, game.score, game.status, submitScore]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -333,6 +678,7 @@ export function SoloPage() {
   };
 
   const reloadPage = () => location.reload();
+  const personalBestScore = leaderboard?.personalBestScore ?? null;
 
   const stateLayer = renderError
     ? (
@@ -371,7 +717,7 @@ export function SoloPage() {
     ? (
       <div class="stack-game-state-copy">
         <h1>已暂停</h1>
-        <p>{game.score} 层 · 最佳 {bestScore} 层</p>
+        <p>{game.score} 层 · 本机最佳 {bestScore} 层</p>
         <button class="stack-game-primary-action" type="button" onClick={togglePause}>
           <Play aria-hidden="true" size={18} strokeWidth={2.2} />
           继续
@@ -382,7 +728,7 @@ export function SoloPage() {
     ? (
       <div class="stack-game-state-copy">
         <h1>{game.score} 层</h1>
-        <p>{game.score >= bestScore && game.score > 0 ? "本局最佳" : `最佳 ${bestScore} 层`}</p>
+        <p>{game.score >= bestScore && game.score > 0 ? "本局最佳" : `本机最佳 ${bestScore} 层`}</p>
         <button class="stack-game-primary-action" type="button" onClick={restart}>
           <RotateCcw aria-hidden="true" size={18} strokeWidth={2.2} />
           再来一局
@@ -423,10 +769,26 @@ export function SoloPage() {
           </a>
           <div class="stack-game-brand-copy">
             <strong>叠叠高</strong>
-            <span>最佳 {bestScore} 层</span>
+            <span>本机最佳 {bestScore} 层</span>
           </div>
         </div>
         <div class="stack-game-controls">
+          <ProfileMenu
+            displayName={displayName}
+            initiallyOpen={initiallyOpenProfile}
+            onSave={onDisplayNameChange}
+          />
+          <button
+            class="stack-game-icon-button"
+            type="button"
+            aria-label={leaderboardOpen ? "关闭排行榜" : "打开排行榜"}
+            aria-expanded={leaderboardOpen}
+            aria-controls="stack-game-leaderboard"
+            data-tooltip={leaderboardOpen ? "关闭排行榜" : "打开排行榜"}
+            onClick={() => setLeaderboardOpen((open) => !open)}
+          >
+            <Trophy aria-hidden="true" size={18} strokeWidth={2} />
+          </button>
           <button
             class="stack-game-icon-button"
             type="button"
@@ -461,6 +823,72 @@ export function SoloPage() {
           </button>
         </div>
       </nav>
+
+      <section
+        id="stack-game-leaderboard"
+        class="stack-game-leaderboard"
+        data-open={leaderboardOpen ? "true" : "false"}
+        aria-label="叠叠高排行榜"
+      >
+        <header>
+          <div>
+            <p class="stack-game-leaderboard-eyebrow">全球榜 · 叠叠高</p>
+            <h2>最高层数 · 前 10</h2>
+          </div>
+          <span>
+            {leaderboardStatus === "loading"
+              ? "正在加载…"
+              : leaderboardStatus === "offline"
+                ? "暂时无法连接排行榜"
+              : "按层数从高到低"}
+          </span>
+        </header>
+        <p class="stack-game-personal-best">
+          <span>个人最高</span>
+          <strong>
+            {personalBestScore === null
+              ? "—"
+              : formatGameStackScore(personalBestScore)}
+          </strong>
+          {personalBestScore !== null && <small>层</small>}
+        </p>
+        {leaderboard !== null && leaderboard.top.length > 0 ? (
+          <ol>
+            {leaderboard.top.map((entry) => (
+              <li key={`${entry.rank}-${entry.displayName}-${entry.score}`}>
+                <span class="stack-game-leaderboard-rank">{entry.rank}</span>
+                <strong>{entry.displayName}</strong>
+                <data value={entry.score}>{formatGameStackScore(entry.score)}</data>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p class="stack-game-leaderboard-empty">
+            {leaderboardStatus === "ready" ? "还没有完成纪录" : "—"}
+          </p>
+        )}
+        <p class="stack-game-leaderboard-note">
+          本局结束时自动记录最高层数；排行榜只保留每位玩家的个人最高纪录。
+        </p>
+        {recordNotice !== null && (
+          <p class="stack-game-record-notice" aria-live="polite">
+            {recordNotice}
+          </p>
+        )}
+        {failedSubmission !== null && (
+          <button
+            class="stack-game-record-retry"
+            type="button"
+            onClick={() => {
+              if (submittingGames.current.has(failedSubmission.id)) return;
+              submittedGames.current.delete(failedSubmission.id);
+              submitScore(failedSubmission.id, failedSubmission.score);
+            }}
+          >
+            重试保存 {formatGameStackScore(failedSubmission.score)} 层
+          </button>
+        )}
+      </section>
 
       <div class="stack-game-scoreboard" aria-label="本局分数">
         <strong class="stack-game-score">{game.score}</strong>

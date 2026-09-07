@@ -26,6 +26,10 @@
         "class_name": "SnakeLeaderboard"
       },
       {
+        "name": "STACK_GAME_LEADERBOARD",
+        "class_name": "StackGameLeaderboard"
+      },
+      {
         "name": "SOKOBAN_PROGRESS",
         "class_name": "SokobanProgress"
       }
@@ -49,6 +53,10 @@
       "storage": "sqlite"
     },
     "SnakeLeaderboard": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "StackGameLeaderboard": {
       "type": "durable-object",
       "storage": "sqlite"
     },

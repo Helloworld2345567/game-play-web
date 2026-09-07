@@ -24,12 +24,12 @@
 - 贪吃蛇显示个人最高分和全站 Top 10；每个签名 Guest 在不可变规则版本 `snake.solo.20x20.v1` 下保留一条个人最高分，成绩最多保留 180 天
 - 推箱子内置 Microban 第 1–20 关，支持方向键/WASD、触摸滑动、屏幕方向按钮、撤销、重开、上一关/下一关和关卡选择；局面纯本地运行，不创建房间，按签名 Guest 保存每关最少步数和通关记录 180 天并在下次访问恢复（清除 Cookie 或更换设备会成为新 Guest）
 - 坦克大战使用 13×13 本地地图，支持方向键/WASD 驾驶、空格开火、暂停和重开；消灭三台会移动和开火的敌方坦克即可获胜，局面不创建房间也不上传成绩
-- 叠叠高使用全屏 Three.js 立体场景，支持点击、触屏、空格或回车落块；超出塔身的部分会切除并坠落，移动方向逐层交替且速度随分数提升，连续完美落点可恢复平台尺寸；最高层数仅保存在当前浏览器
+- 叠叠高使用全屏 Three.js 立体场景，支持点击、触屏、空格或回车落块；超出塔身的部分会切除并坠落，移动方向逐层交替且速度随分数提升，连续完美落点可恢复平台尺寸；结束时异步记录个人最高和全站 Top 10 休闲榜，最高层数和音效偏好同时保存在当前浏览器
 - Microban 关卡由 David W. Skinner 创作，依“可自由转载但须署名”的原作者许可分发；游戏页保留可见署名，固定 GitHub 来源与核验记录见 [`docs/research/SOKOBAN_LEVELS.md`](docs/research/SOKOBAN_LEVELS.md)
 
 ## 架构
 
-同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化，其内部由统一准入、`RoomRuntime`、`ActionJournal` 与 `SnapshotProjector` 分工，但不增加跨 DO 网络跳转；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；`MinesweeperLeaderboard`、`Game2048Leaderboard` 和 `SnakeLeaderboard` 三个 SQLite-backed 单例分别按各自不可变规则版本原子保存个人最佳并生成 Top 10；`SokobanProgress` 使用固定 64 个确定性分片，表内按 `guest_id` 隔离，每个 Guest 至多幂等保存二十个关卡的最佳步数，记录保留 180 天后清理，避免为匿名访问者无限创建 Durable Object。当前共六类 SQLite-backed Durable Object；排行榜和进度 DO 都不计入房间上限。
+同一个 TypeScript 项目构建 Preact 静态页面与 Cloudflare Worker。Worker 负责会话和路由；`GameRoom` Durable Object 串行处理房间内的 HTTP、WebSocket 和持久化，其内部由统一准入、`RoomRuntime`、`ActionJournal` 与 `SnapshotProjector` 分工，但不增加跨 DO 网络跳转；单例 `RoomDirectory` 管理 10 个房间的容量与 Presence；`MinesweeperLeaderboard`、`Game2048Leaderboard`、`SnakeLeaderboard` 和 `StackGameLeaderboard` 四个 SQLite-backed 单例分别按各自不可变规则版本原子保存个人最佳并生成 Top 10；`SokobanProgress` 使用固定 64 个确定性分片，表内按 `guest_id` 隔离，每个 Guest 至多幂等保存二十个关卡的最佳步数，记录保留 180 天后清理，避免为匿名访问者无限创建 Durable Object。当前共七类 SQLite-backed Durable Object；排行榜和进度 DO 都不计入房间上限。
 
 共享 `GameManifest` 只包含可信纯元数据，客户端 `GameCatalog` 通过静态 allowlist 动态加载本地页面或房间 renderer，服务端 `GameRules` 注册表独立控制规则恢复与新建。浏览器侧保留窄的 `useRoom()` 接口，内部 `RoomSession` 将 WebSocket、HTTPS polling、协议解析和并发动作跟踪分离，因此增加棋类不需要修改会话与重连核心。
 
@@ -41,7 +41,7 @@
 
 推箱子通过 `/sokoban` 按需加载为独立的 `local-game` 页面，`?level=1..20` 可直达关卡。纯函数引擎解析 XSB 关卡并严格区分外部空白、墙、地板和目标点，通过不可变的 `createSokoban` / `moveSokoban` 接口统一验证移动、推箱、计步和胜利；棋盘、撤销栈和当前局面仍只在浏览器内运行。页面通过 `/api/sokoban/progress` 与 `/api/sokoban/progress/record` 恢复或幂等保存当前签名 Guest 的通关记录与每关最少步数；首次进入时先确认当前 Guest 再开放移动，确认后发生的断网通关会进入按关卡独立存储、绑定用途专属 HMAC 伪名的离线 outbox。服务端只接受固定规则版本、已发布关卡和当前 Guest 的同步令牌，不接受客户端 Guest ID，也不向响应公开 Guest ID。不可变规则版本 `sokoban.microban-1-20.v1` 使用独立的 `src/games/sokoban/levels.ts` 数据目录，后续追加或修改关卡时必须发布新的进度版本。
 
-叠叠高通过 `/stack-game` 按需加载为独立的 `local-game` 页面。纯函数引擎以不可变矩形几何计算交叠、切片、完美落点、连击奖励、逐层加速和终局；Three.js 页面只负责灯光、阴影、镜头爬升、碎片重力和输入反馈。它不创建房间、不调用成绩接口，最高层数与音效偏好仅保存在浏览器本地。
+叠叠高通过 `/stack-game` 按需加载为独立的 `local-game` 页面。纯函数引擎以不可变矩形几何计算交叠、切片、完美落点、连击奖励、逐层加速和终局；Three.js 页面只负责灯光、阴影、镜头爬升、碎片重力和输入反馈。它不创建房间；通过 `/api/stack-game/leaderboard` 与 `/api/stack-game/leaderboard/record` 异步读取或提交成绩，页面加载、终局提交和写后刷新之外不发起排行榜请求，所有网络逻辑都位于动画循环之外。`StackGameLeaderboard` 在 `stack-game.solo.v1` 下为每个签名 Guest 保留最高层数并返回全站 Top 10，数据最多保留 180 天；最高层数与音效偏好仍保存在浏览器本地。
 
 跳棋通过首页选择人数创建 `chinese-checkers.room.2p.v1`、`chinese-checkers.room.3p.v1` 或 `chinese-checkers.room.4p.v1` 邀请房间。纯函数引擎生成标准 121 孔棋盘和 2/3/4 人营地布局，房间规则统一验证相邻单步、同子连续跳跃、回合轮转与目标营胜负；客户端房间 renderer 只维护选中状态与展示状态。
 
@@ -79,11 +79,11 @@ npm run test:e2e
 npm run build
 ```
 
-测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、跳棋、贪吃蛇、推箱子、坦克大战和叠叠高引擎、4×4/5×5/6×6 的 2048 引擎与本地页交互、叠叠高的真实 WebGL 桌面/手机画布、排行榜与进度客户端解析、三个独立排行榜和推箱子进度 Durable Object、真实 workerd Durable Object、Worker 边界校验、推箱子关闭页面后的通关恢复、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
+测试覆盖纯规则/房间状态、五子棋、中国象棋、井字棋、挑夹棋、警察抓小偷、扫雷、跳棋、贪吃蛇、推箱子、坦克大战和叠叠高引擎、4×4/5×5/6×6 的 2048 引擎与本地页交互、叠叠高的真实 WebGL 桌面/手机画布、排行榜与进度客户端解析、四个独立排行榜和推箱子进度 Durable Object、真实 workerd Durable Object、Worker 边界校验、推箱子关闭页面后的通关恢复、WebSocket/HTTPS 混合并发、秘密状态投影、全局房间容量与 Presence 统计，以及多个独立浏览器身份的昵称、邀请、开局选角、观战、退出与空房回收、断网恢复、完整胜局和复赛换边流程。
 
 ## 部署
 
-`wrangler.jsonc` 已配置 Worker、静态资源、`GameRoom`、`RoomDirectory`、`MinesweeperLeaderboard`、`Game2048Leaderboard`、`SnakeLeaderboard` 和 `SokobanProgress` 六个 SQLite Durable Object 类，以及 Custom Domain `play.ym0v0.com`。
+`wrangler.jsonc` 已配置 Worker、静态资源、`GameRoom`、`RoomDirectory`、`MinesweeperLeaderboard`、`Game2048Leaderboard`、`SnakeLeaderboard`、`StackGameLeaderboard` 和 `SokobanProgress` 七个 SQLite Durable Object 类，以及 Custom Domain `play.ym0v0.com`。
 
 推送到 GitHub `main` 分支会触发 [Deploy production](.github/workflows/deploy.yml)：依次运行高危依赖审计、单元测试、Worker 集成测试、浏览器 E2E 和生产构建，全部通过后才部署到 Cloudflare。同一时间只运行一个生产部署，也可以在 GitHub Actions 页面手动触发。
 
@@ -104,7 +104,7 @@ npm run deploy
 
 生产密钥只能写入 Cloudflare Secret，不要放入 `.env`、源码或 Git 历史。
 
-安全边界：Worker 对 JSON 请求执行 Content-Type、Content-Length 和字节上限校验；会话、建房、房间 HTTP/WebSocket 握手、统计、排行榜和推箱子进度入口都有 Guest/IP 维度的软限流，房间内 WebSocket 消息还受 Guest 级限流约束，生产环境还应在 Cloudflare WAF/Rate Limiting 配置分布式规则。推箱子通关只影响该 Guest 自己的完成标记，不用于排名、奖励或权限；若未来用于竞争性结果，必须增加服务端回放验证。静态资源使用 CSP、HSTS、同源隔离、`nosniff` 和禁止 iframe；生产构建不发布 source map。`SESSION_SECRET` 缺失或过弱时 Worker 拒绝启动，客户端清单不是服务端授权边界。
+安全边界：Worker 对 JSON 请求执行 Content-Type、Content-Length 和字节上限校验；会话、建房、房间 HTTP/WebSocket 握手、统计、排行榜和推箱子进度入口都有 Guest/IP 维度的软限流，房间内 WebSocket 消息还受 Guest 级限流约束，生产环境还应在 Cloudflare WAF/Rate Limiting 配置分布式规则。推箱子通关只影响该 Guest 自己的完成标记，不用于排名、奖励或权限；四个单机排行榜的分数都由客户端提交，虽有签名 Guest、规则版本、范围校验和原子个人最佳更新，但没有完整服务端回放校验，因此只定位为休闲榜，不宣称强反作弊。静态资源使用 CSP、HSTS、同源隔离、`nosniff` 和禁止 iframe；生产构建不发布 source map。`SESSION_SECRET` 缺失或过弱时 Worker 拒绝启动，客户端清单不是服务端授权边界。
 
 ## 增加棋种
 
