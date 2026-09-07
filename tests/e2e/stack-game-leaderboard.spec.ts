@@ -100,14 +100,17 @@ test("submits one completed score asynchronously and refreshes the ranking", asy
   await expect(stage).toHaveAttribute("data-render-ready", "true");
   await page.getByRole("button", { name: "开始堆叠" }).click();
 
-  // The first block reaches a valid overlap after roughly two seconds. The
-  // next block starts outside the tower, so placing it immediately ends the
-  // game with exactly one completed layer.
+  // The first block reaches a valid overlap after roughly two seconds. Run
+  // both placements in one browser task so no animation frame can move the
+  // newly spawned block in between: it starts outside the tower, therefore
+  // the second placement deterministically ends at exactly one layer.
   await page.waitForTimeout(1_500);
-  await stage.click({ position: { x: 16, y: 320 } });
+  await stage.evaluate((element) => {
+    const stageButton = element as HTMLButtonElement;
+    stageButton.click();
+    stageButton.click();
+  });
   await expect(stage).toHaveAttribute("data-score", "1");
-  await page.waitForTimeout(240);
-  await stage.click({ position: { x: 16, y: 320 } });
   await expect(stage).toHaveAttribute("data-game-status", "over");
 
   await expect.poll(() => recordBodies.length).toBe(1);
