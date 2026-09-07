@@ -3,6 +3,7 @@ import type { PointerEvent as PreactPointerEvent } from "preact/compat";
 import { BOARD_SIZE, readGomokuPosition } from "../../../games/gomoku/rules";
 import type { GameAdapter, GameRendererProps } from "../registry";
 import { findBoardPoint, type BoardPoint } from "./board-geometry";
+import { gomokuPresentation } from "./presentation";
 
 const STAR_POINTS = [
   [3, 3],
@@ -11,14 +12,6 @@ const STAR_POINTS = [
   [3, 11],
   [11, 11],
 ] as const;
-
-const GOMOKU_ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  "gomoku.not_your_turn": "还没轮到你。",
-  "gomoku.occupied": "这个交叉点已经有棋子。",
-  "gomoku.out_of_bounds": "落点超出棋盘。",
-  "gomoku.game_finished": "本局已经结束。",
-  "gomoku.invalid_action": "无法识别这次落子。",
-};
 
 function drawStone(
   context: CanvasRenderingContext2D,
@@ -57,6 +50,29 @@ function drawStone(
   context.restore();
 }
 
+function prepareCanvas(
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  dpr: number,
+): CanvasRenderingContext2D | null {
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  const context = canvas.getContext("2d");
+  if (context === null) return null;
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, width, height);
+  return context;
+}
+
+function readDevicePixelRatio(): number {
+  return typeof window === "undefined"
+    ? 1
+    : Math.min(window.devicePixelRatio || 1, 2);
+}
+
 export function GomokuBoard({
   position,
   selfSeat,
@@ -65,9 +81,12 @@ export function GomokuBoard({
   onAction,
 }: GameRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const staticCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(336);
+  const [devicePixelRatio, setDevicePixelRatio] = useState(readDevicePixelRatio);
   const [preview, setPreview] = useState<BoardPoint | null>(null);
+  const [focused, setFocused] = useState(false);
   const [keyboardPoint, setKeyboardPoint] = useState<BoardPoint>({
     x: 7,
     y: 7,
@@ -95,6 +114,14 @@ export function GomokuBoard({
   }, []);
 
   useEffect(() => {
+    const updateDevicePixelRatio = () => {
+      setDevicePixelRatio(readDevicePixelRatio());
+    };
+    window.addEventListener("resize", updateDevicePixelRatio);
+    return () => window.removeEventListener("resize", updateDevicePixelRatio);
+  }, []);
+
+  useEffect(() => {
     if (data.lastMove) {
       setKeyboardPoint({ x: data.lastMove.x, y: data.lastMove.y });
     }
@@ -102,15 +129,10 @@ export function GomokuBoard({
   }, [data.lastMove?.x, data.lastMove?.y, pending]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (canvas === null) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(size * dpr);
-    canvas.height = Math.round(size * dpr);
-    const context = canvas.getContext("2d");
+    const canvas = staticCanvasRef.current ?? document.createElement("canvas");
+    staticCanvasRef.current = canvas;
+    const context = prepareCanvas(canvas, size, size, devicePixelRatio);
     if (context === null) return;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    context.clearRect(0, 0, size, size);
 
     const boardGradient = context.createLinearGradient(0, 0, size, size);
     boardGradient.addColorStop(0, "#deb775");
@@ -180,7 +202,29 @@ export function GomokuBoard({
       context.stroke();
     }
 
-    const candidate = preview ?? (canvas === document.activeElement ? keyboardPoint : null);
+  }, [
+    data.board,
+    data.lastMove,
+    data.winningLine,
+    padding,
+    devicePixelRatio,
+    size,
+    step,
+  ]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const context = prepareCanvas(canvas, size, size, devicePixelRatio);
+    if (context === null) return;
+    const staticCanvas = staticCanvasRef.current;
+    if (staticCanvas !== null) {
+      // Reuse the stable bitmap; pointer moves only repaint this lightweight
+      // interaction pass instead of rebuilding the grid and every stone.
+      context.drawImage(staticCanvas, 0, 0, size, size);
+    }
+    const radius = step * 0.43;
+    const candidate = preview ?? (focused ? keyboardPoint : null);
     if (
       candidate &&
       canInteract &&
@@ -201,6 +245,8 @@ export function GomokuBoard({
     data.board,
     data.lastMove,
     data.winningLine,
+    devicePixelRatio,
+    focused,
     keyboardPoint,
     ownStone,
     padding,
@@ -270,6 +316,8 @@ export function GomokuBoard({
           role="application"
           aria-label={`五子棋棋盘。当前位置第 ${keyboardPoint.x + 1} 列第 ${keyboardPoint.y + 1} 行，${cellDescription}。`}
           aria-describedby="board-instructions gomoku-last-move"
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -310,29 +358,6 @@ export function GomokuBoard({
 }
 
 export const gomokuAdapter = {
-  gameType: "gomoku",
-  ruleSetId: "gomoku.freestyle15.v1",
-  displayName: "自由五子棋",
-  landingLabel: "五子棋",
-  createRoomLabel: "创建五子棋房",
-  landingDescription: "15×15 · 黑先 · 连五获胜",
+  ...gomokuPresentation,
   Renderer: GomokuBoard,
-  getSeatPresentations(position) {
-    const blackSeat =
-      position === null ? "seat-a" : readGomokuPosition(position).blackSeat;
-    const seatABlack = blackSeat === "seat-a";
-    return {
-      "seat-a": {
-        label: seatABlack ? "黑方" : "白方",
-        swatchClassName: seatABlack ? "black" : "white",
-      },
-      "seat-b": {
-        label: seatABlack ? "白方" : "黑方",
-        swatchClassName: seatABlack ? "white" : "black",
-      },
-    };
-  },
-  getErrorMessage(code) {
-    return GOMOKU_ERROR_MESSAGES[code] ?? null;
-  },
 } satisfies GameAdapter;

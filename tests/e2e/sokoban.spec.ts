@@ -101,6 +101,26 @@ test("waits for a bound Guest identity before accepting moves", async ({
   }
 });
 
+test("recovers playable progress after the first request stalls", async ({ page }) => {
+  let attempts = 0;
+  let release!: () => void;
+  const firstRequest = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/sokoban/progress", async (route) => {
+    attempts += 1;
+    if (attempts === 1) await firstRequest;
+    await route.continue().catch(() => undefined);
+  });
+  try {
+    await page.goto("/sokoban");
+    await expect(board(page, 1)).toHaveAttribute("data-progress-ready", "false");
+    await expect(board(page, 1)).toHaveAttribute("data-progress-ready", "true", { timeout: 18_000 });
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    await board(page, 1).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(moveCount(page)).toHaveText("1");
+  } finally { release(); }
+});
+
 test("restores the signed Guest's completed levels on a later visit", async ({
   browser,
 }) => {

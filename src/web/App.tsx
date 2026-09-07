@@ -1,12 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import {
-  getMinesweeperRuleSetId,
-  type MinefieldPresetId,
-} from "../games/minesweeper/presets";
 import { normalizeDisplayName } from "../shared/display-name";
-import { getGameManifest } from "../shared/game-manifest";
 import type {
-  RematchOptionsView,
   RoomPreparationView,
   RoomSnapshot,
 } from "../shared/protocol";
@@ -23,8 +17,12 @@ import {
 } from "./games/registry";
 import {
   clientGameCatalog,
+  LANDING_GAME_CATALOG,
+  OTHER_SERVICE_LINKS,
   getClientGameCatalogEntry,
+  resolveRematchModeOptions,
   type ClientGamePage,
+  type GameLaunchTarget,
   type LocalGamePageProps,
 } from "./games/catalog";
 import {
@@ -37,9 +35,28 @@ import { ProfileMenu } from "./ProfileMenu";
 import { OpeningRolePanel } from "./OpeningRolePanel";
 import {
   RematchModeSelector,
-  type RematchModeOption,
 } from "./RematchModeSelector";
 import { ThemeToggle } from "./theme";
+import { requestJsonWithRetry } from "./api-request";
+
+export {
+  LANDING_GAME_CATALOG,
+  OTHER_SERVICE_LINKS,
+  resolveRematchModeOptions,
+} from "./games/catalog";
+export {
+  resolveChaseLaunch,
+  type ChaseDifficulty,
+} from "./games/chase/launch";
+export {
+  resolveChineseCheckersLaunch,
+  type ChineseCheckersPlayerCount,
+} from "./games/chinese-checkers/launch";
+export {
+  resolveMinesweeperLaunch,
+  type MinesweeperLaunchMode,
+  type MinesweeperPreset,
+} from "./games/minesweeper/launch";
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9_-]{16})\/?$/u;
 const LOCAL_GAME_PATH = /^\/([A-Za-z0-9_-]+)\/?$/u;
@@ -54,164 +71,12 @@ interface PlatformStats {
   activeRooms: number;
 }
 
-const LANDING_ROOM_ENTRIES = clientGameCatalog.flatMap((manifest) => {
-  if (
-    manifest.launchKind !== "turn-room" ||
-    manifest.creationPolicy !== "enabled" ||
-    manifest.gameId === "chase" ||
-    manifest.gameId === "chinese-checkers"
-  ) {
-    return [];
-  }
-  const ruleSetId = manifest.creatableRuleSetIds[0];
-  if (ruleSetId === undefined) return [];
-  const adapter = getGameAdapter(manifest.gameId, ruleSetId);
-  // A manifest without a registered client adapter is not a launch target.
-  // This keeps stale/unknown metadata fail closed on the landing page.
-  if (adapter === null) return [];
-  return [{
-    id: manifest.gameId,
-    label: adapter.landingLabel ?? manifest.title,
-    ariaLabel: adapter.createRoomLabel,
-    description: manifest.description,
-    launch: {
-      kind: "room" as const,
-      gameType: manifest.gameId,
-      ruleSetId,
-    },
-  }];
-});
-
-const LANDING_LOCAL_ENTRIES = clientGameCatalog.flatMap((manifest) => {
-  if (
-    manifest.launchKind !== "local-game" ||
-    manifest.creationPolicy !== "enabled" ||
-    manifest.loadPage === undefined
-  ) {
-    return [];
-  }
-  return [{
-    id: manifest.gameId,
-    label: manifest.title,
-    ariaLabel: `${manifest.title}，开始本机游戏`,
-    description: manifest.description,
-    launch: {
-      kind: "navigate" as const,
-      href: `/${manifest.gameId}`,
-    },
-  }];
-});
-
-export const LANDING_GAME_CATALOG = [
-  ...LANDING_ROOM_ENTRIES,
-  {
-    id: "chase",
-    label: "警察抓小偷",
-    ariaLabel: "警察抓小偷，选择地图难度",
-    description: "轮流走一步 · 警察抓住小偷获胜",
-    launch: { kind: "picker" as const, gameType: "chase" as const },
-  },
-  {
-    id: "minesweeper",
-    label: "扫雷",
-    ariaLabel: "扫雷，选择玩法和难度",
-    description: "单人计时 · 双人竞速",
-    launch: { kind: "picker" as const, gameType: "minesweeper" as const },
-  },
-  {
-    id: "chinese-checkers",
-    label: "跳棋",
-    ariaLabel: "跳棋，选择联机人数",
-    description: "标准 121 孔 · 2 / 3 / 4 人联机对战",
-    launch: {
-      kind: "picker" as const,
-      gameType: "chinese-checkers" as const,
-    },
-  },
-  ...LANDING_LOCAL_ENTRIES,
-] as const;
-
-/** External destinations that are presented separately from the game catalog. */
-export const OTHER_SERVICE_LINKS = [
-  {
-    id: "image",
-    label: "图片服务",
-    href: "https://image.ym0v0.com/",
-    description: "image.ym0v0.com",
-  },
-] as const;
-
-export type MinesweeperLaunchMode = "solo" | "race";
-export type MinesweeperPreset = MinefieldPresetId;
-
-export type ChaseDifficulty = "easy" | "medium" | "hard";
-export type ChineseCheckersPlayerCount = 2 | 3 | 4;
-
 export function localGameIdFromPath(path: string): string | null {
   const gameId = path.match(LOCAL_GAME_PATH)?.[1];
   if (gameId === undefined) return null;
   return getClientGameCatalogEntry(gameId)?.loadPage === undefined
     ? null
     : gameId;
-}
-
-export function resolveChaseLaunch(difficulty: ChaseDifficulty) {
-  const ruleSetId = `chase.${difficulty}.v1`;
-  const manifest = getGameManifest("chase");
-  if (!manifest?.creatableRuleSetIds.includes(ruleSetId)) {
-    throw new Error("unsupported_chase_difficulty");
-  }
-  return {
-    kind: "room" as const,
-    gameType: "chase",
-    ruleSetId,
-  };
-}
-
-export function resolveChineseCheckersLaunch(
-  playerCount: ChineseCheckersPlayerCount,
-) {
-  return {
-    kind: "room" as const,
-    gameType: "chinese-checkers",
-    ruleSetId: `chinese-checkers.room.${playerCount}p.v1`,
-  };
-}
-
-export function resolveMinesweeperLaunch(
-  mode: MinesweeperLaunchMode,
-  preset: MinesweeperPreset,
-) {
-  if (mode === "solo") {
-    return {
-      kind: "navigate" as const,
-      href: `/minesweeper?preset=${preset}`,
-    };
-  }
-  return {
-    kind: "room" as const,
-    gameType: "minesweeper",
-    ruleSetId: getMinesweeperRuleSetId("race", preset),
-  };
-}
-
-/** Resolve only server-approved rule ids that also have a trusted adapter. */
-export function resolveRematchModeOptions(
-  gameType: string,
-  rematchOptions: RematchOptionsView | null | undefined,
-): readonly RematchModeOption[] {
-  if (rematchOptions === null || rematchOptions === undefined) return [];
-  return rematchOptions.ruleSetIds.flatMap((ruleSetId) => {
-    const modeAdapter = getGameAdapter(gameType, ruleSetId);
-    if (modeAdapter === null) return [];
-    return [
-      {
-        ruleSetId,
-        label: modeAdapter.modeLabel ?? modeAdapter.displayName,
-        description: modeAdapter.landingDescription,
-      },
-    ];
-  });
 }
 
 function isPlatformStats(value: unknown): value is PlatformStats {
@@ -256,22 +121,24 @@ function usePlatformStats(displayName: string): PlatformStats | null {
           await ensureBrowserSession(displayName, controller.signal);
           sessionReady = true;
         }
-        const response = await fetch("/api/stats", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
+        const { response, data } = await requestJsonWithRetry<unknown>(
+          "/api/stats",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              presenceId,
+              clientSeq: ++presenceSequence.current,
+            }),
+            signal: controller.signal,
           },
-          body: JSON.stringify({
-            presenceId,
-            clientSeq: ++presenceSequence.current,
-          }),
-          signal: controller.signal,
-        });
-        const value: unknown = await response.json();
+        );
         if (response.status === 401) sessionReady = false;
-        if (!response.ok || !isPlatformStats(value)) return;
-        setStats(value);
+        if (!response.ok || !isPlatformStats(data)) return;
+        setStats(data);
       } catch {
         // Keep the last known values when the network is temporarily unavailable.
       } finally {
@@ -394,392 +261,6 @@ function Brand() {
   );
 }
 
-const MINESWEEPER_PRESET_OPTIONS: ReadonlyArray<{
-  id: MinesweeperPreset;
-  label: string;
-  detail: string;
-}> = [
-  { id: "small", label: "小型", detail: "9×9 · 10 雷" },
-  { id: "medium", label: "中型", detail: "16×16 · 40 雷" },
-  { id: "large", label: "大型", detail: "30×16 · 99 雷" },
-];
-
-function MinesweeperPicker({
-  mode,
-  preset,
-  creating,
-  error,
-  onModeChange,
-  onPresetChange,
-  onStart,
-  onClose,
-}: {
-  mode: MinesweeperLaunchMode;
-  preset: MinesweeperPreset;
-  creating: boolean;
-  error: string | null;
-  onModeChange(mode: MinesweeperLaunchMode): void;
-  onPresetChange(preset: MinesweeperPreset): void;
-  onStart(): void;
-  onClose(): void;
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (dialog !== null && !dialog.open) dialog.showModal();
-  }, []);
-
-  const close = () => {
-    if (creating) return;
-    const dialog = dialogRef.current;
-    if (dialog?.open) dialog.close();
-    else onClose();
-  };
-
-  const selectedPreset = MINESWEEPER_PRESET_OPTIONS.find(
-    (option) => option.id === preset,
-  );
-
-  return (
-    <dialog
-      ref={dialogRef}
-      class="minesweeper-picker"
-      aria-labelledby="minesweeper-picker-title"
-      aria-describedby="minesweeper-picker-summary"
-      onCancel={(event) => {
-        if (creating) event.preventDefault();
-      }}
-      onClose={onClose}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <header class="dialog-heading">
-        <div>
-          <p class="eyebrow">选择玩法</p>
-          <h2 id="minesweeper-picker-title">扫雷</h2>
-        </div>
-        <button
-          class="dialog-close"
-          type="button"
-          aria-label="关闭扫雷玩法选择"
-          disabled={creating}
-          onClick={close}
-        >
-          <span aria-hidden="true">×</span>
-        </button>
-      </header>
-
-      <form
-        class="minesweeper-picker-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onStart();
-        }}
-      >
-        <fieldset disabled={creating}>
-          <legend>玩法</legend>
-          <div class="choice-segments mode-segments">
-            <label class="choice-segment">
-              <input
-                type="radio"
-                name="minesweeper-mode"
-                value="solo"
-                checked={mode === "solo"}
-                autofocus={mode === "solo"}
-                onChange={() => onModeChange("solo")}
-              />
-              <span>
-                <strong>单人</strong>
-                <small>计时闯关</small>
-              </span>
-            </label>
-            <label class="choice-segment">
-              <input
-                type="radio"
-                name="minesweeper-mode"
-                value="race"
-                checked={mode === "race"}
-                autofocus={mode === "race"}
-                onChange={() => onModeChange("race")}
-              />
-              <span>
-                <strong>双人竞速</strong>
-                <small>同图独立对战</small>
-              </span>
-            </label>
-          </div>
-        </fieldset>
-
-        <fieldset disabled={creating}>
-          <legend>难度</legend>
-          <div class="choice-segments preset-segments">
-            {MINESWEEPER_PRESET_OPTIONS.map((option) => (
-              <label class="choice-segment" key={option.id}>
-                <input
-                  type="radio"
-                  name="minesweeper-preset"
-                  value={option.id}
-                  checked={preset === option.id}
-                  onChange={() => onPresetChange(option.id)}
-                />
-                <span><strong>{option.label}</strong></span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <p id="minesweeper-picker-summary" class="picker-summary">
-          <strong>{selectedPreset?.detail}</strong>
-          <span>
-            {mode === "solo"
-              ? "本机计时，完成后记录个人最佳与排行榜。"
-              : "双方各扫一张相同布局的独立棋盘，先完成者获胜。"}
-          </span>
-        </p>
-
-        {error && <p class="inline-error picker-error" role="alert">{error}</p>}
-
-        <button class="primary-button picker-submit" type="submit" disabled={creating}>
-          {creating
-            ? "正在创建…"
-            : mode === "solo"
-              ? "开始单人扫雷"
-              : "创建竞速房间"}
-        </button>
-      </form>
-    </dialog>
-  );
-}
-
-const CHASE_DIFFICULTY_OPTIONS: ReadonlyArray<{
-  id: ChaseDifficulty;
-  label: string;
-  detail: string;
-}> = [
-  { id: "easy", label: "简单", detail: "上限 15 轮" },
-  { id: "medium", label: "中等", detail: "上限 25 轮" },
-  { id: "hard", label: "困难", detail: "上限 45 轮" },
-];
-
-function ChasePicker({
-  difficulty,
-  creating,
-  error,
-  onDifficultyChange,
-  onStart,
-  onClose,
-}: {
-  difficulty: ChaseDifficulty;
-  creating: boolean;
-  error: string | null;
-  onDifficultyChange(difficulty: ChaseDifficulty): void;
-  onStart(): void;
-  onClose(): void;
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (dialog !== null && !dialog.open) dialog.showModal();
-  }, []);
-
-  const close = () => {
-    if (creating) return;
-    const dialog = dialogRef.current;
-    if (dialog?.open) dialog.close();
-    else onClose();
-  };
-
-  const selectedDifficulty = CHASE_DIFFICULTY_OPTIONS.find(
-    (option) => option.id === difficulty,
-  );
-
-  return (
-    <dialog
-      ref={dialogRef}
-      class="minesweeper-picker chase-picker"
-      aria-labelledby="chase-picker-title"
-      aria-describedby="chase-picker-summary"
-      onCancel={(event) => {
-        if (creating) event.preventDefault();
-      }}
-      onClose={onClose}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <header class="dialog-heading">
-        <div>
-          <p class="eyebrow">选择地图</p>
-          <h2 id="chase-picker-title">警察抓小偷</h2>
-        </div>
-        <button
-          class="dialog-close"
-          type="button"
-          aria-label="关闭警察抓小偷地图选择"
-          disabled={creating}
-          onClick={close}
-        >
-          <span aria-hidden="true">×</span>
-        </button>
-      </header>
-
-      <form
-        class="minesweeper-picker-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onStart();
-        }}
-      >
-        <fieldset disabled={creating}>
-          <legend>难度</legend>
-          <div class="choice-segments preset-segments">
-            {CHASE_DIFFICULTY_OPTIONS.map((option) => (
-              <label class="choice-segment" key={option.id}>
-                <input
-                  type="radio"
-                  name="chase-difficulty"
-                  value={option.id}
-                  checked={difficulty === option.id}
-                  autofocus={difficulty === option.id}
-                  onChange={() => onDifficultyChange(option.id)}
-                />
-                <span>
-                  <strong>{option.label}</strong>
-                  <small>{option.detail}</small>
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <p id="chase-picker-summary" class="picker-summary">
-          <strong>{selectedDifficulty?.label}地图 · {selectedDifficulty?.detail}</strong>
-          <span>
-            小偷先走，双方每次沿线走一步；警察走到小偷所在点即获胜，
-            撑过回合上限则小偷获胜。
-          </span>
-        </p>
-
-        {error && <p class="inline-error picker-error" role="alert">{error}</p>}
-
-        <button class="primary-button picker-submit" type="submit" disabled={creating}>
-          {creating ? "正在创建…" : "创建追逃房间"}
-        </button>
-      </form>
-    </dialog>
-  );
-}
-
-const CHINESE_CHECKERS_PLAYER_OPTIONS = [2, 3, 4] as const;
-
-function ChineseCheckersPicker({
-  playerCount,
-  creating,
-  error,
-  onPlayerCountChange,
-  onStart,
-  onClose,
-}: {
-  playerCount: ChineseCheckersPlayerCount;
-  creating: boolean;
-  error: string | null;
-  onPlayerCountChange(playerCount: ChineseCheckersPlayerCount): void;
-  onStart(): void;
-  onClose(): void;
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (dialog !== null && !dialog.open) dialog.showModal();
-  }, []);
-
-  const close = () => {
-    if (creating) return;
-    const dialog = dialogRef.current;
-    if (dialog?.open) dialog.close();
-    else onClose();
-  };
-
-  return (
-    <dialog
-      ref={dialogRef}
-      class="minesweeper-picker checkers-picker"
-      aria-labelledby="checkers-picker-title"
-      aria-describedby="checkers-picker-summary"
-      onCancel={(event) => {
-        if (creating) event.preventDefault();
-      }}
-      onClose={onClose}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <header class="dialog-heading">
-        <div>
-          <p class="eyebrow">选择人数</p>
-          <h2 id="checkers-picker-title">跳棋</h2>
-        </div>
-        <button
-          class="dialog-close"
-          type="button"
-          aria-label="关闭跳棋人数选择"
-          disabled={creating}
-          onClick={close}
-        >
-          <span aria-hidden="true">×</span>
-        </button>
-      </header>
-
-      <form
-        class="minesweeper-picker-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onStart();
-        }}
-      >
-        <fieldset disabled={creating}>
-          <legend>人数</legend>
-          <div class="choice-segments preset-segments">
-            {CHINESE_CHECKERS_PLAYER_OPTIONS.map((count) => (
-              <label class="choice-segment" key={count}>
-                <input
-                  type="radio"
-                  name="checkers-player-count"
-                  value={count}
-                  checked={playerCount === count}
-                  onChange={() => onPlayerCountChange(count)}
-                />
-                <span>
-                  <strong>{count} 人</strong>
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <p id="checkers-picker-summary" class="picker-summary">
-          <strong>{playerCount} 人 · 邀请联机</strong>
-          <span>
-            创建固定 {playerCount} 个玩家席位的房间，坐满后自动开始。
-          </span>
-        </p>
-
-        {error && <p class="inline-error picker-error" role="alert">{error}</p>}
-
-        <button class="primary-button picker-submit" type="submit" disabled={creating}>
-          {creating
-            ? "正在创建…"
-            : `创建 ${playerCount} 人联机房间`}
-        </button>
-      </form>
-    </dialog>
-  );
-}
-
 function LandingPage({
   displayName,
   onDisplayNameChange,
@@ -791,20 +272,8 @@ function LandingPage({
 }) {
   const [creating, setCreating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [minesweeperPickerOpen, setMinesweeperPickerOpen] = useState(false);
-  const [minesweeperMode, setMinesweeperMode] =
-    useState<MinesweeperLaunchMode>("solo");
-  const [minesweeperPreset, setMinesweeperPreset] =
-    useState<MinesweeperPreset>("small");
-  const [chasePickerOpen, setChasePickerOpen] = useState(false);
-  const [chaseDifficulty, setChaseDifficulty] =
-    useState<ChaseDifficulty>("easy");
-  const [checkersPickerOpen, setCheckersPickerOpen] = useState(false);
-  const [checkersPlayerCount, setCheckersPlayerCount] =
-    useState<ChineseCheckersPlayerCount>(2);
-  const minesweeperTriggerRef = useRef<HTMLButtonElement>(null);
-  const chaseTriggerRef = useRef<HTMLButtonElement>(null);
-  const checkersTriggerRef = useRef<HTMLButtonElement>(null);
+  const [activePicker, setActivePicker] = useState<string | null>(null);
+  const pickerTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const createRoom = async (gameType: string, ruleSetId: string) => {
     if (creating !== null) return;
@@ -812,21 +281,30 @@ function LandingPage({
     setError(null);
     try {
       await ensureBrowserSession(displayName);
-      const response = await fetch("/api/rooms", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          gameType,
-          ruleSetId,
-        }),
-      });
-      const body = (await response.json()) as {
+      const { response, data } = await requestJsonWithRetry<{
         roomId?: string;
         error?: string;
-      };
+      }>(
+        "/api/rooms",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            gameType,
+            ruleSetId,
+          }),
+        },
+        {
+          maxAttempts: 1,
+          attemptTimeoutMs: 30_000,
+          totalTimeoutMs: 30_000,
+          readErrorBody: true,
+        },
+      );
+      const body = data ?? {};
       if (
         !response.ok ||
         typeof body.roomId !== "string" ||
@@ -846,45 +324,29 @@ function LandingPage({
     }
   };
 
-  const startMinesweeper = () => {
-    const launch = resolveMinesweeperLaunch(
-      minesweeperMode,
-      minesweeperPreset,
-    );
-    if (launch.kind === "navigate") {
-      location.assign(launch.href);
+  const launch = (target: GameLaunchTarget) => {
+    if (target.kind === "navigate") {
+      location.assign(target.href);
       return;
     }
-    void createRoom(launch.gameType, launch.ruleSetId);
+    void createRoom(target.gameType, target.ruleSetId);
   };
 
-  const startChase = () => {
-    const launch = resolveChaseLaunch(chaseDifficulty);
-    void createRoom(launch.gameType, launch.ruleSetId);
-  };
-
-  const startChineseCheckers = () => {
-    const launch = resolveChineseCheckersLaunch(checkersPlayerCount);
-    void createRoom(launch.gameType, launch.ruleSetId);
-  };
-
-  const closeMinesweeperPicker = () => {
-    setMinesweeperPickerOpen(false);
+  const closePicker = () => {
+    const pickerId = activePicker;
+    setActivePicker(null);
     setError(null);
-    requestAnimationFrame(() => minesweeperTriggerRef.current?.focus());
+    if (pickerId !== null) {
+      requestAnimationFrame(() => {
+        pickerTriggerRefs.current.get(pickerId)?.focus();
+      });
+    }
   };
 
-  const closeChasePicker = () => {
-    setChasePickerOpen(false);
-    setError(null);
-    requestAnimationFrame(() => chaseTriggerRef.current?.focus());
-  };
-
-  const closeCheckersPicker = () => {
-    setCheckersPickerOpen(false);
-    setError(null);
-    requestAnimationFrame(() => checkersTriggerRef.current?.focus());
-  };
+  const activeEntry = activePicker === null
+    ? undefined
+    : LANDING_GAME_CATALOG.find((entry) => entry.id === activePicker);
+  const Picker = activeEntry?.picker;
 
   return (
     <main class="landing">
@@ -917,34 +379,20 @@ function LandingPage({
           {LANDING_GAME_CATALOG.map((game) => (
             <button
               key={game.id}
-              ref={game.launch.kind === "picker"
-                ? game.launch.gameType === "chase"
-                  ? chaseTriggerRef
-                  : game.launch.gameType === "minesweeper"
-                    ? minesweeperTriggerRef
-                    : checkersTriggerRef
-                : undefined}
+              ref={(element) => {
+                if (element === null) pickerTriggerRefs.current.delete(game.id);
+                else pickerTriggerRefs.current.set(game.id, element);
+              }}
               class="secondary-button hero-button game-choice"
               type="button"
               aria-label={game.ariaLabel}
               aria-haspopup={game.launch.kind === "picker" ? "dialog" : undefined}
               onClick={() => {
+                setError(null);
                 if (game.launch.kind === "picker") {
-                  setError(null);
-                  if (game.launch.gameType === "chase") {
-                    setChasePickerOpen(true);
-                  } else if (game.launch.gameType === "minesweeper") {
-                    setMinesweeperPickerOpen(true);
-                  } else {
-                    setCheckersPickerOpen(true);
-                  }
-                } else if (game.launch.kind === "navigate") {
-                  location.assign(game.launch.href);
+                  setActivePicker(game.id);
                 } else {
-                  void createRoom(
-                    game.launch.gameType,
-                    game.launch.ruleSetId,
-                  );
+                  launch(game.launch);
                 }
               }}
               disabled={creating !== null}
@@ -985,55 +433,16 @@ function LandingPage({
             ))}
           </div>
         </section>
-        {error &&
-          !minesweeperPickerOpen &&
-          !chasePickerOpen &&
-          !checkersPickerOpen && (
+        {error && activePicker === null && (
           <p class="inline-error" role="alert">{error}</p>
         )}
       </section>
-      {minesweeperPickerOpen && (
-        <MinesweeperPicker
-          mode={minesweeperMode}
-          preset={minesweeperPreset}
+      {Picker !== undefined && (
+        <Picker
           creating={creating !== null}
           error={error}
-          onModeChange={(mode) => {
-            setMinesweeperMode(mode);
-            setError(null);
-          }}
-          onPresetChange={(preset) => {
-            setMinesweeperPreset(preset);
-            setError(null);
-          }}
-          onStart={startMinesweeper}
-          onClose={closeMinesweeperPicker}
-        />
-      )}
-      {chasePickerOpen && (
-        <ChasePicker
-          difficulty={chaseDifficulty}
-          creating={creating !== null}
-          error={error}
-          onDifficultyChange={(difficulty) => {
-            setChaseDifficulty(difficulty);
-            setError(null);
-          }}
-          onStart={startChase}
-          onClose={closeChasePicker}
-        />
-      )}
-      {checkersPickerOpen && (
-        <ChineseCheckersPicker
-          playerCount={checkersPlayerCount}
-          creating={creating !== null}
-          error={error}
-          onPlayerCountChange={(playerCount) => {
-            setCheckersPlayerCount(playerCount);
-            setError(null);
-          }}
-          onStart={startChineseCheckers}
-          onClose={closeCheckersPicker}
+          onLaunch={launch}
+          onClose={closePicker}
         />
       )}
     </main>
@@ -1255,7 +664,7 @@ function RoomPage({
           class={`connection-pill phase-${client.phase}`}
           title={
             client.transport === "http"
-              ? "当前网络不支持 WebSocket，已通过 HTTPS 连接"
+              ? "实时连接暂不可用，已通过 HTTPS 连接"
               : undefined
           }
         >

@@ -9,7 +9,7 @@ import {
   type Game2048LeaderboardSnapshot,
 } from "../../../shared/game-2048-leaderboard";
 import { ensureBrowserSession } from "../../room-client";
-import { fetchWithRetry } from "../../api-request";
+import { requestJsonWithRetry } from "../../api-request";
 
 export type {
   Game2048LeaderboardEntry,
@@ -86,7 +86,7 @@ async function requestLeaderboard(
   signal?: AbortSignal,
 ): Promise<Game2048LeaderboardSnapshot> {
   await ensureBrowserSession(displayName, signal);
-  const response = await fetchWithRetry(path, {
+  const { response, data } = await requestJsonWithRetry<unknown>(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -97,7 +97,7 @@ async function requestLeaderboard(
     signal,
   });
   if (!response.ok) throw new Error("leaderboard_request_failed");
-  return parseSnapshot(await response.json(), ruleVersion);
+  return parseSnapshot(data, ruleVersion);
 }
 
 function ruleVersionForBoardSize(

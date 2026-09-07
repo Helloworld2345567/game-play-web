@@ -56,6 +56,31 @@ interface StackGameSubmissionRequest {
   readonly timeoutId: number;
 }
 
+interface StackAnimationControl {
+  start(): void;
+  stop(): void;
+  render(): void;
+}
+
+/**
+ * The 3D scene only needs a live frame while the falling block is moving.
+ * Keeping this decision pure makes the background/paused policy explicit and
+ * prevents a UI state branch from accidentally reintroducing a RAF loop.
+ */
+export function shouldAnimateStackGame(
+  status: StackGameState["status"],
+  paused: boolean,
+  visibilityState: DocumentVisibilityState =
+    typeof document === "undefined" ? "visible" : document.visibilityState,
+  hasTransientAnimation = false,
+): boolean {
+  return (
+    !paused &&
+    visibilityState !== "hidden" &&
+    (status === "playing" || (status === "over" && hasTransientAnimation))
+  );
+}
+
 function readStoredBest(): number {
   try {
     const value = Number.parseInt(localStorage.getItem(BEST_SCORE_KEY) ?? "0", 10);
@@ -246,6 +271,7 @@ export function SoloPage({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLButtonElement>(null);
   const sceneRef = useRef<StackScene | null>(null);
+  const animationControlRef = useRef<StackAnimationControl | null>(null);
   const soundRef = useRef<StackSound | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
   const leaderboardRequest = useRef(0);
@@ -590,16 +616,43 @@ export function SoloPage({
     let animationFrame = 0;
     let animationRunning = false;
     let lastFrame = performance.now();
+    const renderCurrentFrame = () => {
+      if (animationRunning) return;
+      syncScene(scene, gameRef.current);
+      scene.render(0);
+    };
     const animate = (now: number) => {
       if (!animationRunning) return;
+      if (!shouldAnimateStackGame(
+        gameRef.current.status,
+        pausedRef.current,
+        document.visibilityState,
+        scene.hasActiveAnimation(),
+      )) {
+        animationRunning = false;
+        animationFrame = 0;
+        renderCurrentFrame();
+        return;
+      }
       const deltaSeconds = Math.min(0.05, Math.max(0, (now - lastFrame) / 1_000));
       lastFrame = now;
-      if (gameRef.current.status === "playing" && !pausedRef.current) {
-        gameRef.current = tickStackGame(gameRef.current, deltaSeconds);
-      }
+      gameRef.current = tickStackGame(gameRef.current, deltaSeconds);
       syncScene(scene, gameRef.current);
       scene.render(deltaSeconds);
-      if (animationRunning) animationFrame = window.requestAnimationFrame(animate);
+      if (
+        animationRunning &&
+        shouldAnimateStackGame(
+          gameRef.current.status,
+          pausedRef.current,
+          document.visibilityState,
+          scene.hasActiveAnimation(),
+        )
+      ) {
+        animationFrame = window.requestAnimationFrame(animate);
+      } else {
+        animationRunning = false;
+        animationFrame = 0;
+      }
     };
     const suspendAnimation = () => {
       if (!animationRunning) return;
@@ -607,10 +660,24 @@ export function SoloPage({
       window.cancelAnimationFrame(animationFrame);
     };
     const resumeAnimation = () => {
-      if (animationRunning) return;
+      if (animationRunning || !shouldAnimateStackGame(
+        gameRef.current.status,
+        pausedRef.current,
+        document.visibilityState,
+        scene.hasActiveAnimation(),
+      )) {
+        renderCurrentFrame();
+        return;
+      }
       animationRunning = true;
       lastFrame = performance.now();
       animationFrame = window.requestAnimationFrame(animate);
+    };
+
+    animationControlRef.current = {
+      start: resumeAnimation,
+      stop: suspendAnimation,
+      render: renderCurrentFrame,
     };
 
     const onContextLost = (event: Event) => {
@@ -634,17 +701,31 @@ export function SoloPage({
     canvas.addEventListener("webglcontextlost", onContextLost);
     canvas.addEventListener("webglcontextrestored", onContextRestored);
 
-    const resize = () => scene.resize();
+    const resize = () => {
+      scene.resize();
+      // A paused or ready scene has no RAF to present the new projection.
+      // Paint one frame after a resize so the static image follows its canvas.
+      renderCurrentFrame();
+    };
     const resizeObserver = typeof ResizeObserver === "undefined"
       ? null
       : new ResizeObserver(resize);
     resizeObserver?.observe(canvas);
     window.addEventListener("resize", resize);
 
-    resumeAnimation();
+    renderCurrentFrame();
+    if (shouldAnimateStackGame(
+      gameRef.current.status,
+      pausedRef.current,
+      document.visibilityState,
+      scene.hasActiveAnimation(),
+    )) {
+      resumeAnimation();
+    }
 
     return () => {
       suspendAnimation();
+      animationControlRef.current = null;
       resizeObserver?.disconnect();
       window.removeEventListener("resize", resize);
       canvas.removeEventListener("webglcontextlost", onContextLost);
@@ -655,10 +736,37 @@ export function SoloPage({
   }, []);
 
   useEffect(() => {
+    const control = animationControlRef.current;
+    if (control === null) return;
+    if (
+      !contextLost &&
+      !renderError &&
+      shouldAnimateStackGame(
+        game.status,
+        paused,
+        document.visibilityState,
+        sceneRef.current?.hasActiveAnimation() ?? false,
+      )
+    ) {
+      control.start();
+      return;
+    }
+    control.stop();
+    if (!contextLost && !renderError) control.render();
+  }, [contextLost, game.status, paused, renderError]);
+
+  useEffect(() => {
     const pauseForBackground = () => {
-      if (document.visibilityState !== "hidden" || gameRef.current.status !== "playing") return;
-      pausedRef.current = true;
-      setPaused(true);
+      if (document.visibilityState === "hidden") {
+        if (gameRef.current.status !== "playing") return;
+        pausedRef.current = true;
+        setPaused(true);
+        return;
+      }
+      // A miss/celebration may still be finishing after the game is over. It
+      // was intentionally suspended while hidden; let the scene finish when
+      // the tab becomes visible again.
+      animationControlRef.current?.start();
     };
     document.addEventListener("visibilitychange", pauseForBackground);
     return () => document.removeEventListener("visibilitychange", pauseForBackground);

@@ -10,8 +10,38 @@ import {
   shouldPromptForDisplayName,
 } from "./App";
 import { availableGameAdapters } from "./games/registry";
+import {
+  clientGameRegistrations,
+  getClientGameCatalogEntry,
+} from "./games/catalog";
 
 describe("landing game catalog", () => {
+  it("keeps launchers and presentation capabilities behind each game registration", () => {
+    expect(clientGameRegistrations.map((entry) => entry.gameId)).toEqual([
+      "gomoku",
+      "xiangqi",
+      "tictactoe",
+      "tiaojiaqi",
+      "chase",
+      "minesweeper",
+      "chinese-checkers",
+      "2048",
+      "snake",
+      "sokoban",
+      "tank-battle",
+      "stack-game",
+    ]);
+    expect(
+      clientGameRegistrations
+        .filter((entry) => entry.landing?.picker !== undefined)
+        .map((entry) => entry.gameId),
+    ).toEqual(["chase", "minesweeper", "chinese-checkers"]);
+    expect(
+      getClientGameCatalogEntry("gomoku")?.loadRenderer,
+    ).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("2048")?.loadPage).toBeTypeOf("function");
+  });
+
   it("shows exactly one equal-weight entry for each supported game family", () => {
     expect(LANDING_GAME_CATALOG.map((entry) => entry.id)).toEqual([
       "gomoku",

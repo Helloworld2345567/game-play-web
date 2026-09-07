@@ -14,6 +14,7 @@ import {
 } from "../src/core/room-state";
 import { getGameRules } from "../src/games/registry";
 import {
+  roomReservationStorageKey,
   ROOM_DIRECTORY_NAME,
   ROOM_PROVISIONAL_LEASE_MS,
   type RoomDirectory,
@@ -1077,14 +1078,22 @@ describe("GameRoom Durable Object", () => {
 
     await expect(initialize()).resolves.toMatchObject({ status: 201 });
     await runInDurableObject(directory, async (_instance, state) => {
-      const reservations = await state.storage.get<
-        Record<string, { leaseId: string; expiresAt: number }>
-      >("reservations");
-      if (reservations?.[roomId] === undefined) {
+      const key = roomReservationStorageKey(roomId);
+      const reservation = await state.storage.get<
+        { leaseId: string; expiresAt: number }
+      >(key);
+      if (reservation === undefined) {
         throw new Error("Missing provisional reservation");
       }
-      reservations[roomId]!.expiresAt = Date.now() - 1;
-      await state.storage.put("reservations", reservations);
+      reservation.expiresAt = Date.now() - 1;
+      await state.storage.put(key, reservation);
+      const metadata = await state.storage.get<Record<string, unknown>>(
+        "directoryMetadata",
+      );
+      if (metadata !== undefined) {
+        metadata.nextExpiryAt = Date.now() - 1;
+        await state.storage.put("directoryMetadata", metadata);
+      }
     });
 
     await expect(initialize()).resolves.toMatchObject({ status: 503 });
@@ -1717,6 +1726,68 @@ describe("GameRoom Durable Object", () => {
     });
   });
 
+  it("clears a matching HTTP lease when a WebSocket leaves explicitly", async () => {
+    const stub = await initializeRoom("room-ws-leave-shared-scope");
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId,
+    });
+    const creator = await connect(
+      stub,
+      "guest-creator",
+      undefined,
+      connectionId,
+    );
+    const left = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+
+    creator.socket.send(JSON.stringify(leaveCommand()));
+
+    await expect(left).resolves.toEqual({ v: 1, type: "left" });
+    await expect.poll(() =>
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get("room"),
+        leases: await state.storage.get("httpLeases"),
+        alarm: await state.storage.getAlarm(),
+      })),
+    ).toEqual({ room: undefined, leases: undefined, alarm: null });
+  });
+
+  it("keeps an HTTP lease from another scope when a WebSocket leaves", async () => {
+    const stub = await initializeRoom("room-ws-leave-other-scope");
+    const retainedConnectionId = "http-other-browser-scope";
+    await postRoomHttp(stub, "sync", "guest-creator", {
+      v: 1,
+      connectionId: retainedConnectionId,
+    });
+    const creator = await connect(
+      stub,
+      "guest-creator",
+      undefined,
+      "22222222-2222-4222-8222-222222222222",
+    );
+    const left = creator.inbox.nextMatching(
+      (message) => message.type === "left",
+    );
+
+    creator.socket.send(JSON.stringify(leaveCommand()));
+
+    await expect(left).resolves.toEqual({ v: 1, type: "left" });
+    await expect.poll(() =>
+      runInDurableObject(stub, async (_instance, state) => ({
+        room: await state.storage.get<StoredRoom>("room"),
+        leases: await state.storage.get<Record<string, unknown>>("httpLeases"),
+      })),
+    ).toMatchObject({
+      room: { roomId: fixtureRoomId("room-ws-leave-other-scope") },
+      leases: {
+        [retainedConnectionId]: { guestId: "guest-creator", seat: "seat-a" },
+      },
+    });
+  });
+
   it("does not mark the Room vacant when a WebSocket drops but HTTP remains", async () => {
     const stub = await initializeRoom("room-ws-drops-http-remains");
     const creator = await connect(stub, "guest-creator");
@@ -1764,6 +1835,116 @@ describe("GameRoom Durable Object", () => {
       type: "snapshot",
       roomId: fixtureRoomId("room-http-multiple-tabs"),
       seats: { "seat-a": { online: true } },
+    });
+  });
+
+  it("fences a late HTTP sync and command after Leave without fencing other scopes", async () => {
+    const stub = await initializeRoom("room-http-leave-fence");
+    const leavingConnectionId = "http-leave-fence-old";
+    const retainedConnectionId = "http-leave-fence-other";
+    const newConnectionId = "http-leave-fence-new";
+    const preSyncConnectionId = "http-leave-fence-before";
+
+    await expect(
+      postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: leavingConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "snapshot" },
+    });
+    await expect(
+      postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: retainedConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "snapshot" },
+    });
+
+    await expect(
+      postRoomHttp(stub, "leave", "guest-creator", {
+        v: 1,
+        connectionId: leavingConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "left" },
+    });
+
+    await expect(
+      postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: leavingConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "error", code: "room.connection_required" },
+    });
+    await expect(
+      postRoomHttp(stub, "command", "guest-creator", {
+        v: 1,
+        connectionId: leavingConnectionId,
+        command: placeCommand(0, 0, 0),
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "error", code: "room.connection_required" },
+    });
+
+    // Leave may win while the corresponding sync is still in flight and has
+    // not created a lease yet. That scope must be fenced just as strongly.
+    await expect(
+      postRoomHttp(stub, "leave", "guest-creator", {
+        v: 1,
+        connectionId: preSyncConnectionId,
+      }),
+    ).resolves.toMatchObject({ message: { type: "left" } });
+    await expect(
+      postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: preSyncConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      message: { type: "error", code: "room.connection_required" },
+    });
+
+    await expect(
+      postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: retainedConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "snapshot" },
+    });
+    await expect(
+      postRoomHttp(stub, "sync", "guest-creator", {
+        v: 1,
+        connectionId: newConnectionId,
+      }),
+    ).resolves.toMatchObject({
+      status: 200,
+      message: { type: "snapshot" },
+    });
+
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        leases: await state.storage.get<Record<string, unknown>>("httpLeases"),
+        tombstones: await state.storage.get<Record<string, number>>(
+          "httpLeaveTombstones",
+        ),
+      })),
+    ).resolves.toMatchObject({
+      leases: {
+        [retainedConnectionId]: { guestId: "guest-creator" },
+        [newConnectionId]: { guestId: "guest-creator" },
+      },
+      tombstones: {
+        [`guest-creator\u0000${leavingConnectionId}`]: expect.any(Number),
+      },
     });
   });
 

@@ -6,6 +6,10 @@ import {
 } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  browserBootstrapStorageKey,
+  guestPresenceStorageKey,
+  roomReservationStorageKey,
+  ROOM_RESERVATION_KEY_PREFIX,
   ROOM_DIRECTORY_NAME,
   type RoomDirectory,
 } from "../src/room-directory";
@@ -28,6 +32,66 @@ afterEach(async () => {
 });
 
 describe("RoomDirectory Durable Object", () => {
+  it("migrates legacy aggregate records into per-record storage once", async () => {
+    const stub = directory();
+    const presenceId = crypto.randomUUID();
+    const bootstrapId = crypto.randomUUID();
+    const leaseId = crypto.randomUUID();
+    const expiresAt = Date.now() + 60_000;
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("reservations", {
+        [roomId(0)]: { leaseId, phase: "provisional", expiresAt },
+      });
+      await state.storage.put("presences", {
+        "guest-one": {
+          [presenceId]: {
+            clientSeq: 1,
+            active: true,
+            expiresAt,
+          },
+        },
+      });
+      await state.storage.put("browserBootstraps", {
+        [bootstrapId]: {
+          guestId: "guest-one",
+          displayName: "Guest One",
+          expiresAt,
+        },
+      });
+    });
+
+    await expect(stub.stats()).resolves.toEqual({
+      onlineGuests: 1,
+      activeRooms: 0,
+    });
+    await expect(
+      runInDurableObject(stub, async (_instance, state) => ({
+        oldReservations: await state.storage.get("reservations"),
+        oldPresences: await state.storage.get("presences"),
+        oldBootstraps: await state.storage.get("browserBootstraps"),
+        reservation: await state.storage.get(
+          roomReservationStorageKey(roomId(0)),
+        ),
+        presence: await state.storage.get(
+          guestPresenceStorageKey("guest-one"),
+        ),
+        bootstrap: await state.storage.get(
+          browserBootstrapStorageKey(bootstrapId),
+        ),
+        schema: await state.storage.get("directorySchemaVersion"),
+      })),
+    ).resolves.toMatchObject({
+      oldReservations: undefined,
+      oldPresences: undefined,
+      oldBootstraps: undefined,
+      reservation: { leaseId },
+      presence: { [presenceId]: { clientSeq: 1, active: true } },
+      bootstrap: { guestId: "guest-one" },
+      schema: 2,
+    });
+  });
+
   it("reports only activated Rooms in the current platform stats", async () => {
     const stub = directory();
     const reservation = await stub.reserve(roomId(0));
@@ -111,20 +175,22 @@ describe("RoomDirectory Durable Object", () => {
     const presenceId = crypto.randomUUID();
     await stub.heartbeat("guest-one", presenceId, 1);
     await runInDurableObject(stub, async (_instance, state) => {
+      const key = guestPresenceStorageKey("guest-one");
       const presences = await state.storage.get<
-        Record<
-          string,
-          Record<
-            string,
-            { clientSeq: number; active: boolean; expiresAt: number }
-          >
-        >
-      >("presences");
-      if (presences?.["guest-one"]?.[presenceId] === undefined) {
+        Record<string, { clientSeq: number; active: boolean; expiresAt: number }>
+      >(key);
+      if (presences?.[presenceId] === undefined) {
         throw new Error("Missing Presence lease");
       }
-      presences["guest-one"]![presenceId]!.expiresAt = Date.now() - 1;
-      await state.storage.put("presences", presences);
+      presences[presenceId]!.expiresAt = Date.now() - 1;
+      await state.storage.put(key, presences);
+      const metadata = await state.storage.get<Record<string, unknown>>(
+        "directoryMetadata",
+      );
+      if (metadata !== undefined) {
+        metadata.nextExpiryAt = Date.now() - 1;
+        await state.storage.put("directoryMetadata", metadata);
+      }
     });
 
     await expect(stub.stats()).resolves.toMatchObject({ onlineGuests: 0 });
@@ -170,22 +236,20 @@ describe("RoomDirectory Durable Object", () => {
       (_instance, state) => state.storage.getAlarm(),
     );
     expect(tombstoneAlarm).not.toBeNull();
-    expect(tombstoneAlarm).toBe(provisionalAlarm);
+    if (provisionalAlarm === null || tombstoneAlarm === null) {
+      throw new Error("Expected a scheduled directory alarm");
+    }
+    expect(tombstoneAlarm).toBeLessThanOrEqual(provisionalAlarm);
     await runInDurableObject(stub, async (_instance, state) => {
+      const key = guestPresenceStorageKey("guest-one");
       const presences = await state.storage.get<
-        Record<
-          string,
-          Record<
-            string,
-            { clientSeq: number; active: boolean; expiresAt: number }
-          >
-        >
-      >("presences");
-      if (presences?.["guest-one"]?.[presenceId] === undefined) {
+        Record<string, { clientSeq: number; active: boolean; expiresAt: number }>
+      >(key);
+      if (presences?.[presenceId] === undefined) {
         throw new Error("Missing Presence tombstone");
       }
-      presences["guest-one"]![presenceId]!.expiresAt = Date.now() - 1;
-      await state.storage.put("presences", presences);
+      presences[presenceId]!.expiresAt = Date.now() - 1;
+      await state.storage.put(key, presences);
     });
 
     expect(await runDurableObjectAlarm(stub)).toBe(true);
@@ -273,14 +337,15 @@ describe("RoomDirectory Durable Object", () => {
     if (!active.ok) throw new Error("Expected an active Room lease");
     await stub.activate(roomId(0), active.leaseId);
     await runInDurableObject(stub, async (_instance, state) => {
+      const key = roomReservationStorageKey(roomId(0));
       const reservations = await state.storage.get<
-        Record<string, { leaseId: string; phase: string; expiresAt: number }>
-      >("reservations");
-      if (reservations?.[roomId(0)] === undefined) {
+        { leaseId: string; phase: string; expiresAt: number }
+      >(key);
+      if (reservations === undefined) {
         throw new Error("Missing active reservation");
       }
-      reservations[roomId(0)]!.expiresAt = Date.now() - 1;
-      await state.storage.put("reservations", reservations);
+      reservations.expiresAt = Date.now() - 1;
+      await state.storage.put(key, reservations);
     });
     const remaining = await Promise.all(
       Array.from({ length: 9 }, (_, index) => stub.reserve(roomId(index + 1))),
@@ -299,14 +364,21 @@ describe("RoomDirectory Durable Object", () => {
       Array.from({ length: 10 }, (_, index) => stub.reserve(roomId(index))),
     );
     await runInDurableObject(stub, async (_instance, state) => {
-      const reservations = await state.storage.get<
-        Record<string, { leaseId: string; expiresAt: number }>
-      >("reservations");
-      if (reservations === undefined) throw new Error("Missing reservations");
-      for (const reservation of Object.values(reservations)) {
+      const reservations = await state.storage.list<
+        { leaseId: string; phase?: string; expiresAt: number }
+      >({ prefix: ROOM_RESERVATION_KEY_PREFIX });
+      if (reservations.size === 0) throw new Error("Missing reservations");
+      for (const [key, reservation] of reservations) {
         reservation.expiresAt = Date.now() - 1;
+        await state.storage.put(key, reservation);
       }
-      await state.storage.put("reservations", reservations);
+      const metadata = await state.storage.get<Record<string, unknown>>(
+        "directoryMetadata",
+      );
+      if (metadata !== undefined) {
+        metadata.nextExpiryAt = Date.now() - 1;
+        await state.storage.put("directoryMetadata", metadata);
+      }
     });
 
     await expect(stub.reserve(roomId(10))).resolves.toMatchObject({
@@ -335,14 +407,13 @@ describe("RoomDirectory Durable Object", () => {
     const extendedUntil = Date.now() + 3_600_000;
     await stub.touch(roomId(1), second.leaseId, extendedUntil);
     await runInDurableObject(stub, async (_instance, state) => {
-      const reservations = await state.storage.get<
-        Record<string, { leaseId: string; expiresAt: number }>
-      >("reservations");
-      if (reservations === undefined) throw new Error("Missing reservations");
-      const expired = reservations[roomId(0)];
+      const key = roomReservationStorageKey(roomId(0));
+      const expired = await state.storage.get<
+        { leaseId: string; phase?: string; expiresAt: number }
+      >(key);
       if (expired === undefined) throw new Error("Missing first reservation");
       expired.expiresAt = Date.now() - 1;
-      await state.storage.put("reservations", reservations);
+      await state.storage.put(key, expired);
     });
 
     expect(await runDurableObjectAlarm(stub)).toBe(true);
@@ -383,14 +454,20 @@ describe("RoomDirectory Durable Object", () => {
     const reservation = await stub.reserve(roomId(0));
     if (!reservation.ok) throw new Error("Expected a Room lease");
     await runInDurableObject(stub, async (_instance, state) => {
-      const reservations = await state.storage.get<
-        Record<string, { leaseId: string; expiresAt: number }>
-      >("reservations");
-      if (reservations === undefined) throw new Error("Missing reservations");
-      const expired = reservations[roomId(0)];
+      const key = roomReservationStorageKey(roomId(0));
+      const expired = await state.storage.get<
+        { leaseId: string; phase?: string; expiresAt: number }
+      >(key);
       if (expired === undefined) throw new Error("Missing reservation");
       expired.expiresAt = Date.now() - 1;
-      await state.storage.put("reservations", reservations);
+      await state.storage.put(key, expired);
+      const metadata = await state.storage.get<Record<string, unknown>>(
+        "directoryMetadata",
+      );
+      if (metadata !== undefined) {
+        metadata.nextExpiryAt = Date.now() - 1;
+        await state.storage.put("directoryMetadata", metadata);
+      }
     });
 
     await expect(
@@ -412,5 +489,68 @@ describe("RoomDirectory Durable Object", () => {
       ok: false,
       reason: "room_id_conflict",
     });
+  });
+
+  it("renews the earliest Guest without scanning other Guests", async () => {
+    const stub = directory();
+    const firstPresenceId = crypto.randomUUID();
+    const secondPresenceId = crypto.randomUUID();
+    await stub.heartbeat("guest-one", firstPresenceId, 1);
+    await stub.heartbeat("guest-two", secondPresenceId, 1);
+
+    const counts = await runInDurableObject(stub, async (instance, state) => {
+      let listCalls = 0;
+      let putCalls = 0;
+      let setAlarmCalls = 0;
+      const storagePrototype = Object.getPrototypeOf(state.storage) as {
+        transaction: (
+          callback: (transaction: unknown) => Promise<unknown>,
+        ) => Promise<unknown>;
+      };
+      const originalTransaction = storagePrototype.transaction;
+      storagePrototype.transaction = function (callback) {
+        return originalTransaction.call(this, async (transaction) => {
+          const transactionPrototype = Object.getPrototypeOf(transaction) as {
+            list: (...args: unknown[]) => Promise<unknown>;
+            put: (...args: unknown[]) => Promise<unknown>;
+            setAlarm: (...args: unknown[]) => Promise<unknown>;
+          };
+          const originalList = transactionPrototype.list;
+          const originalPut = transactionPrototype.put;
+          const originalSetAlarm = transactionPrototype.setAlarm;
+          transactionPrototype.list = function (...args) {
+            listCalls += 1;
+            return originalList.apply(this, args);
+          };
+          transactionPrototype.put = function (...args) {
+            putCalls += 1;
+            return originalPut.apply(this, args);
+          };
+          transactionPrototype.setAlarm = function (...args) {
+            setAlarmCalls += 1;
+            return originalSetAlarm.apply(this, args);
+          };
+          try {
+            return await callback(transaction);
+          } finally {
+            transactionPrototype.list = originalList;
+            transactionPrototype.put = originalPut;
+            transactionPrototype.setAlarm = originalSetAlarm;
+          }
+        });
+      };
+      try {
+        await (instance as unknown as RoomDirectory).heartbeat(
+          "guest-one",
+          firstPresenceId,
+          2,
+        );
+      } finally {
+        storagePrototype.transaction = originalTransaction;
+      }
+      return { listCalls, putCalls, setAlarmCalls };
+    });
+
+    expect(counts).toEqual({ listCalls: 0, putCalls: 1, setAlarmCalls: 0 });
   });
 });

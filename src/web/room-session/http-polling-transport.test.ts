@@ -100,7 +100,10 @@ describe("HttpPollingTransport", () => {
     const firstResponse = new Promise<Response>((resolve) => {
       releaseFirst = () => resolve(Response.json(snapshotPayload));
     });
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
     const fetchImpl = vi.fn(async () => {
+      markFetchStarted();
       if (fetchImpl.mock.calls.length === 1) return firstResponse;
       return Response.json(snapshotPayload);
     });
@@ -133,7 +136,7 @@ describe("HttpPollingTransport", () => {
       baseRevision: 1,
       payload: { value: 1 },
     });
-    await Promise.resolve();
+    await fetchStarted;
     expect(fetchImpl).toHaveBeenCalledTimes(1);
 
     releaseFirst();
@@ -161,10 +164,13 @@ describe("HttpPollingTransport", () => {
   it("aborts active requests when the session is disposed", async () => {
     vi.useFakeTimers();
     let rejectFetch: ((error: unknown) => void) | undefined;
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
     const fetchImpl = vi.fn(
       async (_input: RequestInfo | URL, init?: RequestInit) =>
         new Promise<Response>((_resolve, reject) => {
           rejectFetch = reject;
+          markFetchStarted();
           init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
         }),
     );
@@ -175,7 +181,7 @@ describe("HttpPollingTransport", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
     const request = transport.request("sync").catch((error: unknown) => error);
-    await Promise.resolve();
+    await fetchStarted;
     transport.dispose();
     rejectFetch?.(new DOMException("aborted", "AbortError"));
     await request;
@@ -253,5 +259,52 @@ describe("HttpPollingTransport", () => {
     vi.advanceTimersByTime(1);
     expect(sync).toHaveBeenCalledTimes(1);
     transport.dispose();
+  });
+
+  it("bounds waiting on a shared bootstrap even when it ignores the request signal", async () => {
+    vi.useFakeTimers();
+    let finishBootstrap!: () => void;
+    const bootstrap = new Promise<void>((resolve) => { finishBootstrap = resolve; });
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    const transport = new HttpPollingTransport({
+      roomId: "room-1", connectionId: "connection-1",
+      ensureSession: () => bootstrap, fetchImpl,
+    });
+    const result = transport.request("sync").catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await result).toMatchObject({ name: "TimeoutError" });
+    finishBootstrap();
+    await Promise.resolve();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    transport.dispose();
+  });
+
+  it("bounds response body consumption without treating a timeout as a protocol failure", async () => {
+    vi.useFakeTimers();
+    const response = new Response("{}", { status: 200 });
+    vi.spyOn(response, "json").mockImplementation(() => new Promise(() => undefined));
+    const transport = new HttpPollingTransport({
+      roomId: "room-1", connectionId: "connection-1",
+      ensureSession: async () => undefined,
+      fetchImpl: vi.fn(async () => response),
+    });
+    const result = transport.request("sync").catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await result).toMatchObject({ name: "TimeoutError" });
+    expect(vi.getTimerCount()).toBe(0);
+    transport.dispose();
+  });
+
+  it("disposes immediately while identity initialization is still pending", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    const transport = new HttpPollingTransport({
+      roomId: "room-1", connectionId: "connection-1",
+      ensureSession: () => new Promise(() => undefined), fetchImpl,
+    });
+    const result = transport.request("sync").catch((error: unknown) => error);
+    transport.dispose();
+    expect(await result).toMatchObject({ name: "AbortError" });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

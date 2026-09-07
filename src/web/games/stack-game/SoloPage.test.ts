@@ -6,6 +6,7 @@ import {
   higherGameStackPersonalBest,
   isNewGameStackPersonalBest,
   preferHigherGameStackSnapshot,
+  shouldAnimateStackGame,
 } from "./SoloPage";
 
 function leaderboard(
@@ -46,5 +47,16 @@ describe("Stack Game SoloPage leaderboard state", () => {
     expect(isNewGameStackPersonalBest(18, 24, 24, true)).toBe(true);
     expect(isNewGameStackPersonalBest(null, 24, 24, false)).toBe(false);
     expect(isNewGameStackPersonalBest(24, 24, 24, true)).toBe(false);
+  });
+});
+
+describe("Stack Game rendering policy", () => {
+  it("stops the RAF loop while paused, hidden, or outside active play", () => {
+    expect(shouldAnimateStackGame("playing", false, "visible")).toBe(true);
+    expect(shouldAnimateStackGame("playing", true, "visible")).toBe(false);
+    expect(shouldAnimateStackGame("playing", false, "hidden")).toBe(false);
+    expect(shouldAnimateStackGame("ready", false, "visible")).toBe(false);
+    expect(shouldAnimateStackGame("over", false, "visible")).toBe(false);
+    expect(shouldAnimateStackGame("over", false, "visible", true)).toBe(true);
   });
 });

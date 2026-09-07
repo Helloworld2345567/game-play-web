@@ -14,27 +14,22 @@ async function canvasPixelStats(canvas: Locator): Promise<{
   readonly brightnessRange: number;
   readonly variedSamples: number;
 }> {
-  return canvas.evaluate((element) => new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const canvasElement = element as HTMLCanvasElement;
-      const context = canvasElement.getContext("webgl2") ??
-        canvasElement.getContext("webgl");
-      if (context === null) {
-        resolve({ brightnessRange: 0, variedSamples: 0 });
-        return;
-      }
-      const pixels = new Uint8Array(
-        context.drawingBufferWidth * context.drawingBufferHeight * 4,
-      );
-      context.readPixels(
-        0,
-        0,
-        context.drawingBufferWidth,
-        context.drawingBufferHeight,
-        context.RGBA,
-        context.UNSIGNED_BYTE,
-        pixels,
-      );
+  // A static WebGL canvas is still composited correctly after its transient
+  // drawing buffer is cleared. Inspect presented pixels, without requiring a
+  // continuous RAF or preserveDrawingBuffer just for a readPixels assertion.
+  const screenshot = await canvas.screenshot({
+    style: ".stack-game-page > :not(.stack-game-stage) { visibility: hidden !important; }",
+  });
+  return canvas.evaluate(async (_element, base64) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${base64}`;
+      await image.decode();
+      const probe = document.createElement("canvas");
+      probe.width = image.width;
+      probe.height = image.height;
+      const context = probe.getContext("2d")!;
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(0, 0, image.width, image.height).data;
       const baseline = pixels[0] ?? 0;
       let minimum = 255;
       let maximum = 0;
@@ -49,9 +44,8 @@ async function canvasPixelStats(canvas: Locator): Promise<{
         if (Math.abs(red - baseline) > 8 || Math.abs(green - baseline) > 8 ||
           Math.abs(blue - baseline) > 8) variedSamples += 1;
       }
-      resolve({ brightnessRange: maximum - minimum, variedSamples });
-    }));
-  }));
+      return { brightnessRange: maximum - minimum, variedSamples };
+  }, screenshot.toString("base64"));
 }
 
 async function loseCanvasContext(canvas: Locator): Promise<boolean> {

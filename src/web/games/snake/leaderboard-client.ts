@@ -8,7 +8,7 @@ import type {
   SnakeLeaderboardSnapshot,
 } from "../../../shared/game-snake-leaderboard";
 import { ensureBrowserSession } from "../../room-client";
-import { fetchWithRetry } from "../../api-request";
+import { requestJsonWithRetry } from "../../api-request";
 
 export type {
   SnakeLeaderboardEntry,
@@ -82,7 +82,7 @@ async function requestLeaderboard(
   signal?: AbortSignal,
 ): Promise<SnakeLeaderboardSnapshot> {
   await ensureBrowserSession(displayName, signal);
-  const response = await fetchWithRetry(path, {
+  const { response, data } = await requestJsonWithRetry<unknown>(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -93,7 +93,7 @@ async function requestLeaderboard(
     signal,
   });
   if (!response.ok) throw new Error("leaderboard_request_failed");
-  return parseSnapshot(await response.json(), SNAKE_SOLO_RULE_VERSION);
+  return parseSnapshot(data, SNAKE_SOLO_RULE_VERSION);
 }
 
 export function loadGameSnakeLeaderboard(

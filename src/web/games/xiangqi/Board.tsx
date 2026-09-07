@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { PointerEvent as PreactPointerEvent } from "preact/compat";
 import {
   BOARD_HEIGHT,
@@ -7,6 +7,7 @@ import {
   readXiangqiPosition,
 } from "../../../games/xiangqi/rules";
 import type { GameAdapter, GameRendererProps } from "../registry";
+import { xiangqiPresentation } from "./presentation";
 
 type BoardPoint = { x: number; y: number };
 type XiangqiData = ReturnType<typeof readXiangqiPosition>;
@@ -29,20 +30,6 @@ const PIECE_GLYPHS: Readonly<Record<string, Readonly<Record<Side, string>>>> = {
 const SIDE_NAMES: Readonly<Record<Side, string>> = {
   red: "红方",
   black: "黑方",
-};
-
-const XIANGQI_ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  "xiangqi.not_your_turn": "还没轮到你。",
-  "xiangqi.invalid_action": "无法识别这次走子。",
-  "xiangqi.invalid_position": "棋局数据无效，请刷新后重试。",
-  "xiangqi.out_of_bounds": "落点超出棋盘。",
-  "xiangqi.empty_source": "这里没有可以移动的棋子。",
-  "xiangqi.not_your_piece": "这不是你的棋子。",
-  "xiangqi.own_piece": "目标位置已有己方棋子。",
-  "xiangqi.illegal_move": "这一步不符合中国象棋走法。",
-  "xiangqi.self_check": "这一步会让自己的将帅处于被将军状态。",
-  "xiangqi.cannot_capture_general": "中国象棋不能直接吃掉将帅。",
-  "xiangqi.game_finished": "本局已经结束。",
 };
 
 function indexOfPoint(point: BoardPoint): number {
@@ -228,6 +215,45 @@ function drawLegalHint(
   context.restore();
 }
 
+function drawSelectionMarker(
+  context: CanvasRenderingContext2D,
+  point: BoardPoint,
+  geometry: BoardGeometry,
+): void {
+  const center = pixelFor(point, geometry);
+  const radius = Math.min(geometry.stepX, geometry.stepY) * 0.43;
+  context.save();
+  context.beginPath();
+  context.arc(center.x, center.y, radius * 1.12, 0, Math.PI * 2);
+  context.lineWidth = Math.max(2, radius * 0.1);
+  context.strokeStyle = "#efb45b";
+  context.stroke();
+  context.restore();
+}
+
+function prepareCanvas(
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  dpr: number,
+): CanvasRenderingContext2D | null {
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  const context = canvas.getContext("2d");
+  if (context === null) return null;
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, width, height);
+  return context;
+}
+
+function readDevicePixelRatio(): number {
+  return typeof window === "undefined"
+    ? 1
+    : Math.min(window.devicePixelRatio || 1, 2);
+}
+
 export function XiangqiBoard({
   position,
   selfSeat,
@@ -236,8 +262,10 @@ export function XiangqiBoard({
   onAction,
 }: GameRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const staticCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(336);
+  const [devicePixelRatio, setDevicePixelRatio] = useState(readDevicePixelRatio);
   const [selected, setSelected] = useState<BoardPoint | null>(null);
   const [preview, setPreview] = useState<BoardPoint | null>(null);
   const [keyboardPoint, setKeyboardPoint] = useState<BoardPoint>({ x: 4, y: 5 });
@@ -258,10 +286,13 @@ export function XiangqiBoard({
   const selectedPiece = selected === null ? null : pieceAt(board, selected);
   const selectedIsOwn =
     selectedPiece !== null && ownSide !== null && selectedPiece.side === ownSide;
-  const legalTargets =
-    canInteract && selected !== null && selectedIsOwn
-      ? listLegalXiangqiMoves(board, selected.x, selected.y)
-      : [];
+  const legalTargets = useMemo(
+    () =>
+      canInteract && selected !== null && selectedIsOwn
+        ? listLegalXiangqiMoves(board, selected.x, selected.y)
+        : [],
+    [board, canInteract, selected, selectedIsOwn],
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -271,6 +302,14 @@ export function XiangqiBoard({
     });
     observer.observe(container);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const updateDevicePixelRatio = () => {
+      setDevicePixelRatio(readDevicePixelRatio());
+    };
+    window.addEventListener("resize", updateDevicePixelRatio);
+    return () => window.removeEventListener("resize", updateDevicePixelRatio);
   }, []);
 
   useEffect(() => {
@@ -291,15 +330,10 @@ export function XiangqiBoard({
   ]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (canvas === null) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    const context = canvas.getContext("2d");
+    const canvas = staticCanvasRef.current ?? document.createElement("canvas");
+    staticCanvasRef.current = canvas;
+    const context = prepareCanvas(canvas, width, height, devicePixelRatio);
     if (context === null) return;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    context.clearRect(0, 0, width, height);
     const geometry = geometryFor(width, height);
     const step = Math.min(geometry.stepX, geometry.stepY);
 
@@ -413,14 +447,6 @@ export function XiangqiBoard({
     context.fillText("楚河", geometry.paddingX + 2.15 * geometry.stepX, riverY);
     context.fillText("汉界", geometry.paddingX + 6.85 * geometry.stepX, riverY);
 
-    // Empty destinations sit underneath the pieces; capture destinations are
-    // outlined after the pieces below so the red ring remains visible.
-    for (const target of legalTargets) {
-      if (!isPiece(pieceAt(board, target))) {
-        drawLegalHint(context, target, geometry, false);
-      }
-    }
-
     for (let index = 0; index < board.length; index += 1) {
       const piece = cellAt(board, index);
       if (!isPiece(piece)) continue;
@@ -430,15 +456,9 @@ export function XiangqiBoard({
         geometry,
         piece,
         1,
-        selected !== null && indexOfPoint(selected) === index,
+        false,
         piece.kind === "general" && data.inCheck[piece.side],
       );
-    }
-
-    for (const target of legalTargets) {
-      if (isPiece(pieceAt(board, target))) {
-        drawLegalHint(context, target, geometry, true);
-      }
     }
 
     if (data.lastMove) {
@@ -455,8 +475,45 @@ export function XiangqiBoard({
         "rgba(214, 67, 53, 0.9)",
       );
     }
+  }, [
+    board,
+    data.lastMove,
+    data.inCheck,
+    devicePixelRatio,
+    height,
+    width,
+  ]);
 
-    if (preview !== null && selectedPiece !== null && legalTargets.some((p) => pointEquals(p, preview))) {
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const context = prepareCanvas(canvas, width, height, devicePixelRatio);
+    if (context === null) return;
+    const staticCanvas = staticCanvasRef.current;
+    if (staticCanvas !== null) {
+      // The board, pieces, and last-move markers stay in a cached bitmap while
+      // this pass only composes transient hints and the drag ghost.
+      context.drawImage(staticCanvas, 0, 0, width, height);
+    }
+    const geometry = geometryFor(width, height);
+    const step = Math.min(geometry.stepX, geometry.stepY);
+
+    if (selected !== null && selectedPiece !== null) {
+      drawSelectionMarker(context, selected, geometry);
+    }
+
+    // Hints, selection, the drag ghost, and the keyboard cursor are transient
+    // interaction state. Composing them after the cached bitmap means a drag
+    // never rebuilds the wood, grid, or all 32 pieces underneath it.
+    for (const target of legalTargets) {
+      drawLegalHint(context, target, geometry, isPiece(pieceAt(board, target)));
+    }
+
+    if (
+      preview !== null &&
+      selectedPiece !== null &&
+      legalTargets.some((point) => pointEquals(point, preview))
+    ) {
       drawPiece(context, preview, geometry, selectedPiece, 0.48, false);
     }
 
@@ -471,7 +528,9 @@ export function XiangqiBoard({
     }
   }, [
     board,
+    data.inCheck,
     data.lastMove,
+    devicePixelRatio,
     focused,
     height,
     keyboardPoint,
@@ -591,7 +650,10 @@ export function XiangqiBoard({
 
   return (
     <>
-      <div class="board-shell xiangqi-board-shell" ref={containerRef}>
+      <div
+        class="board-shell xiangqi-board-shell"
+        ref={containerRef}
+      >
         <canvas
           ref={canvasRef}
           class={`xiangqi-board ${canInteract ? "is-interactive" : ""}`}
@@ -599,14 +661,14 @@ export function XiangqiBoard({
           role="application"
           aria-label={`中国象棋棋盘。当前位置第 ${keyboardPoint.x + 1} 列第 ${keyboardPoint.y + 1} 行，${currentCellDescription}。`}
           aria-describedby="xiangqi-board-instructions xiangqi-last-move"
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={() => {
             setPreview(null);
           }}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
           onKeyDown={(event) => {
             const next = { ...keyboardRef.current };
             if (event.key === "ArrowLeft") next.x -= 1;
@@ -664,38 +726,6 @@ export function XiangqiBoard({
 }
 
 export const xiangqiAdapter = {
-  gameType: "xiangqi",
-  ruleSetId: "xiangqi.casual.v1",
-  displayName: "中国象棋",
-  createRoomLabel: "创建中国象棋房",
-  landingDescription: "9×10 · 红先 · 将死或困毙",
+  ...xiangqiPresentation,
   Renderer: XiangqiBoard,
-  getSeatPresentations(position) {
-    const redSeat = position === null ? "seat-a" : readXiangqiPosition(position).redSeat;
-    const seatARed = redSeat === "seat-a";
-    return {
-      "seat-a": {
-        label: seatARed ? "红方" : "黑方",
-        swatchClassName: seatARed ? "xiangqi-red" : "xiangqi-black",
-      },
-      "seat-b": {
-        label: seatARed ? "黑方" : "红方",
-        swatchClassName: seatARed ? "xiangqi-black" : "xiangqi-red",
-      },
-    };
-  },
-  getErrorMessage(code) {
-    return XIANGQI_ERROR_MESSAGES[code] ?? null;
-  },
-  getOutcomeMessage(outcome, viewer) {
-    if (outcome.kind !== "win" || outcome.reason !== "checkmate") return null;
-    if (viewer.selfSeat === null) {
-      return viewer.winnerDisplayName === null
-        ? "本局以绝杀结束"
-        : `${viewer.winnerDisplayName}绝杀获胜`;
-    }
-    return outcome.winner === viewer.selfSeat
-      ? "绝杀 · 你赢了"
-      : "对手绝杀获胜";
-  },
 } satisfies GameAdapter;

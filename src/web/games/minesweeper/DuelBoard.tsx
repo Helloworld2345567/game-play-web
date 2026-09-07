@@ -4,13 +4,13 @@ import {
   readPublicDuelPosition,
   type PublicMinesweeperDuelData,
 } from "../../../games/minesweeper/duel-rules";
-import { getMinesweeperRuleSetId } from "../../../games/minesweeper/presets";
 import type {
   PublicMinefieldCell,
   PublicMinefieldView,
 } from "../../../games/minesweeper/public-view";
 import type { GameAdapter, GameRendererProps } from "../registry";
 import { MinesweeperBoard } from "./Board";
+import { minesweeperDuelPresentations } from "./presentation";
 
 const EMPTY_PENDING_CELLS: ReadonlySet<string> = new Set<string>();
 
@@ -218,67 +218,8 @@ export function MinesweeperDuelBoard({
   );
 }
 
-function adapter(
-  ruleSetId: string,
-  displayName: string,
-  createRoomLabel: string,
-  landingDescription: string,
-): GameAdapter {
-  return {
-    gameType: "minesweeper",
-    ruleSetId,
-    displayName,
-    createRoomLabel,
-    landingDescription,
-    Renderer: MinesweeperDuelBoard,
-    getSeatPresentations() {
-      return {
-        "seat-a": { label: "玩家 A", swatchClassName: "minesweeper-a" },
-        "seat-b": { label: "玩家 B", swatchClassName: "minesweeper-b" },
-      };
-    },
-    getErrorMessage(code) {
-      return ERROR_MESSAGES[code] ?? null;
-    },
-    getStatusMessage(position, selfSeat) {
-      const data = readPublicDuelPosition(position);
-      if (position.outcome !== null) return "本局已结束";
-      if (selfSeat === null) return "正在观战双人扫雷";
-      if (data.phase === "waiting_ready") return "等待双方准备";
-      if (data.phase === "countdown") return "倒计时后选择起始格";
-      if (data.phase === "selecting") return "等待双方提交起始格";
-      if (data.phase === "playing") return "双方同时排雷";
-      return "本局已结束";
-    },
-    getOutcomeMessage(outcome, viewer) {
-      if (outcome.kind === "draw") return "本局同分，和局";
-      if (viewer.selfSeat === null) {
-        return viewer.winnerDisplayName === null
-          ? "本局已分胜负"
-          : `${viewer.winnerDisplayName}获胜`;
-      }
-      return outcome.winner === viewer.selfSeat ? "你赢了" : "对手获胜";
-    },
-  };
-}
-
 export const minesweeperDuelAdapters = [
-  adapter(
-    getMinesweeperRuleSetId("duel", "small"),
-    "双人扫雷 · 小型",
-    "双人扫雷 · 小型",
-    "9×9 · 10 雷 · 双方同时操作",
-  ),
-  adapter(
-    getMinesweeperRuleSetId("duel", "medium"),
-    "双人扫雷 · 中型",
-    "双人扫雷 · 中型",
-    "16×16 · 40 雷 · 双方同时操作",
-  ),
-  adapter(
-    getMinesweeperRuleSetId("duel", "large"),
-    "双人扫雷 · 大型",
-    "双人扫雷 · 大型",
-    "30×16 · 99 雷 · 桌面完整显示",
-  ),
-] as const;
+  { ...minesweeperDuelPresentations[0], Renderer: MinesweeperDuelBoard },
+  { ...minesweeperDuelPresentations[1], Renderer: MinesweeperDuelBoard },
+  { ...minesweeperDuelPresentations[2], Renderer: MinesweeperDuelBoard },
+] as const satisfies readonly GameAdapter[];

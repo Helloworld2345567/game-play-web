@@ -1,7 +1,7 @@
 import type { MinefieldPresetId } from "../../../games/minesweeper/presets";
 import { MINESWEEPER_SOLO_RULE_VERSION } from "../../../shared/minesweeper-leaderboard";
 import { ensureBrowserSession } from "../../room-client";
-import { fetchWithRetry } from "../../api-request";
+import { requestJsonWithRetry } from "../../api-request";
 
 export interface MinesweeperLeaderboardEntry {
   rank: number;
@@ -73,7 +73,7 @@ async function requestLeaderboard(
   signal?: AbortSignal,
 ): Promise<MinesweeperLeaderboardSnapshot> {
   await ensureBrowserSession(displayName, signal);
-  const response = await fetchWithRetry(path, {
+  const { response, data } = await requestJsonWithRetry<unknown>(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -84,7 +84,7 @@ async function requestLeaderboard(
     signal,
   });
   if (!response.ok) throw new Error("leaderboard_request_failed");
-  return parseSnapshot(await response.json(), presetId);
+  return parseSnapshot(data, presetId);
 }
 
 export function loadMinesweeperLeaderboard(

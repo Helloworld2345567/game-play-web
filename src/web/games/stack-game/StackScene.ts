@@ -391,6 +391,24 @@ export class StackScene {
     this.spawnFallingFragment(fragment, true);
   }
 
+  /**
+   * A completed game can still have a short lived miss/celebration animation
+   * or a block settling into place. The owner can use this to keep a bounded
+   * post-game RAF alive without keeping the scene hot forever.
+   */
+  hasActiveAnimation(): boolean {
+    if (this.fallingFragments.length > 0 || this.celebrations.length > 0) {
+      return true;
+    }
+    for (const record of this.blocks.values()) {
+      if (record.dropOffset > 0.0001) return true;
+    }
+    return (
+      Math.abs(this.cameraLookAt.y - this.targetCameraY) > 0.0001 ||
+      this.cameraPosition.distanceToSquared(this.desiredCameraPosition) > 0.0001
+    );
+  }
+
   render(deltaSeconds: number): void {
     if (this.disposed) return;
     const delta = Math.min(

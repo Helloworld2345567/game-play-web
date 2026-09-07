@@ -81,6 +81,20 @@ interface HttpLease {
 
 type HttpLeases = Record<string, HttpLease>;
 
+/**
+ * A short lived fence for a browser connection that explicitly left.
+ *
+ * The composite key keeps one Guest's tab from fencing another tab, while
+ * also preventing a different Guest that happens to present the same opaque
+ * connection id from being affected.
+ */
+type HttpLeaveTombstones = Record<string, number>;
+
+interface HttpLeasePruneResult {
+  changed: boolean;
+  visibleChange: boolean;
+}
+
 interface HttpRateBucket {
   tokens: number;
   lastRefillAt: number;
@@ -93,6 +107,7 @@ type HttpRateBuckets = Record<string, HttpRateBucket>;
 const ROOM_STORAGE_KEY = "room";
 const VACANT_SINCE_KEY = "vacantSince";
 const HTTP_LEASES_KEY = "httpLeases";
+const HTTP_LEAVE_TOMBSTONES_KEY = "httpLeaveTombstones";
 const HTTP_RATE_BUCKETS_KEY = "httpRateBuckets";
 const DISPLAY_NAMES_KEY = "displayNames";
 const SNAPSHOT_REVISION_KEY = "snapshotRevision";
@@ -104,6 +119,7 @@ const RETIRED_ROOM_STATE_KEYS = [
   ROOM_STORAGE_KEY,
   VACANT_SINCE_KEY,
   HTTP_LEASES_KEY,
+  HTTP_LEAVE_TOMBSTONES_KEY,
   HTTP_RATE_BUCKETS_KEY,
   DISPLAY_NAMES_KEY,
   SNAPSHOT_REVISION_KEY,
@@ -119,6 +135,11 @@ const HTTP_LEASE_PERSIST_INTERVAL_MS = 5_000;
 const MAX_CONNECTIONS_PER_GUEST = 4;
 const MAX_CONNECTIONS_PER_ROOM = 16;
 const MAX_SPECTATOR_CONNECTIONS_PER_ROOM = 8;
+const MAX_HTTP_LEAVE_TOMBSTONES = 64;
+// Keep the fence for the same bounded reconnect grace used by the Room. This
+// covers requests delayed beyond the client request timeout without retaining
+// connection scopes for the lifetime of the Room.
+const HTTP_LEAVE_TOMBSTONE_MS = VACANT_ROOM_GRACE_MS;
 const MAX_PLAYER_CONNECTIONS_PER_ROOM =
   MAX_CONNECTIONS_PER_ROOM - MAX_SPECTATOR_CONNECTIONS_PER_ROOM;
 // The room-wide ceiling remains fixed for resource safety. Independent player
@@ -195,9 +216,14 @@ function isHttpCommandEnvelope(value: unknown): value is HttpCommandEnvelope {
   return isHttpConnectionEnvelope(value) && "command" in value;
 }
 
+function httpLeaveTombstoneKey(guestId: string, connectionId: string): string {
+  return `${guestId}\u0000${connectionId}`;
+}
+
 export class GameRoom extends DurableObject<GameRoomEnv> {
   private room: StoredRoom | null = null;
   private httpLeases: HttpLeases = {};
+  private httpLeaveTombstones: HttpLeaveTombstones = {};
   private httpRateBuckets: HttpRateBuckets = {};
   private readonly websocketGuestRateBuckets: WebSocketGuestRateBuckets =
     new Map();
@@ -240,6 +266,10 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       }
       this.httpLeases =
         (await this.ctx.storage.get<HttpLeases>(HTTP_LEASES_KEY)) ?? {};
+      this.httpLeaveTombstones =
+        (await this.ctx.storage.get<HttpLeaveTombstones>(
+          HTTP_LEAVE_TOMBSTONES_KEY,
+        )) ?? {};
       this.httpRateBuckets =
         (await this.ctx.storage.get<HttpRateBuckets>(HTTP_RATE_BUCKETS_KEY)) ??
         {};
@@ -306,6 +336,10 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       return this.httpError("protocol.invalid_message");
     }
     const now = Date.now();
+    this.pruneExpiredHttpLeaveTombstones(now);
+    if (this.hasHttpLeaveTombstone(guestId, value.connectionId, now)) {
+      return this.httpError("room.connection_required");
+    }
     const admission = await this.admitActivity({
       transport: "http_sync",
       guestId,
@@ -324,19 +358,23 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
           : "room.capacity_unavailable",
       );
     }
-    const prunedExpiredLeases = await this.pruneExpiredHttpLeases(now);
+    const prunedExpiredLeases = await this.pruneExpiredHttpLeases(now, false);
     const wasOnline = this.isGuestOnline(guestId, now);
     const existing = this.httpLeases[value.connectionId];
     if (existing !== undefined && existing.guestId !== guestId) {
+      if (prunedExpiredLeases.changed) await this.persistHttpLeases();
       return this.httpError("room.connection_conflict");
     }
     let room = this.room;
     let snapshotChanged =
-      prunedExpiredLeases || (existing === undefined && !wasOnline);
+      prunedExpiredLeases.visibleChange || (existing === undefined && !wasOnline);
     let snapshotAlreadyAdvanced = false;
     if (existing === undefined) {
       const rules = getGameRules(room.ruleSetId);
-      if (rules === null) return this.httpError("room.rule_mismatch");
+      if (rules === null) {
+        if (prunedExpiredLeases.changed) await this.persistHttpLeases();
+        return this.httpError("room.rule_mismatch");
+      }
       const joined = joinRoom(
         room,
         guestId,
@@ -345,6 +383,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         crypto.randomUUID(),
       );
       if (!joined.ok && joined.code !== "room.full") {
+        if (prunedExpiredLeases.changed) await this.persistHttpLeases();
         return this.httpError(joined.code);
       }
       const admittedRoom = joined.ok ? joined.room : room;
@@ -358,6 +397,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
             MAX_SPECTATOR_CONNECTIONS_PER_ROOM
           : connectionCounts.players >= MAX_PLAYER_CONNECTIONS_PER_ROOM)
       ) {
+        if (prunedExpiredLeases.changed) await this.persistHttpLeases();
         return this.httpError("room.too_many_connections");
       }
       room = admittedRoom;
@@ -387,8 +427,8 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         ? now
         : existing?.lastPersistedAt,
     };
-    if (shouldPersistLease) {
-      await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    if (shouldPersistLease || prunedExpiredLeases.changed) {
+      await this.persistHttpLeases();
       if (seat === null) {
         if (this.hasLivePlayers(now)) await this.scheduleNextAlarm(now);
         else await this.markVacant(now);
@@ -419,13 +459,17 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     if (!isHttpCommandEnvelope(value)) {
       return this.httpError("protocol.invalid_message");
     }
+    const now = Date.now();
+    this.pruneExpiredHttpLeaveTombstones(now);
+    if (this.hasHttpLeaveTombstone(guestId, value.connectionId, now)) {
+      return this.httpError("room.connection_required", guestId);
+    }
     const command = parseClientCommand(value.command);
     if (command === null || command.type === "leave") {
       return this.httpError("protocol.invalid_message");
     }
     const actionId =
       command.type === "game_action" ? command.actionId : undefined;
-    const now = Date.now();
     const admission = await this.admitActivity({
       transport: "http_command",
       guestId,
@@ -509,12 +553,30 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     if (!isHttpConnectionEnvelope(value)) {
       return this.httpError("protocol.invalid_message");
     }
+    const now = Date.now();
+    this.pruneExpiredHttpLeaveTombstones(now);
+    if (this.hasHttpLeaveTombstone(guestId, value.connectionId, now)) {
+      const acknowledgement: LeftMessage = {
+        v: PROTOCOL_VERSION,
+        type: "left",
+      };
+      return Response.json(acknowledgement);
+    }
+    if (this.room === null || this.discarding) {
+      const acknowledgement: LeftMessage = {
+        v: PROTOCOL_VERSION,
+        type: "left",
+      };
+      return Response.json(acknowledgement);
+    }
     const lease = this.httpLeases[value.connectionId];
     const ownsLease = lease !== undefined && lease.guestId === guestId;
     // A pagehide beacon for a connection that never successfully synced must
     // be harmless. In particular, do not activate a provisional or legacy
     // Room merely because a cleanup request arrived first.
     if (!ownsLease) {
+      await this.closeHttpConnectionScope(guestId, value.connectionId, now);
+      await this.scheduleNextAlarm(now);
       const acknowledgement: LeftMessage = {
         v: PROTOCOL_VERSION,
         type: "left",
@@ -535,24 +597,28 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       }
     }
     const wasPlayer = lease.seat !== null;
-    const now = Date.now();
-    const wasOnline = this.isGuestOnline(guestId, now);
-    delete this.httpLeases[value.connectionId];
-    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    const leaveAt = Date.now();
+    const wasOnline = this.isGuestOnline(guestId, leaveAt);
+    await this.closeHttpConnectionScope(
+      guestId,
+      value.connectionId,
+      leaveAt,
+    );
     if (this.room !== null) {
       const displayNamesChanged =
-        await this.pruneOfflineSpectatorDisplayNames(now);
-      const hasPlayers = this.hasLivePlayers(now);
+        await this.pruneOfflineSpectatorDisplayNames(leaveAt);
+      const hasPlayers = this.hasLivePlayers(leaveAt);
       if (!hasPlayers && wasPlayer) {
         await this.discardRoom();
       } else if (hasPlayers) {
         await this.markOccupied();
       } else {
-        await this.markVacant(now);
+        await this.markVacant(leaveAt);
       }
       if (
         this.room !== null &&
-        (displayNamesChanged || wasOnline !== this.isGuestOnline(guestId, now))
+        (displayNamesChanged ||
+          wasOnline !== this.isGuestOnline(guestId, leaveAt))
       ) {
         await this.markSnapshotChanged();
         this.broadcastSnapshots();
@@ -638,11 +704,16 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     return admission;
   }
 
-  private async pruneExpiredHttpLeases(now: number): Promise<boolean> {
+  private async pruneExpiredHttpLeases(
+    now: number,
+    persist = true,
+  ): Promise<HttpLeasePruneResult> {
     const expiredConnectionIds = Object.entries(this.httpLeases)
       .filter(([, lease]) => lease.expiresAt <= now)
       .map(([connectionId]) => connectionId);
-    if (expiredConnectionIds.length === 0) return false;
+    if (expiredConnectionIds.length === 0) {
+      return { changed: false, visibleChange: false };
+    }
     const expiredGuestIds = new Set(
       expiredConnectionIds.map(
         (connectionId) => this.httpLeases[connectionId]!.guestId,
@@ -655,12 +726,106 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     for (const connectionId of expiredConnectionIds) {
       delete this.httpLeases[connectionId];
     }
-    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
+    if (persist) await this.persistHttpLeases();
     await this.pruneOfflineSpectatorDisplayNames(now);
     const onlineAfter = this.onlineGuestIds(now);
-    return [...expiredGuestIds].some(
-      (guestId) => onlineBefore.has(guestId) !== onlineAfter.has(guestId),
+    return {
+      changed: true,
+      visibleChange: [...expiredGuestIds].some(
+        (guestId) => onlineBefore.has(guestId) !== onlineAfter.has(guestId),
+      ),
+    };
+  }
+
+  private pruneExpiredHttpLeaveTombstones(now: number): boolean {
+    let changed = false;
+    for (const [key, expiresAt] of Object.entries(
+      this.httpLeaveTombstones,
+    )) {
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+        delete this.httpLeaveTombstones[key];
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private hasHttpLeaveTombstone(
+    guestId: string,
+    connectionId: string,
+    now: number,
+  ): boolean {
+    const expiresAt =
+      this.httpLeaveTombstones[httpLeaveTombstoneKey(guestId, connectionId)];
+    return typeof expiresAt === "number" && expiresAt > now;
+  }
+
+  private nextHttpLeaveTombstoneExpiry(now: number): number | null {
+    let next: number | null = null;
+    for (const expiresAt of Object.values(this.httpLeaveTombstones)) {
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) continue;
+      if (next === null || expiresAt < next) next = expiresAt;
+    }
+    return next;
+  }
+
+  private async persistHttpLeaveTombstones(): Promise<void> {
+    await this.ctx.storage.put(
+      HTTP_LEAVE_TOMBSTONES_KEY,
+      this.httpLeaveTombstones,
     );
+  }
+
+  /**
+   * Atomically closes one browser connection scope and fences requests that
+   * were already in flight when Leave was sent. The composite tombstone key
+   * deliberately leaves other tabs and other Guests untouched.
+   */
+  private async closeHttpConnectionScope(
+    guestId: string,
+    connectionId: string,
+    now: number,
+  ): Promise<void> {
+    this.pruneExpiredHttpLeaveTombstones(now);
+    const tombstoneKey = httpLeaveTombstoneKey(guestId, connectionId);
+    const existingTombstone = this.httpLeaveTombstones[tombstoneKey] ?? 0;
+    const nextTombstones: HttpLeaveTombstones = {
+      ...this.httpLeaveTombstones,
+      [tombstoneKey]: Math.max(
+        existingTombstone,
+        now + HTTP_LEAVE_TOMBSTONE_MS,
+      ),
+    };
+    if (
+      existingTombstone <= now &&
+      Object.keys(nextTombstones).length > MAX_HTTP_LEAVE_TOMBSTONES
+    ) {
+      const oldestKey = Object.entries(nextTombstones).reduce(
+        (oldest, [candidateKey, expiresAt]) =>
+          expiresAt < oldest[1] ? [candidateKey, expiresAt] : oldest,
+        ["", Number.POSITIVE_INFINITY] as [string, number],
+      )[0];
+      if (oldestKey !== "") delete nextTombstones[oldestKey];
+    }
+    const lease = this.httpLeases[connectionId];
+    const nextHttpLeases = { ...this.httpLeases };
+    if (lease !== undefined && lease.guestId === guestId) {
+      delete nextHttpLeases[connectionId];
+    }
+    await this.ctx.storage.transaction(async (transaction) => {
+      if (lease !== undefined && lease.guestId === guestId) {
+        await transaction.put(HTTP_LEASES_KEY, nextHttpLeases);
+      }
+      await transaction.put(HTTP_LEAVE_TOMBSTONES_KEY, nextTombstones);
+    });
+    if (lease !== undefined && lease.guestId === guestId) {
+      this.httpLeases = nextHttpLeases;
+    }
+    this.httpLeaveTombstones = nextTombstones;
+  }
+
+  private async persistHttpLeases(): Promise<void> {
+    await this.ctx.storage.put(HTTP_LEASES_KEY, this.httpLeases);
   }
 
   private httpError(
@@ -733,6 +898,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     }
     const rules = getGameRules(payload.ruleSetId)!;
     const now = Date.now();
+    this.pruneExpiredHttpLeaveTombstones(now);
     const room = createRoom({
       roomId: payload.roomId,
       creatorGuestId: guestId,
@@ -752,9 +918,15 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         await transaction.put(CAPACITY_LEASE_ID_KEY, this.capacityLeaseId);
         await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
         await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
-        await transaction.setAlarm(
-          Math.min(room.expiresAt, now + ROOM_PROVISIONAL_LEASE_MS),
+        const leaveTombstoneExpiry = this.nextHttpLeaveTombstoneExpiry(now);
+        const initialAlarm = Math.min(
+          room.expiresAt,
+          now + ROOM_PROVISIONAL_LEASE_MS,
+          leaveTombstoneExpiry ?? Number.POSITIVE_INFINITY,
         );
+        if ((await transaction.getAlarm()) !== initialAlarm) {
+          await transaction.setAlarm(initialAlarm);
+        }
       });
       this.room = room;
     } catch {
@@ -819,6 +991,10 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     // string as a journal key.
     const actionScope = requestedConnectionId;
     const now = Date.now();
+    this.pruneExpiredHttpLeaveTombstones(now);
+    if (this.hasHttpLeaveTombstone(guestId, actionScope, now)) {
+      return this.rejectedSocket("room.connection_required");
+    }
     const admission = await this.admitActivity({
       transport: "websocket_connect",
       guestId,
@@ -893,7 +1069,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     }
     if (
       !shouldAdvanceSnapshot &&
-      (displayNameChanged || !wasOnline || expiredLeasesPruned)
+      (displayNameChanged || !wasOnline || expiredLeasesPruned.visibleChange)
     ) {
       await this.markSnapshotChanged();
     }
@@ -902,7 +1078,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       shouldAdvanceSnapshot ||
       displayNameChanged ||
       !wasOnline ||
-      expiredLeasesPruned
+      expiredLeasesPruned.visibleChange
     ) {
       this.broadcastSnapshots(server);
     }
@@ -958,11 +1134,26 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       socket.close(1008, "Missing connection scope");
       return;
     }
+    const now = Date.now();
+    this.pruneExpiredHttpLeaveTombstones(now);
+    if (
+      this.hasHttpLeaveTombstone(
+        attachment.guestId,
+        attachment.actionScope,
+        now,
+      )
+    ) {
+      if (socket.readyState === WebSocket.OPEN) {
+        this.sendError(socket, "room.connection_required");
+        socket.close(1008, "Connection scope closed");
+      }
+      return;
+    }
     const admission = await this.admitActivity({
       transport: "websocket_message",
       guestId: attachment.guestId,
       socketSeat: attachment.seat,
-      now: Date.now(),
+      now,
       retireExpired: false,
     });
     if (!admission.ok) {
@@ -1070,13 +1261,16 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
   }
 
   private async handleAlarm(): Promise<void> {
+    const now = Date.now();
+    if (this.pruneExpiredHttpLeaveTombstones(now)) {
+      await this.persistHttpLeaveTombstones();
+    }
     if (this.pendingCapacityRelease !== null) {
       await this.retryPendingCapacityRelease();
       return;
     }
     if (this.room === null || this.discarding) return;
     if (this.capacityPhase !== "active") {
-      const now = Date.now();
       if (
         this.capacityPhase === "provisioning" &&
         this.capacityProvisioningSince !== null &&
@@ -1095,7 +1289,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
           return;
         }
         if (now < provisionalExpiresAt) {
-          await this.ctx.storage.setAlarm(provisionalExpiresAt);
+          await this.setAlarmIfChanged(provisionalExpiresAt);
           return;
         }
         await this.discardRoom();
@@ -1104,7 +1298,6 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       const capacityAdmission = await this.ensureRoomCapacity();
       if (capacityAdmission !== "ready") return;
     }
-    const now = Date.now();
     if (now >= this.room.expiresAt) {
       await this.discardRoom();
       return;
@@ -1117,10 +1310,10 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       .reduce(
         (latest, [, lease]) => Math.max(latest, lease.lastSeenAt),
         0,
-      );
+    );
     if (expiredLeases.length > 0) {
-      const visibleChange = await this.pruneExpiredHttpLeases(now);
-      if (visibleChange) {
+      const pruneResult = await this.pruneExpiredHttpLeases(now);
+      if (pruneResult.visibleChange) {
         await this.markSnapshotChanged();
         this.broadcastSnapshots();
       }
@@ -1170,14 +1363,20 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         await transaction.delete([...RETIRED_ROOM_STATE_KEYS]);
         if (pendingRelease === null) {
           await transaction.delete(PENDING_CAPACITY_RELEASE_KEY);
-          await transaction.deleteAlarm();
+          if ((await transaction.getAlarm()) !== null) {
+            await transaction.deleteAlarm();
+          }
         } else {
           await transaction.put(PENDING_CAPACITY_RELEASE_KEY, pendingRelease);
-          await transaction.setAlarm(Date.now() + CAPACITY_RELEASE_RETRY_MS);
+          const retryAlarm = Date.now() + CAPACITY_RELEASE_RETRY_MS;
+          if ((await transaction.getAlarm()) !== retryAlarm) {
+            await transaction.setAlarm(retryAlarm);
+          }
         }
       });
       this.room = null;
       this.httpLeases = {};
+      this.httpLeaveTombstones = {};
       this.httpRateBuckets = {};
       this.websocketGuestRateBuckets.clear();
       this.displayNames = {};
@@ -1204,13 +1403,15 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     try {
       await this.roomDirectory().release(pending.roomId, pending.leaseId);
     } catch {
-      await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RELEASE_RETRY_MS);
+      await this.setAlarmIfChanged(Date.now() + CAPACITY_RELEASE_RETRY_MS);
       return;
     }
 
     await this.ctx.storage.transaction(async (transaction) => {
       await transaction.delete(PENDING_CAPACITY_RELEASE_KEY);
-      await transaction.deleteAlarm();
+      if ((await transaction.getAlarm()) !== null) {
+        await transaction.deleteAlarm();
+      }
     });
     if (
       this.pendingCapacityRelease?.roomId === pending.roomId &&
@@ -1252,6 +1453,13 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
       type: "left",
     };
     const now = Date.now();
+    if (attachment.actionScope !== undefined) {
+      await this.closeHttpConnectionScope(
+        attachment.guestId,
+        attachment.actionScope,
+        now,
+      );
+    }
     const hasOtherPlayers = this.hasLivePlayers(now, socket);
     if (!hasOtherPlayers && attachment.seat !== null) {
       // The client treats `left` as the point at which it may immediately
@@ -1496,17 +1704,18 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
     leaseId: string,
     now: number,
   ): Promise<void> {
-    const existingAlarm = await this.ctx.storage.getAlarm();
     await this.ctx.storage.transaction(async (transaction) => {
       await transaction.put(CAPACITY_LEASE_ID_KEY, leaseId);
       await transaction.put(CAPACITY_PHASE_KEY, "provisioning");
       await transaction.put(CAPACITY_PROVISIONING_SINCE_KEY, now);
-      await transaction.setAlarm(
-        Math.min(
-          existingAlarm ?? Number.POSITIVE_INFINITY,
-          now + CAPACITY_RECONCILE_MS,
-        ),
+      const existingAlarm = await transaction.getAlarm();
+      const reconcileAlarm = Math.min(
+        existingAlarm ?? Number.POSITIVE_INFINITY,
+        now + CAPACITY_RECONCILE_MS,
       );
+      if (existingAlarm !== reconcileAlarm) {
+        await transaction.setAlarm(reconcileAlarm);
+      }
     });
     this.capacityLeaseId = leaseId;
     this.capacityPhase = "provisioning";
@@ -1534,7 +1743,7 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
 
   private async scheduleCapacityReconciliation(): Promise<void> {
     if (this.room === null || this.discarding) return;
-    await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RELEASE_RETRY_MS);
+    await this.setAlarmIfChanged(Date.now() + CAPACITY_RELEASE_RETRY_MS);
   }
 
   private roomDirectory(): DurableObjectStub<RoomDirectory> {
@@ -1603,12 +1812,15 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
 
   private async markOccupied(): Promise<void> {
     if (this.room === null || this.discarding) return;
-    await this.ctx.storage.delete(VACANT_SINCE_KEY);
+    if ((await this.ctx.storage.get<number>(VACANT_SINCE_KEY)) !== undefined) {
+      await this.ctx.storage.delete(VACANT_SINCE_KEY);
+    }
     await this.scheduleNextAlarm();
   }
 
   private async scheduleNextAlarm(now = Date.now()): Promise<void> {
     if (this.room === null || this.discarding) return;
+    this.pruneExpiredHttpLeaveTombstones(now);
     const candidates = [this.room.expiresAt];
     const leaseExpiries = this.activeHttpLeases(now).map(
       (lease) => lease.expiresAt,
@@ -1633,7 +1845,27 @@ export class GameRoom extends DurableObject<GameRoomEnv> {
         this.capacityProvisioningSince + ROOM_PROVISIONAL_LEASE_MS,
       );
     }
-    await this.ctx.storage.setAlarm(Math.min(...candidates));
+    const leaveTombstoneExpiry = this.nextHttpLeaveTombstoneExpiry(now);
+    if (leaveTombstoneExpiry !== null) {
+      candidates.push(leaveTombstoneExpiry);
+    }
+    await this.setAlarmIfChanged(Math.min(...candidates));
+  }
+
+  /**
+   * Alarm writes are durable-object mutations. Most room events recalculate
+   * the same plan, so avoid rewriting it unless the effective deadline moved.
+   * Reading the current alarm keeps this safe across hibernation and tests
+   * that seed storage directly.
+   */
+  private async setAlarmIfChanged(nextAlarm: number | null): Promise<void> {
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (currentAlarm === nextAlarm) return;
+    if (nextAlarm === null) {
+      await this.ctx.storage.deleteAlarm();
+    } else {
+      await this.ctx.storage.setAlarm(nextAlarm);
+    }
   }
 
   private async withRoomEventLock<T>(operation: () => Promise<T>): Promise<T> {

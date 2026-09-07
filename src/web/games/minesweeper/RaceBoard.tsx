@@ -4,13 +4,13 @@ import {
   readPublicRacePosition,
   type PublicMinesweeperRaceData,
 } from "../../../games/minesweeper/race-rules";
-import { getMinesweeperRuleSetId } from "../../../games/minesweeper/presets";
 import type {
   PublicMinefieldCell,
   PublicMinefieldView,
 } from "../../../games/minesweeper/public-view";
 import type { GameAdapter, GameRendererProps } from "../registry";
 import { MinesweeperBoard } from "./Board";
+import { minesweeperRacePresentations } from "./presentation";
 
 const EMPTY_PENDING_CELLS: ReadonlySet<string> = new Set<string>();
 const RACE_SEATS = ["seat-a", "seat-b"] as const;
@@ -252,69 +252,8 @@ export function MinesweeperRaceBoard({
   );
 }
 
-function adapter(
-  ruleSetId: string,
-  displayName: string,
-  landingDescription: string,
-): GameAdapter {
-  return {
-    gameType: "minesweeper",
-    ruleSetId,
-    displayName,
-    createRoomLabel: displayName,
-    landingDescription,
-    Renderer: MinesweeperRaceBoard,
-    getSeatPresentations() {
-      return {
-        "seat-a": { label: "玩家 A", swatchClassName: "minesweeper-a" },
-        "seat-b": { label: "玩家 B", swatchClassName: "minesweeper-b" },
-      };
-    },
-    getErrorMessage(code) {
-      return ERROR_MESSAGES[code] ?? null;
-    },
-    getStatusMessage(position, selfSeat) {
-      const data = readPublicRacePosition(position);
-      if (position.outcome !== null) return "本局已结束";
-      if (selfSeat === null) return "正在观战扫雷竞速";
-      if (data.phase === "waiting_ready") return "等待双方准备";
-      if (data.phase === "countdown") return "竞速即将开始";
-      if (data.phase === "playing") return "扫雷竞速进行中";
-      return "本局已结束";
-    },
-    getOutcomeMessage(outcome, viewer) {
-      if (outcome.kind === "draw") return "本局和局";
-      if (viewer.selfSeat === null) {
-        return viewer.winnerDisplayName === null
-          ? "扫雷竞速已经结束"
-          : `${viewer.winnerDisplayName}赢得竞速`;
-      }
-      const won = outcome.winner === viewer.selfSeat;
-      if (outcome.reason === "opponent_hit_mine") {
-        return won ? "对手踩雷，你赢了" : "你踩到雷，对手获胜";
-      }
-      if (outcome.reason === "race_completed") {
-        return won ? "你先完成，赢得竞速" : "对手先完成";
-      }
-      return won ? "你赢了" : "对手获胜";
-    },
-  };
-}
-
 export const minesweeperRaceAdapters = [
-  adapter(
-    getMinesweeperRuleSetId("race", "small"),
-    "双人扫雷竞速 · 小型",
-    "9×9 · 10 雷 · 同图独立竞速",
-  ),
-  adapter(
-    getMinesweeperRuleSetId("race", "medium"),
-    "双人扫雷竞速 · 中型",
-    "16×16 · 40 雷 · 同图独立竞速",
-  ),
-  adapter(
-    getMinesweeperRuleSetId("race", "large"),
-    "双人扫雷竞速 · 大型",
-    "30×16 · 99 雷 · 桌面完整显示",
-  ),
-] as const;
+  { ...minesweeperRacePresentations[0], Renderer: MinesweeperRaceBoard },
+  { ...minesweeperRacePresentations[1], Renderer: MinesweeperRaceBoard },
+  { ...minesweeperRacePresentations[2], Renderer: MinesweeperRaceBoard },
+] as const satisfies readonly GameAdapter[];

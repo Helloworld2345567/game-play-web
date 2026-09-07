@@ -30,6 +30,26 @@ export interface HttpRequestOptions {
   signal?: AbortSignal;
 }
 
+/** A request can stop waiting without cancelling a shared identity bootstrap. */
+function awaitRequest<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return operation();
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    const finish = () => signal.removeEventListener("abort", abort);
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      void operation().then(
+        (result) => { finish(); resolve(result); },
+        (error: unknown) => { finish(); reject(error); },
+      );
+    } catch (error) {
+      finish();
+      reject(error);
+    }
+  });
+}
+
 /**
  * HTTPS fallback adapter.  It owns request envelopes, session refresh on 401,
  * timeout/abort bookkeeping, protocol parsing, and the 204 heartbeat path.
@@ -110,7 +130,7 @@ export class HttpPollingTransport {
       if (controller !== null) {
         this.controllers.add(controller);
         timeout = setTimeout(
-          () => controller.abort(),
+          () => controller.abort(new DOMException("Room request timed out", "TimeoutError")),
           this.requestTimeoutMs,
         );
       }
@@ -119,11 +139,12 @@ export class HttpPollingTransport {
       if (signal?.aborted) abortFromCaller();
       else signal?.addEventListener("abort", abortFromCaller, { once: true });
       try {
-        await this.ensureSession(controller?.signal);
+        const requestSignal = controller?.signal;
+        await awaitRequest(() => this.ensureSession(requestSignal), requestSignal);
         const sinceSnapshotRevision = operation === "sync"
           ? this.getSnapshotRevision()
           : undefined;
-        const response = await this.fetchImpl(
+        const response = await awaitRequest(() => this.fetchImpl(
           this.url(operation),
           {
             method: "POST",
@@ -143,7 +164,7 @@ export class HttpPollingTransport {
             keepalive,
             ...(controller === null ? {} : { signal: controller.signal }),
           },
-        );
+        ), requestSignal);
 
         // A 204 means that the requested snapshot revision is still current.
         // It is deliberately not projected as a snapshot: pending actions
@@ -152,8 +173,9 @@ export class HttpPollingTransport {
 
         let raw: unknown = null;
         try {
-          raw = await response.json();
+          raw = await awaitRequest(() => response.json(), requestSignal);
         } catch {
+          if (requestSignal?.aborted) throw requestSignal.reason;
           if (response.ok) throw new HttpProtocolError();
         }
         if (response.status === 401 && sessionAttempt === 0) {

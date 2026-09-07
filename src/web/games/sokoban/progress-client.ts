@@ -7,7 +7,7 @@ import {
   type SokobanProgressSnapshot,
 } from "../../../shared/sokoban-progress";
 import { ensureBrowserSession } from "../../room-client";
-import { fetchWithRetry } from "../../api-request";
+import { requestJsonWithRetry } from "../../api-request";
 
 /**
  * A progress write can be rejected when the signed anonymous session rotated
@@ -121,7 +121,7 @@ async function requestProgress(
   keepalive = false,
 ): Promise<SokobanProgressSnapshot> {
   await ensureBrowserSession(displayName, signal);
-  const response = await fetchWithRetry(path, {
+  const { response, data } = await requestJsonWithRetry<unknown>(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -135,12 +135,12 @@ async function requestProgress(
   }, {
     // The page-level progress outbox deliberately exposes HTTP failures and
     // schedules its own visible retry. Transport failures are still retried
-    // once by fetchWithRetry, but an immediate HTTP retry would hide the
+    // once by requestJsonWithRetry, but an immediate HTTP retry would hide the
     // pending/offline state and race that outbox.
     shouldRetryResponse: () => false,
   });
   if (!response.ok) throw new SokobanProgressRequestError(response.status);
-  return parseProgress(await response.json());
+  return parseProgress(data);
 }
 
 export function loadSokobanProgress(
