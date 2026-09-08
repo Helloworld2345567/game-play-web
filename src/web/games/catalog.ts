@@ -135,13 +135,6 @@ export const clientGameRegistrations: readonly ClientGameRegistration[] = [
     loadPage: () => import("./sokoban/SoloPage").then(({ SoloPage }) => SoloPage),
   },
   {
-    gameId: "tank-battle",
-    adapters: [],
-    rendererLoaders: [],
-    loadPage: () =>
-      import("./tank-battle/SoloPage").then(({ SoloPage }) => SoloPage),
-  },
-  {
     gameId: "stack-game",
     adapters: [],
     rendererLoaders: [],

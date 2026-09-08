@@ -158,15 +158,6 @@ export const GAME_MANIFESTS = [
     creatableRuleSetIds: [],
   },
   {
-    gameId: "tank-battle",
-    title: "坦克大战",
-    description: "13×13 · 单人对战 · 驾驶坦克消灭敌军",
-    creationPolicy: "enabled",
-    launchKind: "local-game",
-    ruleSetIds: ["tank-battle.solo.13x13.v1"],
-    creatableRuleSetIds: [],
-  },
-  {
     gameId: "stack-game",
     title: "叠叠高",
     description: "3D 精准堆叠 · 本地最高分",

@@ -28,7 +28,6 @@ describe("landing game catalog", () => {
       "2048",
       "snake",
       "sokoban",
-      "tank-battle",
       "stack-game",
       "sliding-puzzle",
     ]);
@@ -55,7 +54,6 @@ describe("landing game catalog", () => {
       "2048",
       "snake",
       "sokoban",
-      "tank-battle",
       "stack-game",
       "sliding-puzzle",
     ]);
@@ -160,8 +158,8 @@ describe("landing game catalog", () => {
     expect(localGameIdFromPath("/snake/")).toBe("snake");
     expect(localGameIdFromPath("/sokoban")).toBe("sokoban");
     expect(localGameIdFromPath("/sokoban/")).toBe("sokoban");
-    expect(localGameIdFromPath("/tank-battle")).toBe("tank-battle");
-    expect(localGameIdFromPath("/tank-battle/")).toBe("tank-battle");
+    expect(localGameIdFromPath("/tank-battle")).toBeNull();
+    expect(localGameIdFromPath("/tank-battle/")).toBeNull();
     expect(localGameIdFromPath("/stack-game")).toBe("stack-game");
     expect(localGameIdFromPath("/stack-game/")).toBe("stack-game");
     expect(localGameIdFromPath("/sliding-puzzle")).toBe("sliding-puzzle");
