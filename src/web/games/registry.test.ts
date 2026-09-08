@@ -189,6 +189,19 @@ describe("game outcome presentation", () => {
     ).toBeNull();
   });
 
+  it("allowlists the local Sliding Puzzle page without a room renderer", async () => {
+    const loader = getClientGamePageLoader("sliding-puzzle");
+    expect(loader).toBeTypeOf("function");
+    expect(getClientGameCatalogEntry("sliding-puzzle")?.loadPage).toBe(loader);
+    await expect(loader?.()).resolves.toBeTypeOf("function");
+    expect(
+      getClientGameRendererLoader(
+        "sliding-puzzle",
+        "sliding-puzzle.solo.3x3.v1",
+      ),
+    ).toBeNull();
+  });
+
   it("exposes allowlisted renderer loading through every catalog entry", () => {
     expect(
       clientGameCatalog.every(

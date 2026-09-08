@@ -150,6 +150,25 @@ describe("game manifest", () => {
     expect(isManifestRuleSet("stack-game", "stack-game.solo.v2")).toBe(false);
   });
 
+  it("exposes Sliding Puzzle as a local image puzzle", () => {
+    expect(getGameManifest("sliding-puzzle")).toMatchObject({
+      gameId: "sliding-puzzle",
+      title: "拼图",
+      description: "3×3 · 图片滑块 · 个人最佳步数",
+      creationPolicy: "enabled",
+      launchKind: "local-game",
+      ruleSetIds: ["sliding-puzzle.solo.3x3.v1"],
+      creatableRuleSetIds: [],
+    });
+    expect(
+      isManifestRuleSet("sliding-puzzle", "sliding-puzzle.solo.3x3.v1"),
+    ).toBe(true);
+    expect(
+      isCreatableManifestRuleSet("sliding-puzzle", "sliding-puzzle.solo.3x3.v1"),
+    ).toBe(false);
+    expect(isManifestRuleSet("sliding-puzzle", "sliding-puzzle.solo.3x3.v2")).toBe(false);
+  });
+
   it("exposes one police-chase family with all three map rule sets", () => {
     const manifest = getGameManifest("chase");
     expect(manifest).toMatchObject({

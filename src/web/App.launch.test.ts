@@ -30,6 +30,7 @@ describe("landing game catalog", () => {
       "sokoban",
       "tank-battle",
       "stack-game",
+      "sliding-puzzle",
     ]);
     expect(
       clientGameRegistrations
@@ -56,6 +57,7 @@ describe("landing game catalog", () => {
       "sokoban",
       "tank-battle",
       "stack-game",
+      "sliding-puzzle",
     ]);
     expect(
       LANDING_GAME_CATALOG.filter((entry) => entry.launch.kind === "picker").map(
@@ -72,6 +74,9 @@ describe("landing game catalog", () => {
     expect(
       LANDING_GAME_CATALOG.find((entry) => entry.id === "stack-game")?.launch,
     ).toEqual({ kind: "navigate", href: "/stack-game" });
+    expect(
+      LANDING_GAME_CATALOG.find((entry) => entry.id === "sliding-puzzle")?.launch,
+    ).toEqual({ kind: "navigate", href: "/sliding-puzzle" });
   });
 
   it.each([2, 3, 4] as const)(
@@ -159,6 +164,8 @@ describe("landing game catalog", () => {
     expect(localGameIdFromPath("/tank-battle/")).toBe("tank-battle");
     expect(localGameIdFromPath("/stack-game")).toBe("stack-game");
     expect(localGameIdFromPath("/stack-game/")).toBe("stack-game");
+    expect(localGameIdFromPath("/sliding-puzzle")).toBe("sliding-puzzle");
+    expect(localGameIdFromPath("/sliding-puzzle/")).toBe("sliding-puzzle");
     expect(localGameIdFromPath("/minesweeper")).toBe("minesweeper");
     expect(localGameIdFromPath("/chinese-checkers")).toBeNull();
     expect(localGameIdFromPath("/chinese-checkers/")).toBeNull();

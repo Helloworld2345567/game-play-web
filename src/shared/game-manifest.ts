@@ -175,6 +175,15 @@ export const GAME_MANIFESTS = [
     ruleSetIds: ["stack-game.solo.v1"],
     creatableRuleSetIds: [],
   },
+  {
+    gameId: "sliding-puzzle",
+    title: "拼图",
+    description: "3×3 · 图片滑块 · 个人最佳步数",
+    creationPolicy: "enabled",
+    launchKind: "local-game",
+    ruleSetIds: ["sliding-puzzle.solo.3x3.v1"],
+    creatableRuleSetIds: [],
+  },
 ] as const satisfies readonly GameManifest[];
 
 export type GameId = (typeof GAME_MANIFESTS)[number]["gameId"];

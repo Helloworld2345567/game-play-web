@@ -148,6 +148,13 @@ export const clientGameRegistrations: readonly ClientGameRegistration[] = [
     loadPage: () =>
       import("./stack-game/SoloPage").then(({ SoloPage }) => SoloPage),
   },
+  {
+    gameId: "sliding-puzzle",
+    adapters: [],
+    rendererLoaders: [],
+    loadPage: () =>
+      import("./sliding-puzzle/SoloPage").then(({ SoloPage }) => SoloPage),
+  },
 ] as const;
 
 const registrationsByGameId = new Map<string, ClientGameRegistration>(
